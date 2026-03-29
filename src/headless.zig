@@ -190,19 +190,35 @@ pub const HeadlessRuntime = struct {
         self.cmd_start_ms = types.timestampMs();
         self.emitCommandStarted(group_id, input);
 
-        // Parse → Expand → Plan through xyron's full pipeline
+        // Parse → Expand through xyron's full pipeline
         var pipeline = parser.parse(self.allocator, input) catch {
-            self.sendError(req_id, "parse error");
-            self.emitCommandFinished(group_id, input, 1, 0);
-            self.emitPrompt();
+            // Parse failed — fall back to /bin/sh -c
+            self.spawnCommandPtyRaw(input) catch {
+                self.sendError(req_id, "spawn failed");
+                self.emitCommandFinished(group_id, input, 127, 0);
+                self.emitPrompt();
+                return;
+            };
+            var buf2: [16]u8 = undefined;
+            var w2 = proto.PayloadWriter.init(&buf2);
+            w2.writeInt(req_id);
+            proto.writeFrame(STDOUT, .resp_success, w2.written());
             return;
         };
         defer pipeline.deinit(self.allocator);
 
         var expanded = expand.expandPipeline(self.allocator, &pipeline, &self.env) catch {
-            self.sendError(req_id, "expansion error");
-            self.emitCommandFinished(group_id, input, 1, 0);
-            self.emitPrompt();
+            // Expand failed — fall back to /bin/sh -c
+            self.spawnCommandPtyRaw(input) catch {
+                self.sendError(req_id, "spawn failed");
+                self.emitCommandFinished(group_id, input, 127, 0);
+                self.emitPrompt();
+                return;
+            };
+            var buf2: [16]u8 = undefined;
+            var w2 = proto.PayloadWriter.init(&buf2);
+            w2.writeInt(req_id);
+            proto.writeFrame(STDOUT, .resp_success, w2.written());
             return;
         };
         defer expand.freeExpandedPipeline(self.allocator, &expanded);
@@ -218,9 +234,17 @@ pub const HeadlessRuntime = struct {
 
         // External command: spawn in PTY with expanded argv
         self.spawnCommandPtyArgv(&expanded) catch {
-            self.sendError(req_id, "spawn failed");
-            self.emitCommandFinished(group_id, input, 127, 0);
-            self.emitPrompt();
+            // Fall back to /bin/sh -c
+            self.spawnCommandPtyRaw(input) catch {
+                self.sendError(req_id, "spawn failed");
+                self.emitCommandFinished(group_id, input, 127, 0);
+                self.emitPrompt();
+                return;
+            };
+            var buf2: [16]u8 = undefined;
+            var w2 = proto.PayloadWriter.init(&buf2);
+            w2.writeInt(req_id);
+            proto.writeFrame(STDOUT, .resp_success, w2.written());
             return;
         };
 
@@ -256,7 +280,17 @@ pub const HeadlessRuntime = struct {
         posix.close(out_pipe[0]);
 
         if (out_len > 0) {
-            self.emitOutputChunk("stdout", out_buf[0..out_len]);
+            // Convert bare LF to CRLF — builtins write through a pipe (no PTY
+            // to do the ONLCR translation), but the terminal engine expects CR+LF.
+            var crlf_buf: [65536]u8 = undefined;
+            var crlf_len: usize = 0;
+            for (out_buf[0..out_len]) |byte| {
+                if (byte == '\n' and (crlf_len == 0 or crlf_buf[crlf_len - 1] != '\r')) {
+                    if (crlf_len < crlf_buf.len) { crlf_buf[crlf_len] = '\r'; crlf_len += 1; }
+                }
+                if (crlf_len < crlf_buf.len) { crlf_buf[crlf_len] = byte; crlf_len += 1; }
+            }
+            self.emitOutputChunk("stdout", crlf_buf[0..crlf_len]);
         }
 
         const duration = types.timestampMs() - self.cmd_start_ms;
