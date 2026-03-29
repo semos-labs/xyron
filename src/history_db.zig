@@ -136,6 +136,107 @@ pub const HistoryDb = struct {
         return count;
     }
 
+    // ------------------------------------------------------------------
+    // Structured queries
+    // ------------------------------------------------------------------
+
+    /// Query with filters. Returns entries newest-first.
+    pub fn query(self: *HistoryDb, q: *const HistoryQuery, buf: []HistoryEntry, str_buf: []u8) usize {
+        var db = &(self.db orelse return 0);
+
+        // Build SQL dynamically based on filters
+        var sql_buf: [1024]u8 = undefined;
+        var pos: usize = 0;
+        pos += cp(sql_buf[pos..], "SELECT id, raw_input, cwd, exit_code, duration_ms, started_at FROM commands WHERE 1=1");
+
+        if (q.text_contains.len > 0)
+            pos += cp(sql_buf[pos..], " AND raw_input LIKE ?1");
+        if (q.cwd_filter.len > 0)
+            pos += cp(sql_buf[pos..], " AND cwd = ?2");
+        if (q.only_failed)
+            pos += cp(sql_buf[pos..], " AND exit_code != 0");
+        if (q.only_success)
+            pos += cp(sql_buf[pos..], " AND exit_code = 0");
+        if (q.only_interrupted)
+            pos += cp(sql_buf[pos..], " AND interrupted = 1");
+        if (q.since_ms > 0)
+            pos += cp(sql_buf[pos..], " AND started_at >= ?3");
+        if (q.min_duration_ms > 0)
+            pos += cp(sql_buf[pos..], " AND duration_ms >= ?4");
+
+        pos += cp(sql_buf[pos..], " ORDER BY id DESC LIMIT ?5");
+        sql_buf[pos] = 0;
+
+        var stmt = db.prepare(@ptrCast(sql_buf[0..pos :0])) catch return 0;
+        defer stmt.deinit();
+
+        // Bind parameters
+        if (q.text_contains.len > 0) {
+            var pat_buf: [258]u8 = undefined;
+            pat_buf[0] = '%';
+            const pl = @min(q.text_contains.len, 256);
+            @memcpy(pat_buf[1..][0..pl], q.text_contains[0..pl]);
+            pat_buf[pl + 1] = '%';
+            stmt.bindText(1, pat_buf[0 .. pl + 2]);
+        }
+        if (q.cwd_filter.len > 0) stmt.bindText(2, q.cwd_filter);
+        if (q.since_ms > 0) stmt.bindInt(3, q.since_ms);
+        if (q.min_duration_ms > 0) stmt.bindInt(4, q.min_duration_ms);
+        stmt.bindInt(5, @intCast(q.limit));
+
+        return self.readEntries(&stmt, buf, str_buf);
+    }
+
+    /// Get a single entry by ID.
+    pub fn getById(self: *HistoryDb, id: i64, str_buf: []u8) ?HistoryEntry {
+        var db = &(self.db orelse return null);
+        var stmt = db.prepare(
+            "SELECT id, raw_input, cwd, exit_code, duration_ms, started_at FROM commands WHERE id = ?1",
+        ) catch return null;
+        defer stmt.deinit();
+        stmt.bindInt(1, id);
+
+        var entries: [1]HistoryEntry = undefined;
+        const count = self.readEntries(&stmt, &entries, str_buf);
+        if (count == 0) return null;
+        return entries[0];
+    }
+
+    fn readEntries(self: *HistoryDb, stmt: *sqlite.Stmt, buf: []HistoryEntry, str_buf: []u8) usize {
+        _ = self;
+        var count: usize = 0;
+        var str_pos: usize = 0;
+
+        while (count < buf.len) {
+            const has_row = stmt.step() catch break;
+            if (!has_row) break;
+
+            const raw = stmt.columnText(1) orelse "";
+            const cwd_text = stmt.columnText(2) orelse "";
+
+            const raw_start = str_pos;
+            const raw_len = @min(raw.len, str_buf.len - str_pos);
+            if (raw_len > 0) @memcpy(str_buf[str_pos..][0..raw_len], raw[0..raw_len]);
+            str_pos += raw_len;
+
+            const cwd_start = str_pos;
+            const cwd_len = @min(cwd_text.len, str_buf.len - str_pos);
+            if (cwd_len > 0) @memcpy(str_buf[str_pos..][0..cwd_len], cwd_text[0..cwd_len]);
+            str_pos += cwd_len;
+
+            buf[count] = .{
+                .id = stmt.columnInt(0),
+                .raw_input = str_buf[raw_start..][0..raw_len],
+                .cwd = str_buf[cwd_start..][0..cwd_len],
+                .exit_code = stmt.columnInt(3),
+                .duration_ms = stmt.columnInt(4),
+                .started_at = stmt.columnInt(5),
+            };
+            count += 1;
+        }
+        return count;
+    }
+
     /// Count total entries.
     pub fn totalEntries(self: *HistoryDb) i64 {
         var db = &(self.db orelse return 0);
@@ -144,6 +245,17 @@ pub const HistoryDb = struct {
         _ = stmt.step() catch return 0;
         return stmt.columnInt(0);
     }
+};
+
+pub const HistoryQuery = struct {
+    text_contains: []const u8 = "",
+    cwd_filter: []const u8 = "",
+    only_failed: bool = false,
+    only_success: bool = false,
+    only_interrupted: bool = false,
+    since_ms: i64 = 0,
+    min_duration_ms: i64 = 0,
+    limit: usize = 25,
 };
 
 pub const StepInfo = struct {
@@ -155,6 +267,12 @@ pub const StepInfo = struct {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+fn cp(dest: []u8, src: []const u8) usize {
+    const n = @min(src.len, dest.len);
+    @memcpy(dest[0..n], src[0..n]);
+    return n;
+}
 
 fn openDb(allocator: std.mem.Allocator) !sqlite.Db {
     _ = allocator;

@@ -101,6 +101,7 @@ pub const Shell = struct {
     pub fn run(self: *Shell) !void {
         const stdout = std.fs.File.stdout();
         lua_api.setBlockTable(&self.blocks);
+        lua_api.setHistoryDb(&self.history_db);
         term.enableRawMode() catch {
             try self.runCooked();
             return;
@@ -151,6 +152,13 @@ pub const Shell = struct {
                         var line_copy: [editor_mod.MAX_LINE]u8 = undefined;
                         @memcpy(line_copy[0..line.len], line);
                         self.executeLine(line_copy[0..line.len]);
+
+                        // Check for replay (history rerun)
+                        const hist_cmd = @import("builtins/history.zig");
+                        if (hist_cmd.replay_pending) {
+                            hist_cmd.replay_pending = false;
+                            self.executeLine(hist_cmd.replay_command[0..hist_cmd.replay_len]);
+                        }
                     }
                     ed.clear();
                 },

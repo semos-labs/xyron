@@ -21,14 +21,18 @@ const c_ext = struct {
 };
 const types = @import("types.zig");
 const parser = @import("parser.zig");
+const ast = @import("ast.zig");
 const planner_mod = @import("planner.zig");
 const environ_mod = @import("environ.zig");
 const expand = @import("expand.zig");
+const builtins = @import("builtins/mod.zig");
+const executor = @import("executor.zig");
 const history_db_mod = @import("history_db.zig");
 const history_mod = @import("history.zig");
 const jobs_mod = @import("jobs.zig");
 const lua_api = @import("lua_api.zig");
 const lua_hooks = @import("lua_hooks.zig");
+const lua_commands = @import("lua_commands.zig");
 const attyx_mod = @import("attyx.zig");
 const prompt_mod = @import("prompt.zig");
 
@@ -186,18 +190,94 @@ pub const HeadlessRuntime = struct {
         self.cmd_start_ms = types.timestampMs();
         self.emitCommandStarted(group_id, input);
 
-        // Spawn command in a PTY
-        self.spawnCommandPty(input) catch {
+        // Parse → Expand → Plan through xyron's full pipeline
+        var pipeline = parser.parse(self.allocator, input) catch {
+            self.sendError(req_id, "parse error");
+            self.emitCommandFinished(group_id, input, 1, 0);
+            self.emitPrompt();
+            return;
+        };
+        defer pipeline.deinit(self.allocator);
+
+        var expanded = expand.expandPipeline(self.allocator, &pipeline, &self.env) catch {
+            self.sendError(req_id, "expansion error");
+            self.emitCommandFinished(group_id, input, 1, 0);
+            self.emitPrompt();
+            return;
+        };
+        defer expand.freeExpandedPipeline(self.allocator, &expanded);
+
+        // Check for single builtin command (no pipeline, no background)
+        if (expanded.commands.len == 1 and !expanded.background) {
+            const cmd = &expanded.commands[0];
+            if (cmd.argv.len > 0 and builtins.isBuiltin(cmd.argv[0])) {
+                self.executeBuiltin(req_id, input, group_id, cmd.argv);
+                return;
+            }
+        }
+
+        // External command: spawn in PTY with expanded argv
+        self.spawnCommandPtyArgv(&expanded) catch {
             self.sendError(req_id, "spawn failed");
             self.emitCommandFinished(group_id, input, 127, 0);
             self.emitPrompt();
             return;
         };
 
-        // Ack the request — output streams via evt_output_chunk, finish via evt_command_finished
+        // Ack — output streams via evt_output_chunk, finish via evt_command_finished
         var buf: [16]u8 = undefined;
         var w = proto.PayloadWriter.init(&buf);
         w.writeInt(req_id);
+        proto.writeFrame(STDOUT, .resp_success, w.written());
+    }
+
+    /// Execute a builtin command in-process, capturing output via pipe.
+    fn executeBuiltin(self: *HeadlessRuntime, req_id: i64, input: []const u8, group_id: u64, argv: []const []const u8) void {
+        // Create a pipe to capture builtin stdout
+        const out_pipe = posix.pipe() catch {
+            self.sendError(req_id, "pipe failed");
+            return;
+        };
+        // Create File from write end
+        const write_file = std.fs.File{ .handle = out_pipe[1] };
+        const stderr_file = std.fs.File{ .handle = posix.STDERR_FILENO };
+
+        const result = builtins.execute(argv, write_file, stderr_file, &self.env, &self.history_db, &self.job_table);
+        posix.close(out_pipe[1]); // close write end so read gets EOF
+
+        // Read captured output
+        var out_buf: [32768]u8 = undefined;
+        var out_len: usize = 0;
+        while (out_len < out_buf.len) {
+            const n = posix.read(out_pipe[0], out_buf[out_len..]) catch break;
+            if (n == 0) break;
+            out_len += n;
+        }
+        posix.close(out_pipe[0]);
+
+        if (out_len > 0) {
+            self.emitOutputChunk("stdout", out_buf[0..out_len]);
+        }
+
+        const duration = types.timestampMs() - self.cmd_start_ms;
+        const code = result.exit_code;
+        self.last_exit_code = code;
+
+        lua_hooks.fireCommandFinish(self.lua, 0, input, "", code, duration, types.timestampMs());
+        self.emitCommandFinished(group_id, input, code, duration);
+
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = posix.getcwd(&cwd_buf) catch "";
+        _ = self.history_db.recordCommand(input, cwd, code, duration, types.timestampMs(), false, &.{});
+
+        self.emitPrompt();
+
+        // Respond
+        var buf: [64]u8 = undefined;
+        var w = proto.PayloadWriter.init(&buf);
+        w.writeInt(req_id);
+        w.writeU8(code);
+        w.writeInt(duration);
         proto.writeFrame(STDOUT, .resp_success, w.written());
     }
 
@@ -324,15 +404,46 @@ pub const HeadlessRuntime = struct {
     // PTY-based command execution
     // ------------------------------------------------------------------
 
-    fn spawnCommandPty(self: *HeadlessRuntime, input: []const u8) !void {
-        // Null-terminate input for execvp — input points into frame buffer
+    /// Spawn an external command in a PTY using expanded argv from the planner.
+    fn spawnCommandPtyArgv(self: *HeadlessRuntime, expanded: *const ast.Pipeline) !void {
+        // For pipelines, fall back to /bin/sh -c with the raw input
+        if (expanded.commands.len != 1) {
+            return self.spawnCommandPtyRaw(self.cmd_input_buf[0..self.cmd_input_len]);
+        }
+
+        const cmd = &expanded.commands[0];
+        if (cmd.argv.len == 0) return error.EmptyCommand;
+
+        // Build null-terminated argv array for execvp
+        var argv_buf: [33]?[*:0]const u8 = .{null} ** 33;
+        var argv_z_storage: [32][256]u8 = undefined;
+        const argc = @min(cmd.argv.len, 32);
+        for (0..argc) |i| {
+            const arg = cmd.argv[i];
+            if (arg.len >= 256) return error.ArgTooLong;
+            @memcpy(argv_z_storage[i][0..arg.len], arg);
+            argv_z_storage[i][arg.len] = 0;
+            argv_buf[i] = @ptrCast(&argv_z_storage[i]);
+        }
+        argv_buf[argc] = null;
+
+        return self.spawnPty(@ptrCast(&argv_buf));
+    }
+
+    /// Spawn a command via /bin/sh -c (fallback for pipelines).
+    fn spawnCommandPtyRaw(self: *HeadlessRuntime, input: []const u8) !void {
         var cmd_buf: [4096]u8 = undefined;
         if (input.len >= cmd_buf.len) return error.CommandTooLong;
         @memcpy(cmd_buf[0..input.len], input);
         cmd_buf[input.len] = 0;
         const cmd_z: [*:0]const u8 = @ptrCast(&cmd_buf);
 
-        // Open PTY pair
+        var argv_buf = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z };
+        return self.spawnPty(@ptrCast(&argv_buf));
+    }
+
+    /// Low-level PTY spawn with a null-terminated argv array.
+    fn spawnPty(self: *HeadlessRuntime, argv: [*:null]const ?[*:0]const u8) !void {
         var master: posix.fd_t = undefined;
         var slave: posix.fd_t = undefined;
         if (c_ext.openpty(&master, &slave, null, null, null) != 0)
@@ -347,7 +458,6 @@ pub const HeadlessRuntime = struct {
             _ = c_ext.setsid();
             _ = c_ext.ioctl(slave, TIOCSCTTY, @as(?*anyopaque, null));
 
-            // Redirect stdio to slave
             for ([_]posix.fd_t{ posix.STDIN_FILENO, posix.STDOUT_FILENO, posix.STDERR_FILENO }) |fd| {
                 _ = posix.dup2(slave, fd) catch {};
             }
@@ -356,15 +466,13 @@ pub const HeadlessRuntime = struct {
             _ = c_ext.setenv("TERM", "xterm-256color", 1);
             _ = c_ext.setenv("COLORTERM", "truecolor", 1);
 
-            const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z };
-            _ = c_ext.execvp("/bin/sh", &argv);
+            _ = c_ext.execvp(argv[0].?, argv);
             c_ext._exit(127);
         }
 
         // --- Parent ---
         posix.close(slave);
 
-        // Set non-blocking on master
         const F_GETFL: c_int = 3;
         const F_SETFL: c_int = 4;
         const O_NONBLOCK: c_int = 0x0004;

@@ -46,6 +46,8 @@ pub fn init(env: *environ_mod.Environ, attyx_enabled: bool) LuaState {
     registerFn(L, "prompt", apiPrompt);
     registerFn(L, "vim_mode", apiVimMode);
     registerFn(L, "alias", apiAlias);
+    registerFn(L, "history_query", apiHistoryQuery);
+    registerFn(L, "history_replay", apiHistoryReplay);
     registerFn(L, "last_block", apiLastBlock);
     registerFn(L, "popup", apiPopup);
     registerFn(L, "pick", apiPick);
@@ -215,8 +217,15 @@ fn apiExec(L: ?*c.lua_State) callconv(.c) c_int {
 const aliases = @import("aliases.zig");
 const bridge = @import("attyx_bridge.zig");
 
+const history_db_mod = @import("history_db.zig");
+
 /// Global vim mode flag — set by Lua config, applied to editor when created.
 pub var vim_mode_enabled: bool = false;
+var global_hdb: ?*history_db_mod.HistoryDb = null;
+
+pub fn setHistoryDb(hdb: *history_db_mod.HistoryDb) void {
+    global_hdb = hdb;
+}
 
 /// xyron.vim_mode(enabled) — enable/disable vim mode
 fn apiVimMode(L: ?*c.lua_State) callconv(.c) c_int {
@@ -316,6 +325,85 @@ fn apiLastBlock(L: ?*c.lua_State) callconv(.c) c_int {
     _ = c.lua_pushlstring(state, blk.cwdSlice().ptr, blk.cwd_len);
     c.lua_setfield(state, -2, "cwd");
 
+    return 1;
+}
+
+/// xyron.history_query({text="...", failed=true, limit=N}) -> array of entries
+fn apiHistoryQuery(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    const hdb = global_hdb orelse { c.lua_pushnil(state); return 1; };
+
+    var q = history_db_mod.HistoryQuery{};
+
+    // Parse query table if provided
+    if (c.lua_type(state, 1) == c.LUA_TTABLE) {
+        _ = c.lua_getfield(state, 1, "text");
+        if (c.lua_type(state, -1) == c.LUA_TSTRING) {
+            const s = c.lua_tolstring(state, -1, null);
+            if (s) |str| q.text_contains = std.mem.span(str);
+        }
+        c.lua_settop(state, -(1) - 1);
+
+        _ = c.lua_getfield(state, 1, "cwd");
+        if (c.lua_type(state, -1) == c.LUA_TSTRING) {
+            const s = c.lua_tolstring(state, -1, null);
+            if (s) |str| q.cwd_filter = std.mem.span(str);
+        }
+        c.lua_settop(state, -(1) - 1);
+
+        _ = c.lua_getfield(state, 1, "failed");
+        if (c.lua_toboolean(state, -1) != 0) q.only_failed = true;
+        c.lua_settop(state, -(1) - 1);
+
+        _ = c.lua_getfield(state, 1, "limit");
+        if (c.lua_type(state, -1) == c.LUA_TNUMBER) {
+            const n = c.lua_tointegerx(state, -1, null);
+            if (n > 0) q.limit = @intCast(@min(n, 100));
+        }
+        c.lua_settop(state, -(1) - 1);
+    }
+
+    var entries: [100]history_db_mod.HistoryEntry = undefined;
+    var str_buf: [100 * 256]u8 = undefined;
+    const count = hdb.query(&q, entries[0..q.limit], &str_buf);
+
+    // Return as Lua array of tables
+    c.lua_createtable(state, @intCast(count), 0);
+    for (0..count) |i| {
+        c.lua_createtable(state, 0, 5);
+        c.lua_pushinteger(state, entries[i].id);
+        c.lua_setfield(state, -2, "id");
+        _ = c.lua_pushlstring(state, entries[i].raw_input.ptr, entries[i].raw_input.len);
+        c.lua_setfield(state, -2, "input");
+        c.lua_pushinteger(state, entries[i].exit_code);
+        c.lua_setfield(state, -2, "exit_code");
+        c.lua_pushinteger(state, entries[i].duration_ms);
+        c.lua_setfield(state, -2, "duration_ms");
+        _ = c.lua_pushlstring(state, entries[i].cwd.ptr, entries[i].cwd.len);
+        c.lua_setfield(state, -2, "cwd");
+        c.lua_rawseti(state, -2, @intCast(i + 1));
+    }
+    return 1;
+}
+
+/// xyron.history_replay(id) — schedule replay of a history entry
+fn apiHistoryReplay(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    const hdb = global_hdb orelse { c.lua_pushboolean(state, 0); return 1; };
+    const id = c.lua_tointegerx(state, 1, null);
+
+    var str_buf: [256]u8 = undefined;
+    const entry = hdb.getById(id, &str_buf) orelse {
+        c.lua_pushboolean(state, 0);
+        return 1;
+    };
+
+    const hist_cmd = @import("builtins/history.zig");
+    const n = @min(entry.raw_input.len, hist_cmd.replay_command.len);
+    @memcpy(hist_cmd.replay_command[0..n], entry.raw_input[0..n]);
+    hist_cmd.replay_len = n;
+    hist_cmd.replay_pending = true;
+    c.lua_pushboolean(state, 1);
     return 1;
 }
 

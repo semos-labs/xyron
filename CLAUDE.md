@@ -24,7 +24,7 @@ Xyron is tightly coupled with **Attyx** (terminal emulator) at `~/Projects/attyx
 - **Config**: `$XDG_CONFIG_HOME/xyron/` (default `~/.config/xyron/`)
   - `config.lua` — Lua config entry point, loaded on startup
 - **Data**: `$XDG_DATA_HOME/xyron/` (default `~/.local/share/xyron/`)
-  - `history.db` — SQLite command history + help cache
+  - `history.db` — SQLite command history + help cache (see `docs/history-queries.md`)
 
 ## Three operation modes
 
