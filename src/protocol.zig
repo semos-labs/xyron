@@ -42,6 +42,8 @@ pub const MsgType = enum(u8) {
     evt_job_suspended = 0xA7,
     evt_job_resumed = 0xA8,
     evt_history_recorded = 0xA9,
+    evt_block_started = 0xAC,
+    evt_block_finished = 0xAD,
     evt_prompt = 0xAB,
     evt_ready = 0xAA,
 

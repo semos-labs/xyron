@@ -46,6 +46,7 @@ pub fn init(env: *environ_mod.Environ, attyx_enabled: bool) LuaState {
     registerFn(L, "prompt", apiPrompt);
     registerFn(L, "vim_mode", apiVimMode);
     registerFn(L, "alias", apiAlias);
+    registerFn(L, "last_block", apiLastBlock);
     registerFn(L, "popup", apiPopup);
     registerFn(L, "pick", apiPick);
     registerFn(L, "has_attyx_ui", apiHasAttyxUi);
@@ -279,6 +280,42 @@ fn apiPick(L: ?*c.lua_State) callconv(.c) c_int {
     } else {
         c.lua_pushnil(state);
     }
+    return 1;
+}
+
+/// Global ref to block table for last_block
+var global_blocks: ?*@import("block.zig").BlockTable = null;
+
+pub fn setBlockTable(bt: *@import("block.zig").BlockTable) void {
+    global_blocks = bt;
+}
+
+/// xyron.last_block() -> table with block metadata
+fn apiLastBlock(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    const bt = global_blocks orelse { c.lua_pushnil(state); return 1; };
+    const blk = bt.last() orelse { c.lua_pushnil(state); return 1; };
+
+    c.lua_createtable(state, 0, 6);
+
+    c.lua_pushinteger(state, @intCast(blk.id));
+    c.lua_setfield(state, -2, "id");
+
+    _ = c.lua_pushlstring(state, blk.rawSlice().ptr, blk.raw_len);
+    c.lua_setfield(state, -2, "input");
+
+    c.lua_pushinteger(state, @intCast(blk.exit_code));
+    c.lua_setfield(state, -2, "exit_code");
+
+    c.lua_pushinteger(state, blk.durationMs());
+    c.lua_setfield(state, -2, "duration_ms");
+
+    _ = c.lua_pushlstring(state, blk.status.label().ptr, blk.status.label().len);
+    c.lua_setfield(state, -2, "status");
+
+    _ = c.lua_pushlstring(state, blk.cwdSlice().ptr, blk.cwd_len);
+    c.lua_setfield(state, -2, "cwd");
+
     return 1;
 }
 

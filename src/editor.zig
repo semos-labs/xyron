@@ -24,6 +24,9 @@ pub const Editor = struct {
     mode: VimMode = .insert,
     /// Whether vim mode is enabled globally.
     vim_enabled: bool = false,
+    /// Kill buffer for Ctrl+K/U/W/Y (yank/paste).
+    kill_buf: [MAX_LINE]u8 = undefined,
+    kill_len: usize = 0,
 
     /// Reset the editor to an empty state.
     pub fn clear(self: *Editor) void {
@@ -143,6 +146,80 @@ pub const Editor = struct {
     /// Move cursor to the end of the line.
     pub fn moveEnd(self: *Editor) void {
         self.cursor = self.len;
+    }
+
+    // ------------------------------------------------------------------
+    // Emacs-style editing
+    // ------------------------------------------------------------------
+
+    /// Kill from cursor to end of line (Ctrl+K). Saves to kill buffer.
+    pub fn killToEnd(self: *Editor) void {
+        if (self.cursor >= self.len) return;
+        const killed = self.buf[self.cursor..self.len];
+        @memcpy(self.kill_buf[0..killed.len], killed);
+        self.kill_len = killed.len;
+        self.len = self.cursor;
+    }
+
+    /// Kill from start of line to cursor (Ctrl+U). Saves to kill buffer.
+    pub fn killToStart(self: *Editor) void {
+        if (self.cursor == 0) return;
+        const killed = self.buf[0..self.cursor];
+        @memcpy(self.kill_buf[0..killed.len], killed);
+        self.kill_len = killed.len;
+        // Shift remaining content left
+        const tail = self.len - self.cursor;
+        if (tail > 0) std.mem.copyForwards(u8, self.buf[0..tail], self.buf[self.cursor..self.len]);
+        self.len = tail;
+        self.cursor = 0;
+    }
+
+    /// Kill word backward (Ctrl+W / Alt+Backspace). Saves to kill buffer.
+    pub fn killWordBackward(self: *Editor) void {
+        if (self.cursor == 0) return;
+        var start = self.cursor;
+        // Skip whitespace backward
+        while (start > 0 and isWordSep(self.buf[start - 1])) : (start -= 1) {}
+        // Skip word chars backward
+        while (start > 0 and !isWordSep(self.buf[start - 1])) : (start -= 1) {}
+        const killed = self.buf[start..self.cursor];
+        @memcpy(self.kill_buf[0..killed.len], killed);
+        self.kill_len = killed.len;
+        self.replaceRange(start, self.cursor, "");
+    }
+
+    /// Kill word forward (Alt+D). Saves to kill buffer.
+    pub fn killWordForward(self: *Editor) void {
+        if (self.cursor >= self.len) return;
+        var end = self.cursor;
+        while (end < self.len and !isWordSep(self.buf[end])) : (end += 1) {}
+        while (end < self.len and isWordSep(self.buf[end])) : (end += 1) {}
+        const killed = self.buf[self.cursor..end];
+        @memcpy(self.kill_buf[0..killed.len], killed);
+        self.kill_len = killed.len;
+        self.replaceRange(self.cursor, end, "");
+    }
+
+    /// Yank (paste) from kill buffer (Ctrl+Y).
+    pub fn yank(self: *Editor) void {
+        if (self.kill_len == 0) return;
+        if (self.len + self.kill_len > MAX_LINE) return;
+        // Insert kill buffer at cursor
+        const tail = self.len - self.cursor;
+        if (tail > 0) {
+            std.mem.copyBackwards(u8, self.buf[self.cursor + self.kill_len ..][0..tail], self.buf[self.cursor..self.len]);
+        }
+        @memcpy(self.buf[self.cursor..][0..self.kill_len], self.kill_buf[0..self.kill_len]);
+        self.len += self.kill_len;
+        self.cursor += self.kill_len;
+    }
+
+    /// Transpose the two characters before cursor (Ctrl+T).
+    pub fn transpose(self: *Editor) void {
+        if (self.cursor < 2) return;
+        const tmp = self.buf[self.cursor - 2];
+        self.buf[self.cursor - 2] = self.buf[self.cursor - 1];
+        self.buf[self.cursor - 1] = tmp;
     }
 
     // ------------------------------------------------------------------

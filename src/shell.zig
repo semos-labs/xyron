@@ -25,6 +25,7 @@ const lua_commands = @import("lua_commands.zig");
 const highlight = @import("highlight.zig");
 const aliases_mod = @import("aliases.zig");
 const complete_help = @import("complete_help.zig");
+const block_mod = @import("block.zig");
 
 pub const Shell = struct {
     allocator: std.mem.Allocator,
@@ -34,6 +35,7 @@ pub const Shell = struct {
     history: history_mod.History,
     history_db: history_db_mod.HistoryDb,
     job_table: jobs_mod.JobTable,
+    blocks: block_mod.BlockTable,
     cmd_cache: highlight.CommandCache,
     help_cache: complete_help.HelpCache,
     lua: lua_api.LuaState,
@@ -71,6 +73,7 @@ pub const Shell = struct {
             .history = hist,
             .history_db = hdb,
             .job_table = .{},
+            .blocks = .{},
             .cmd_cache = highlight.CommandCache.init(allocator),
             .help_cache = complete_help.HelpCache.init(hdb.db),
             .lua = lua,
@@ -97,6 +100,7 @@ pub const Shell = struct {
 
     pub fn run(self: *Shell) !void {
         const stdout = std.fs.File.stdout();
+        lua_api.setBlockTable(&self.blocks);
         term.enableRawMode() catch {
             try self.runCooked();
             return;
@@ -251,6 +255,9 @@ pub const Shell = struct {
 
         const start_ts = types.timestampMs();
 
+        // Create command block
+        const block_id = self.blocks.create(exec_plan.group_id, trimmed, cwd_before, exec_plan.background);
+
         // Fire Lua hook: on_command_start
         lua_hooks.fireCommandStart(self.lua, exec_plan.group_id, trimmed, cwd_before, start_ts);
 
@@ -263,10 +270,13 @@ pub const Shell = struct {
         self.last_duration_ms = result.duration_ms;
 
         if (result.backgrounded) {
+            // Block stays running — will be finalized when job completes
+            if (self.blocks.findById(block_id)) |blk| blk.is_background = true;
             const job_id = self.job_table.createJob(
                 exec_plan.group_id, trimmed, result.pids[0..result.pid_count], result.pgid, true,
             );
             if (job_id) |id| {
+                if (self.blocks.findById(block_id)) |blk| blk.job_id = id;
                 var buf: [256]u8 = undefined;
                 const msg = std.fmt.bufPrint(&buf, "[{d}] {s}\n", .{ id, trimmed }) catch "";
                 stdout.writeAll(msg) catch {};
@@ -278,6 +288,8 @@ pub const Shell = struct {
         }
 
         if (result.stopped) {
+            // Block interrupted (Ctrl+Z)
+            if (self.blocks.findById(block_id)) |blk| blk.interrupt();
             const job_id = self.job_table.createJob(
                 exec_plan.group_id, trimmed, result.pids[0..result.pid_count], result.pgid, true,
             );
@@ -291,6 +303,9 @@ pub const Shell = struct {
             }
             return;
         }
+
+        // Block completed
+        if (self.blocks.findById(block_id)) |blk| blk.finish(result.exit_code);
 
         // Fire Lua hook: on_command_finish
         lua_hooks.fireCommandFinish(self.lua, exec_plan.group_id, trimmed, cwd_before, result.exit_code, result.duration_ms, types.timestampMs());
@@ -315,6 +330,12 @@ pub const Shell = struct {
         const reaped = self.job_table.reapCompleted();
         for (reaped.ids[0..reaped.count]) |id| {
             if (self.job_table.findById(id)) |job| {
+                // Finalize any associated command block
+                for (self.blocks.blocks[0..self.blocks.count]) |*blk| {
+                    if (blk.job_id == job.id and blk.status == .running) {
+                        blk.finish(job.exit_code);
+                    }
+                }
                 var buf: [256]u8 = undefined;
                 const msg = std.fmt.bufPrint(&buf, "[{d}]  Done  {s}\n", .{ job.id, job.rawInputSlice() }) catch continue;
                 stdout.writeAll(msg) catch {};

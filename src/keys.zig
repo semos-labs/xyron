@@ -13,7 +13,7 @@ const c = std.c;
 // ---------------------------------------------------------------------------
 
 pub const Key = union(enum) {
-    char: u8, // printable ASCII character
+    char: u8,
     tab,
     shift_tab,
     enter,
@@ -25,11 +25,27 @@ pub const Key = union(enum) {
     home,
     end_key,
     delete,
-    ctrl_c,
-    ctrl_d,
+    ctrl_a, // home
+    ctrl_b, // left
+    ctrl_c, // interrupt
+    ctrl_d, // EOF / delete at cursor
+    ctrl_e, // end
+    ctrl_f, // right
+    ctrl_k, // kill to end of line
     ctrl_l, // clear screen
+    ctrl_n, // down (history next)
+    ctrl_p, // up (history previous)
     ctrl_r, // reverse search
-    escape, // bare ESC (no sequence followed)
+    ctrl_t, // transpose chars
+    ctrl_u, // kill to start of line
+    ctrl_w, // kill word backward
+    ctrl_y, // yank (paste kill buffer)
+    escape,
+    // Alt/Meta combos (ESC + key)
+    alt_b, // word backward
+    alt_f, // word forward
+    alt_d, // kill word forward
+    alt_backspace, // kill word backward (same as ctrl_w)
     unknown,
 };
 
@@ -51,22 +67,31 @@ pub fn readKey() !Key {
         break :blk buf[0];
     };
 
-    // Control characters
-    if (byte == 9) return .tab;
-    if (byte == '\r' or byte == '\n') return .enter;
-    if (byte == 127 or byte == 8) return .backspace; // DEL or BS
-    if (byte == 3) return .ctrl_c;
-    if (byte == 4) return .ctrl_d;
-    if (byte == 12) return .ctrl_l;
-    if (byte == 18) return .ctrl_r;
-
-    // Escape sequence
-    if (byte == 27) return parseEscapeSequence();
-
-    // Printable ASCII
-    if (byte >= 32 and byte < 127) return .{ .char = byte };
-
-    return .unknown;
+    // Control characters (byte values 0-31)
+    return switch (byte) {
+        1 => .ctrl_a, // ^A — home
+        2 => .ctrl_b, // ^B — left
+        3 => .ctrl_c, // ^C — interrupt
+        4 => .ctrl_d, // ^D — EOF / delete at cursor
+        5 => .ctrl_e, // ^E — end
+        6 => .ctrl_f, // ^F — right
+        8 => .backspace, // ^H — backspace
+        9 => .tab,
+        10, 13 => .enter, // ^J / ^M
+        11 => .ctrl_k, // ^K — kill to end
+        12 => .ctrl_l, // ^L — clear screen
+        14 => .ctrl_n, // ^N — down
+        16 => .ctrl_p, // ^P — up
+        18 => .ctrl_r, // ^R — reverse search
+        20 => .ctrl_t, // ^T — transpose
+        21 => .ctrl_u, // ^U — kill to start
+        23 => .ctrl_w, // ^W — kill word backward
+        25 => .ctrl_y, // ^Y — yank
+        27 => parseEscapeSequence(), // ESC
+        127 => .backspace, // DEL
+        32...126 => .{ .char = byte }, // printable ASCII
+        else => .unknown,
+    };
 }
 
 /// Stashed byte from a failed escape sequence parse (ESC + non-bracket).
@@ -90,9 +115,18 @@ fn parseEscapeSequence() Key {
     if (n1 == 0) return .escape;
 
     if (buf[0] != '[') {
-        // Not a CSI sequence — stash the byte so it's not lost
-        stashed_byte = buf[0];
-        return .escape;
+        // Alt/Meta combo: ESC + letter
+        return switch (buf[0]) {
+            'b' => .alt_b, // Alt+B — word backward
+            'f' => .alt_f, // Alt+F — word forward
+            'd' => .alt_d, // Alt+D — kill word forward
+            127 => .alt_backspace, // Alt+Backspace — kill word backward
+            else => blk: {
+                // Not a known combo — stash byte for next readKey
+                stashed_byte = buf[0];
+                break :blk .escape;
+            },
+        };
     }
 
     // Read the command byte

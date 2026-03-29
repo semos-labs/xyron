@@ -105,7 +105,7 @@ pub fn readLine(
                 refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
                 continue;
             },
-            .up => {
+            .up, .ctrl_p => {
                 if (hist) |h| {
                     if (h.navigateUp()) |entry| {
                         ed.setContent(entry);
@@ -114,7 +114,7 @@ pub fn readLine(
                 }
                 continue;
             },
-            .down => {
+            .down, .ctrl_n => {
                 if (hist) |h| {
                     if (h.navigateDown()) |entry| {
                         ed.setContent(entry);
@@ -149,10 +149,9 @@ pub fn readLine(
                     ed.clampNormal();
                 }
             },
-            .backspace => ed.backspace(),
-            .delete => ed.delete(),
-            .left => ed.moveLeft(),
-            .right => {
+            // Movement
+            .left, .ctrl_b => ed.moveLeft(),
+            .right, .ctrl_f => {
                 if (ed.cursor == ed.len) {
                     if (getGhostSuggestion(ed, hist)) |ghost| {
                         ed.setContent(ghost);
@@ -162,8 +161,19 @@ pub fn readLine(
                 }
                 ed.moveRight();
             },
-            .home => ed.moveHome(),
-            .end_key => ed.moveEnd(),
+            .home, .ctrl_a => ed.moveHome(),
+            .end_key, .ctrl_e => ed.moveEnd(),
+            .alt_b => ed.moveWordBackward(),
+            .alt_f => ed.moveWordForward(),
+            // Deletion
+            .backspace => ed.backspace(),
+            .delete => ed.delete(),
+            .ctrl_k => ed.killToEnd(),
+            .ctrl_u => ed.killToStart(),
+            .ctrl_w, .alt_backspace => ed.killWordBackward(),
+            .alt_d => ed.killWordForward(),
+            .ctrl_y => ed.yank(),
+            .ctrl_t => ed.transpose(),
             .char => |ch| {
                 if (ch >= 32) ed.insert(ch);
             },

@@ -70,6 +70,7 @@ fn provideBuiltins(out: *complete.CandidateBuffer, prefix: []const u8) void {
         .{ .name = "exec", .desc = "Run a command via sh" },
         .{ .name = "ls", .desc = "List directory contents" },
         .{ .name = "json", .desc = "Parse and render JSON as table" },
+        .{ .name = "migrate", .desc = "Analyze/convert bash scripts" },
         .{ .name = "popup", .desc = "Show content in popup" },
         .{ .name = "inspect", .desc = "Inspect runtime objects" },
     };
