@@ -51,13 +51,17 @@ pub const Table = struct {
 
     pub fn setCell(self: *Table, row: usize, col: usize, text: []const u8) void {
         if (row >= self.row_count or col >= self.col_count) return;
+        // Copy text, replacing newlines with spaces
         const n = @min(text.len, MAX_CELL);
-        @memcpy(self.rows[row][col].text[0..n], text[0..n]);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            self.rows[row][col].text[i] = if (text[i] == '\n' or text[i] == '\r') ' ' else text[i];
+        }
         self.rows[row][col].len = n;
     }
 
     pub fn setCellColor(self: *Table, row: usize, col: usize, text: []const u8, color: []const u8) void {
-        self.setCell(row, col, text);
+        self.setCell(row, col, text); // setCell handles newline stripping
         if (row < self.row_count and col < self.col_count) {
             self.rows[row][col].color = color;
         }
@@ -67,12 +71,32 @@ pub const Table = struct {
     pub fn render(self: *const Table, stdout: std.fs.File) void {
         if (self.col_count == 0) return;
 
-        // Calculate column widths
+        // Calculate column widths, capped to fit terminal
+        const term_w = getTermWidth();
         var widths: [MAX_COLS]usize = undefined;
+        var total_w: usize = 0;
         for (0..self.col_count) |c| {
             widths[c] = self.columns[c].header.len;
             for (0..self.row_count) |r| {
-                widths[c] = @max(widths[c], self.rows[r][c].len);
+                // Use visible length (stop at first newline)
+                const cell_len = visibleLen(self.rows[r][c].slice());
+                widths[c] = @max(widths[c], cell_len);
+            }
+            // Cap individual columns at 60% of terminal width
+            widths[c] = @min(widths[c], term_w * 6 / 10);
+        }
+        // If total exceeds terminal, shrink the widest column
+        total_w = 0;
+        for (0..self.col_count) |c| total_w += widths[c] + 2;
+        if (total_w > term_w and self.col_count > 0) {
+            // Find widest column and shrink it
+            var widest: usize = 0;
+            for (1..self.col_count) |c| {
+                if (widths[c] > widths[widest]) widest = c;
+            }
+            const excess = total_w - term_w;
+            if (widths[widest] > excess + 4) {
+                widths[widest] -= excess;
             }
         }
 
@@ -112,7 +136,7 @@ pub const Table = struct {
                 const cell = &self.rows[r][c];
                 const color = if (cell.color.len > 0) cell.color else self.columns[c].color;
                 if (color.len > 0) pos += cp(buf[pos..], color);
-                pos += renderPadded(buf[pos..], cell.slice(), widths[c], self.columns[c].align_);
+                pos += renderCell(buf[pos..], cell.slice(), widths[c], self.columns[c].align_);
                 if (color.len > 0) pos += cp(buf[pos..], "\x1b[0m");
             }
             pos += cp(buf[pos..], "\n");
@@ -127,6 +151,43 @@ pub const Table = struct {
         if (pos > 0) stdout.writeAll(buf[0..pos]) catch {};
     }
 };
+
+fn renderCell(dest: []u8, text: []const u8, width: usize, align_: Align) usize {
+    // Truncate to width, strip newlines, add ellipsis if needed
+    const clean = visiblePart(text);
+    if (clean.len <= width) return renderPadded(dest, clean, width, align_);
+
+    // Truncate with ellipsis
+    if (width > 3) {
+        var pos: usize = 0;
+        pos += cp(dest[pos..], clean[0 .. width - 3]);
+        pos += cp(dest[pos..], "...");
+        return pos;
+    }
+    return renderPadded(dest, clean[0..width], width, align_);
+}
+
+fn visiblePart(text: []const u8) []const u8 {
+    // Return text up to first newline
+    for (text, 0..) |ch, i| {
+        if (ch == '\n' or ch == '\r') return text[0..i];
+    }
+    return text;
+}
+
+fn visibleLen(text: []const u8) usize {
+    return visiblePart(text).len;
+}
+
+fn getTermWidth() usize {
+    const c_ext = struct {
+        const winsize = extern struct { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 };
+        extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
+    };
+    var ws: c_ext.winsize = undefined;
+    if (c_ext.ioctl(std.posix.STDOUT_FILENO, 0x40087468, &ws) == 0 and ws.ws_col > 0) return ws.ws_col;
+    return 80;
+}
 
 fn renderPadded(dest: []u8, text: []const u8, width: usize, align_: Align) usize {
     var pos: usize = 0;

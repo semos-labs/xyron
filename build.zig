@@ -70,6 +70,7 @@ pub fn build(b: *std.Build) void {
         "src/attyx_bridge.zig",
         "src/protocol.zig",
         "src/rich_output.zig",
+        "src/json_parser.zig",
         "src/history_search.zig",
     };
 

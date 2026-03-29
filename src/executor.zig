@@ -264,6 +264,14 @@ fn childExec(
 
     const argv = steps[i].argv;
 
+    // Pipe-friendly builtins: run in-process in the forked child
+    if (argv.len > 0 and std.mem.eql(u8, argv[0], "json")) {
+        const json_cmd = @import("builtins/json.zig");
+        json_cmd.runFromPipe(if (argv.len > 1) argv[1..] else &.{});
+        // runFromPipe calls exit, but just in case:
+        std.process.exit(0);
+    }
+
     var argv_buf: [256]?[*:0]const u8 = undefined;
     if (argv.len >= argv_buf.len) std.process.exit(127);
     for (argv, 0..) |arg, k| argv_buf[k] = toZ(arg);
