@@ -28,6 +28,8 @@ pub const MsgType = enum(u8) {
     resize = 0x0C,
     query_history = 0x0D,
     replay_command = 0x0E,
+    get_completions = 0x10, // buffer + cursor → candidates
+    get_ghost = 0x11, // buffer → ghost suggestion
 
     // Responses: Xyron → Attyx (0x80–0x8F)
     resp_success = 0x80,

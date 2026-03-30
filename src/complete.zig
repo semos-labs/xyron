@@ -82,6 +82,49 @@ pub const CandidateBuffer = struct {
 // Picker state
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Public API for headless/protocol use (no terminal IO)
+// ---------------------------------------------------------------------------
+
+/// Completion result for protocol consumers.
+pub const CompletionResult = struct {
+    candidates: *const CandidateBuffer,
+    context: CompletionContext,
+    /// Indices sorted by score (fuzzy + kind priority).
+    sorted_indices: [MAX_CANDIDATES]usize = undefined,
+    sorted_scores: [MAX_CANDIDATES]i32 = undefined,
+    sorted_count: usize = 0,
+};
+
+/// Gather completions for a given buffer and cursor position.
+/// No terminal IO — pure data. Safe to call from headless mode.
+pub fn getCompletions(
+    buffer: []const u8,
+    cursor: usize,
+    env: *const environ_mod.Environ,
+    cmd_cache: *highlight.CommandCache,
+    help_cache: ?*help_mod.HelpCache,
+) CompletionResult {
+    const ctx = analyzeContext(buffer, cursor);
+    var result = CompletionResult{
+        .candidates = undefined,
+        .context = ctx,
+    };
+
+    // Use a static buffer to avoid allocation
+    const S = struct {
+        var buf: CandidateBuffer = .{};
+    };
+    S.buf.count = 0;
+    providers.gather(&S.buf, &ctx, env, cmd_cache, help_cache);
+    result.candidates = &S.buf;
+
+    // Score and sort
+    scoreAndFilter(&S.buf, ctx.prefix, &result.sorted_indices, &result.sorted_scores, &result.sorted_count);
+
+    return result;
+}
+
 const MAX_FILTER: usize = 128;
 const MAX_VISIBLE: usize = 12;
 

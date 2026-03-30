@@ -7,6 +7,9 @@
 const std = @import("std");
 const posix = std.posix;
 const proto = @import("protocol.zig");
+const complete_mod = @import("complete.zig");
+const highlight_mod = @import("highlight.zig");
+const complete_help_mod = @import("complete_help.zig");
 
 // C externs not available in Zig's std.c on macOS
 const c_ext = struct {
@@ -54,6 +57,11 @@ pub const HeadlessRuntime = struct {
     session_id: [32]u8,
     session_id_len: usize,
     last_exit_code: u8 = 0,
+    cmd_cache: highlight_mod.CommandCache,
+    help_cache: complete_help_mod.HelpCache,
+    // Note: History struct is ~4MB, too large for stack.
+    // Use a heap-allocated pointer instead.
+    history_buf: ?*history_mod.History = null,
 
     // Active command PTY state
     cmd_master_fd: posix.fd_t = -1,
@@ -81,12 +89,18 @@ pub const HeadlessRuntime = struct {
         // Load config
         loadConfig(lua);
 
+        const hist_ptr = allocator.create(history_mod.History) catch null;
+        if (hist_ptr) |h| h.* = .{};
+
         return .{
             .allocator = allocator,
             .ids = .{},
             .env = env_inst,
             .history_db = hdb,
             .job_table = .{},
+            .cmd_cache = highlight_mod.CommandCache.init(allocator),
+            .help_cache = complete_help_mod.HelpCache.init(hdb.db),
+            .history_buf = hist_ptr,
             .lua = lua,
             .json_mode = json_mode,
             .session_id = sid_buf,
@@ -95,6 +109,7 @@ pub const HeadlessRuntime = struct {
     }
 
     pub fn deinit(self: *HeadlessRuntime) void {
+        self.cmd_cache.deinit();
         lua_api.deinit(self.lua);
         self.history_db.deinit();
         self.env.deinit();
@@ -147,6 +162,8 @@ pub const HeadlessRuntime = struct {
             .get_shell_state => self.handleGetShellState(frame.payload),
             .get_prompt => self.handleGetPrompt(frame.payload),
             .interrupt => self.handleInterrupt(frame.payload),
+            .get_completions => self.handleGetCompletions(frame.payload),
+            .get_ghost => self.handleGetGhost(frame.payload),
             else => self.sendError(0, "unknown request"),
         }
     }
@@ -435,6 +452,78 @@ pub const HeadlessRuntime = struct {
     }
 
     // ------------------------------------------------------------------
+    // Completion and ghost text API
+    // ------------------------------------------------------------------
+
+    fn handleGetCompletions(self: *HeadlessRuntime, payload: []const u8) void {
+        var r = proto.PayloadReader.init(payload);
+        const req_id = r.readInt();
+        const buffer = r.readStr();
+        const cursor: usize = @intCast(@max(r.readInt(), 0));
+
+        const result = complete_mod.getCompletions(
+            buffer,
+            @min(cursor, buffer.len),
+            &self.env,
+            &self.cmd_cache,
+            &self.help_cache,
+        );
+
+        // Response schema:
+        // req_id:i64
+        // context_kind:u8 (0=command, 1=argument, 2=flag, 3=env_var, 4=redirect, 5=none)
+        // word_start:i64
+        // word_end:i64
+        // count:i64
+        // per candidate:
+        //   text:str
+        //   description:str
+        //   kind:u8 (0=builtin, 1=lua_cmd, 2=alias, 3=external_cmd, 4=file, 5=directory, 6=env_var, 7=flag)
+        //   score:i64
+
+        var buf: [proto.MAX_PAYLOAD]u8 = undefined;
+        var w = proto.PayloadWriter.init(&buf);
+        w.writeInt(req_id);
+        w.writeU8(@intFromEnum(result.context.kind));
+        w.writeInt(@intCast(result.context.word_start));
+        w.writeInt(@intCast(result.context.word_end));
+        w.writeInt(@intCast(result.sorted_count));
+
+        const max_send = @min(result.sorted_count, 50); // cap at 50 for payload size
+        for (0..max_send) |i| {
+            const idx = result.sorted_indices[i];
+            const cand = &result.candidates.items[idx];
+            w.writeStr(cand.textSlice());
+            w.writeStr(cand.descSlice());
+            w.writeU8(@intFromEnum(cand.kind));
+            w.writeInt(result.sorted_scores[i]);
+        }
+
+        proto.writeFrame(STDOUT, .resp_success, w.written());
+    }
+
+    fn handleGetGhost(self: *HeadlessRuntime, payload: []const u8) void {
+        var r = proto.PayloadReader.init(payload);
+        const req_id = r.readInt();
+        const buffer = r.readStr();
+
+        // Find ghost suggestion from in-memory history
+        const suggestion = if (self.history_buf) |h| h.findGhost(buffer) else null;
+
+        var buf: [1024]u8 = undefined;
+        var w = proto.PayloadWriter.init(&buf);
+        w.writeInt(req_id);
+        if (suggestion) |s| {
+            w.writeU8(1); // has_suggestion
+            w.writeStr(s); // full suggestion (including typed prefix)
+        } else {
+            w.writeU8(0); // no suggestion
+        }
+
+        proto.writeFrame(STDOUT, .resp_success, w.written());
+    }
+
+    // ------------------------------------------------------------------
     // PTY-based command execution
     // ------------------------------------------------------------------
 
@@ -546,10 +635,11 @@ pub const HeadlessRuntime = struct {
         self.last_exit_code = code;
         self.emitCommandFinished(self.cmd_group_id, input, code, duration);
 
-        // Record in history
+        // Record in history + push to in-memory buffer for ghost text
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd = posix.getcwd(&cwd_buf) catch "";
         _ = self.history_db.recordCommand(input, cwd, code, duration, types.timestampMs(), false, &.{});
+        if (self.history_buf) |h| h.push(input);
 
         self.emitPrompt();
 
