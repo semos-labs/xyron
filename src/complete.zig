@@ -13,6 +13,7 @@ const providers = @import("complete_providers.zig");
 const help_mod = @import("complete_help.zig");
 const keys = @import("keys.zig");
 const fuzzy = @import("fuzzy.zig");
+const overlay = @import("overlay.zig");
 
 // ---------------------------------------------------------------------------
 // Completion context
@@ -168,8 +169,12 @@ pub fn runPicker(
 
     if (scored_count == 0) return .cancelled;
 
-    const term_h = getTermHeight();
-    const max_visible = @min(MAX_VISIBLE, if (term_h > 4) term_h - 3 else 3);
+    // Overlay setup: detect actual screen position via DSR
+    const layout = computeOverlayLayout();
+    const max_visible = layout.max_visible;
+    // Store direction + word_start for renderPicker to use
+    inline_state.direction = layout.direction;
+    inline_state.word_start = ctx.word_start;
 
     // Render initial picker
     renderPicker(stdout, prompt_str, ed, &all, &scored_indices, scored_count, selected, scroll, max_visible, filter[0..filter_len], hl_ctx);
@@ -180,12 +185,11 @@ pub fn runPicker(
 
         switch (key) {
             .enter, .right => {
-                // Accept selected candidate
                 if (scored_count > 0) {
                     const idx = scored_indices[selected];
                     insertCandidate(ed, ctx.word_start, ed.cursor, &all.items[idx]);
                 }
-                clearPickerArea(stdout, max_visible);
+                clearPickerLines(stdout, max_visible, inline_state.direction);
                 return .accepted;
             },
             .tab => {
@@ -205,7 +209,7 @@ pub fn runPicker(
                 }
             },
             .escape, .ctrl_c => {
-                clearPickerArea(stdout, max_visible);
+                clearPickerLines(stdout, max_visible, inline_state.direction);
                 return .cancelled;
             },
             .up => {
@@ -237,7 +241,7 @@ pub fn runPicker(
         renderPicker(stdout, prompt_str, ed, &all, &scored_indices, scored_count, selected, scroll, max_visible, filter[0..filter_len], hl_ctx);
     }
 
-    clearPickerArea(stdout, max_visible);
+    clearPickerLines(stdout, max_visible, inline_state.direction);
     return .cancelled;
 }
 
@@ -363,6 +367,72 @@ fn scoreAndFilter(
 }
 
 // ---------------------------------------------------------------------------
+// Layout: detect cursor row and choose direction
+// ---------------------------------------------------------------------------
+
+const OverlayLayout = struct {
+    direction: overlay.Direction,
+    max_visible: usize,
+    cursor_row: usize, // actual screen row (1-based), 0 = unknown
+    term_rows: usize,
+};
+
+/// Cached cursor row, set once at prompt display time (before key loop).
+/// Avoids DSR during typing which would block input.
+pub var cached_cursor_row: usize = 0;
+
+/// Update cached cursor row from the shell's estimate.
+pub fn cachePromptRow() void {
+    const input_mod = @import("input.zig");
+    cached_cursor_row = input_mod.cursor_row_estimate;
+}
+
+/// Compute overlay layout using the cached cursor row.
+fn computeOverlayLayout() OverlayLayout {
+    const term_size = overlay.getTermSize();
+    const input_mod = @import("input.zig");
+    const prompt_lines = 1 + input_mod.prompt_extra_lines;
+    const row = cached_cursor_row;
+
+    if (row > 0) {
+        const space_below = if (term_size.rows > row) term_size.rows - row else 0;
+        const space_above = if (row > prompt_lines) row - prompt_lines else 0;
+        const direction: overlay.Direction = if (space_below >= @min(MAX_VISIBLE, 3)) .below else .above;
+        const avail = if (direction == .below) space_below else space_above;
+        return .{
+            .direction = direction,
+            .max_visible = @min(MAX_VISIBLE, if (avail > 0) avail else 1),
+            .cursor_row = row,
+            .term_rows = term_size.rows,
+        };
+    }
+
+    // DSR failed — use the shell's cursor row estimate
+    const est = input_mod.cursor_row_estimate;
+    if (est > 0) {
+        const space_below = if (term_size.rows > est) term_size.rows - est else 0;
+        const space_above = if (est > prompt_lines) est - prompt_lines else 0;
+        const dir: overlay.Direction = if (space_below >= @min(MAX_VISIBLE, 3)) .below else .above;
+        const avail = if (dir == .below) space_below else space_above;
+        return .{
+            .direction = dir,
+            .max_visible = @min(MAX_VISIBLE, if (avail > 0) avail else 1),
+            .cursor_row = est,
+            .term_rows = term_size.rows,
+        };
+    }
+
+    // No info at all — default to below
+    const space = if (term_size.rows > prompt_lines + 1) term_size.rows - prompt_lines - 1 else 3;
+    return .{
+        .direction = .below,
+        .max_visible = @min(MAX_VISIBLE, space),
+        .cursor_row = 0,
+        .term_rows = term_size.rows,
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
@@ -383,25 +453,28 @@ fn renderPicker(
     var buf: [16384]u8 = undefined;
     var pos: usize = 0;
 
-    // Redraw prompt line
-    pos += cp(buf[pos..], "\r\x1b[K");
-    pos += cp(buf[pos..], prompt_str);
+    const visible_end = @min(scroll + max_visible, count);
+    const direction = inline_state.direction;
+    const input_mod = @import("input.zig");
 
-    // Editor content with highlighting
-    const hl_mod = @import("highlight.zig");
-    if (@TypeOf(hl_ctx) != @TypeOf(null)) {
-        pos += hl_mod.renderHighlighted(buf[pos..], ed.content(), hl_ctx.cache, hl_ctx.env);
-    } else {
-        pos += cp(buf[pos..], ed.content());
+    const rendered_lines = visible_end - scroll;
+    const prev = inline_state.prev_rendered;
+
+    // For "below": pre-scroll based on actual candidate count
+    if (direction == .below) {
+        const scroll_n = @max(rendered_lines, prev);
+        for (0..scroll_n) |_| pos += cp(buf[pos..], "\n");
+        const seq = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{scroll_n}) catch "";
+        pos += seq.len;
     }
 
-    // Save cursor position
+    // Render prompt + editor content
+    pos += input_mod.renderPromptIntoBuf(buf[pos..], prompt_str, ed, hl_ctx);
+
+    // Save cursor position (after pre-scroll, so restore is correct)
     pos += cp(buf[pos..], "\x1b[s");
 
-    // Draw candidates below — table layout with aligned columns
-    const visible_end = @min(scroll + max_visible, count);
-
-    // Compute column widths for table layout
+    // Compute column widths
     var max_text_w: usize = 0;
     var max_row_w: usize = 0;
     for (scroll..visible_end) |i| {
@@ -413,41 +486,117 @@ fn renderPicker(
         max_row_w = @max(max_row_w, row_w);
     }
     const col_w = max_text_w + 2;
+    const MIN_WIDTH: usize = 30;
+    const row_width = @max(max_row_w + 2, MIN_WIDTH);
 
-    for (scroll..visible_end) |i| {
-        pos += cp(buf[pos..], "\r\n\x1b[K");
+    // Horizontal offset
+    const prompt_col = promptVisibleWidth(prompt_str);
+    const word_start = inline_state.word_start;
+    const col_offset = prompt_col + word_start;
+    const term_cols = overlay.getTermSize().cols;
+    const clamped_col = if (col_offset + row_width > term_cols and term_cols > row_width)
+        term_cols - row_width
+    else
+        col_offset;
+
+    // For "above": if overlay shrank, clear freed lines then restore content
+    if (direction == .above and prev > rendered_lines) {
+        const freed = prev - rendered_lines;
+
+        // Flush prompt, then clear + restore in separate save/restore pairs
+        stdout.writeAll(buf[0..pos]) catch {};
+        pos = 0;
+
+        // Phase 1: clear the freed lines
+        {
+            var cbuf: [256]u8 = undefined;
+            var cpos: usize = 0;
+            cpos += cp(cbuf[cpos..], "\x1b[s");
+            const seq = std.fmt.bufPrint(cbuf[cpos..], "\x1b[{d}A", .{prev}) catch "";
+            cpos += seq.len;
+            for (0..freed) |i| {
+                if (i > 0) cpos += cp(cbuf[cpos..], "\x1b[B");
+                cpos += cp(cbuf[cpos..], "\r\x1b[K");
+            }
+            cpos += cp(cbuf[cpos..], "\x1b[u");
+            stdout.writeAll(cbuf[0..cpos]) catch {};
+        }
+
+        // Phase 2: restore block content at cleared positions
+        {
+            const block_ui = @import("block_ui.zig");
+            if (block_ui.enabled and block_ui.saved_block_lines > 0) {
+                var rbuf: [64]u8 = undefined;
+                stdout.writeAll("\x1b[s") catch {};
+                const seq = std.fmt.bufPrint(&rbuf, "\x1b[{d}A\r", .{prev}) catch "";
+                stdout.writeAll(seq) catch {};
+                const start = if (block_ui.saved_block_lines > prev) block_ui.saved_block_lines - prev else 0;
+                block_ui.restoreBlockRange(stdout, start, freed);
+                stdout.writeAll("\x1b[u") catch {};
+            }
+        }
+
+        // Re-save cursor for candidate rendering below
+        pos += cp(buf[pos..], "\x1b[s");
+    }
+
+    // Move to overlay start position — based on actual rendered count
+    if (direction == .above) {
+        const move_up = rendered_lines;
+        const seq = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{move_up}) catch "";
+        pos += seq.len;
+    }
+
+    const bg_normal = "\x1b[48;5;235m";
+    const bg_selected = "\x1b[48;5;238m";
+
+    // Render candidate rows — overwrite screen content in place
+    for (scroll..visible_end, 0..) |i, line_i| {
+        if (direction == .below) {
+            // Below: \r\n moves to next line (pre-scroll ensures room exists)
+            pos += cp(buf[pos..], "\r\n");
+        } else {
+            // Above: render top-to-bottom from moved-up position
+            if (line_i > 0) pos += cp(buf[pos..], "\x1b[B");
+            pos += cp(buf[pos..], "\r");
+        }
+
+        // Move to column, write candidate
+        if (clamped_col > 0) {
+            const seq = std.fmt.bufPrint(buf[pos..], "\x1b[{d}C", .{clamped_col}) catch "";
+            pos += seq.len;
+        }
+
         const idx = indices[i];
         const cand = &all.items[idx];
         const text = cand.textSlice();
         const desc = cand.descSlice();
         const is_sel = (i == selected);
+        const row_bg = if (is_sel) bg_selected else bg_normal;
 
-        // Row background for selection — full width
-        if (is_sel) pos += cp(buf[pos..], "\x1b[48;5;236m"); // dark gray bg
+        pos += cp(buf[pos..], row_bg);
+        if (pos < buf.len) { buf[pos] = ' '; pos += 1; }
 
-        // Candidate text with kind-specific color
         const style = kindColor(cand.kind, is_sel);
         pos += cp(buf[pos..], style);
         pos += cp(buf[pos..], text);
         pos += cp(buf[pos..], "\x1b[0m");
-        if (is_sel) pos += cp(buf[pos..], "\x1b[48;5;236m"); // restore bg
+        pos += cp(buf[pos..], row_bg);
 
-        // Pad + description
         if (desc.len > 0) {
             const pad = if (col_w > text.len) col_w - text.len else 1;
             for (0..pad) |_| {
                 if (pos < buf.len) { buf[pos] = ' '; pos += 1; }
             }
-            if (is_sel) pos += cp(buf[pos..], "\x1b[38;5;245m") else pos += cp(buf[pos..], "\x1b[38;5;242m"); // dim gray text
+            if (is_sel) pos += cp(buf[pos..], "\x1b[38;5;252m") else pos += cp(buf[pos..], "\x1b[38;5;245m");
             pos += cp(buf[pos..], desc);
             pos += cp(buf[pos..], "\x1b[0m");
-            if (is_sel) pos += cp(buf[pos..], "\x1b[48;5;236m");
+            pos += cp(buf[pos..], row_bg);
         }
 
-        // Pad rest of row to max width for uniform selection highlight
-        const visible_len = text.len + (if (desc.len > 0) col_w - text.len + desc.len else 0);
-        if (is_sel and max_row_w > visible_len) {
-            const trail = max_row_w - visible_len;
+        const content_w = 1 + text.len + (if (desc.len > 0) col_w - text.len + desc.len else 0);
+        if (row_width > content_w) {
+            const trail = row_width - content_w;
             for (0..trail) |_| {
                 if (pos < buf.len) { buf[pos] = ' '; pos += 1; }
             }
@@ -456,15 +605,19 @@ fn renderPicker(
         pos += cp(buf[pos..], "\x1b[0m");
     }
 
-    // Clear any leftover lines from previous render
-    for (0..max_visible -| (visible_end - scroll)) |_| {
-        pos += cp(buf[pos..], "\r\n\x1b[K");
+    // For "below": clear leftover lines if list shrank
+    if (direction == .below and prev > rendered_lines) {
+        const extra = prev - rendered_lines;
+        for (0..extra) |_| {
+            pos += cp(buf[pos..], "\r\n\x1b[K");
+        }
     }
+    inline_state.prev_rendered = rendered_lines;
 
-    // Restore cursor position
+    // Restore cursor to prompt
     pos += cp(buf[pos..], "\x1b[u");
 
-    // Position cursor within the line
+    // Position cursor within the editor line
     const after = ed.len - ed.cursor;
     if (after > 0) {
         const n = std.fmt.bufPrint(buf[pos..], "\x1b[{d}D", .{after}) catch "";
@@ -474,17 +627,50 @@ fn renderPicker(
     stdout.writeAll(buf[0..pos]) catch {};
 }
 
-fn clearPickerArea(stdout: std.fs.File, max_visible: usize) void {
-    var buf: [1024]u8 = undefined;
+/// Dismiss the overlay and restore content underneath.
+fn clearPickerLines(stdout: std.fs.File, lines: usize, direction: overlay.Direction) void {
+    if (lines == 0) return;
+
+    var buf: [2048]u8 = undefined;
     var pos: usize = 0;
-    // Move down and clear each line
-    for (0..max_visible) |_| {
-        pos += cp(buf[pos..], "\r\n\x1b[K");
+    pos += cp(buf[pos..], "\x1b[s");
+
+    if (direction == .above) {
+        // Move up to overlay start
+        const seq = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{lines}) catch "";
+        pos += seq.len;
+        // Clear each overlay line
+        for (0..lines) |i| {
+            if (i > 0) pos += cp(buf[pos..], "\x1b[B");
+            pos += cp(buf[pos..], "\r\x1b[K");
+        }
+    } else {
+        // Below: clear lines below prompt
+        for (0..lines) |_| {
+            pos += cp(buf[pos..], "\r\n\x1b[K");
+        }
     }
-    // Move back up
-    const n = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{max_visible}) catch "";
-    pos += n.len;
+
+    pos += cp(buf[pos..], "\x1b[u");
     stdout.writeAll(buf[0..pos]) catch {};
+
+    // Restore block content for "above" (after cursor is back on prompt)
+    if (direction == .above) {
+        const block_ui = @import("block_ui.zig");
+        if (block_ui.enabled and block_ui.saved_block_lines > 0) {
+            var rbuf: [64]u8 = undefined;
+
+            // Save cursor, move up, restore block lines, restore cursor
+            stdout.writeAll("\x1b[s") catch {};
+            const seq2 = std.fmt.bufPrint(&rbuf, "\x1b[{d}A\r", .{lines}) catch "";
+            stdout.writeAll(seq2) catch {};
+
+            const start = if (block_ui.saved_block_lines > lines) block_ui.saved_block_lines - lines else 0;
+            block_ui.restoreBlockRange(stdout, start, lines);
+
+            stdout.writeAll("\x1b[u") catch {};
+        }
+    }
 }
 
 fn insertCandidate(ed: *editor_mod.Editor, word_start: usize, word_end: usize, c: *const Candidate) void {
@@ -501,16 +687,16 @@ fn insertCandidate(ed: *editor_mod.Editor, word_start: usize, word_end: usize, c
 
 fn kindColor(kind: CandidateKind, selected: bool) []const u8 {
     if (selected) {
-        // Bright text on dark bg for selected row
+        // Bright/bold text for selected row (bg set separately)
         return switch (kind) {
-            .builtin => "\x1b[48;5;236m\x1b[1;36m",
-            .lua_cmd => "\x1b[48;5;236m\x1b[1;35m",
-            .alias => "\x1b[48;5;236m\x1b[1;33m", // bold yellow
-            .external_cmd => "\x1b[48;5;236m\x1b[1;37m",
-            .directory => "\x1b[48;5;236m\x1b[1;34m", // bold blue
-            .file => "\x1b[48;5;236m\x1b[37m", // white
-            .env_var => "\x1b[48;5;236m\x1b[1;33m", // bold yellow
-            .flag => "\x1b[48;5;236m\x1b[1;36m", // bold cyan
+            .builtin => "\x1b[1;36m",
+            .lua_cmd => "\x1b[1;35m",
+            .alias => "\x1b[1;33m",
+            .external_cmd => "\x1b[1;37m",
+            .directory => "\x1b[1;34m",
+            .file => "\x1b[1;37m",
+            .env_var => "\x1b[1;33m",
+            .flag => "\x1b[1;36m",
         };
     }
     return switch (kind) {
@@ -537,10 +723,187 @@ fn getTermHeight() usize {
     return 24;
 }
 
+/// Compute visible width of prompt string's last line, skipping ANSI escapes.
+fn promptVisibleWidth(prompt: []const u8) usize {
+    // Find the last newline — only count from there
+    const last_nl = if (std.mem.lastIndexOfScalar(u8, prompt, '\n')) |nl| nl + 1 else 0;
+    const line = prompt[last_nl..];
+    var vis: usize = 0;
+    var i: usize = 0;
+    while (i < line.len) {
+        if (line[i] == '\x1b') {
+            if (i + 1 < line.len and line[i + 1] == '[') {
+                i += 2;
+                while (i < line.len and line[i] >= 0x20 and line[i] <= 0x3F) : (i += 1) {}
+                if (i < line.len) i += 1;
+            } else {
+                i += 2;
+            }
+        } else if (line[i] & 0xC0 == 0x80) {
+            i += 1; // UTF-8 continuation
+        } else {
+            vis += 1;
+            i += 1;
+        }
+    }
+    return vis;
+}
+
 fn cp(dest: []u8, src: []const u8) usize {
     const n = @min(src.len, dest.len);
     @memcpy(dest[0..n], src[0..n]);
     return n;
+}
+
+// ---------------------------------------------------------------------------
+// Inline (as-you-type) overlay
+// ---------------------------------------------------------------------------
+
+/// Persistent state for the inline completion overlay.
+pub const InlineState = struct {
+    active: bool = false,
+    all: CandidateBuffer = .{},
+    scored_indices: [MAX_CANDIDATES]usize = undefined,
+    scored_values: [MAX_CANDIDATES]i32 = undefined,
+    scored_count: usize = 0,
+    selected: usize = 0,
+    scroll: usize = 0,
+    max_visible: usize = 0,
+    direction: overlay.Direction = .below,
+    word_start: usize = 0,
+    word_end: usize = 0,
+    /// Lines rendered in the previous frame — used to clear leftover rows.
+    prev_rendered: usize = 0,
+};
+
+/// Module-level inline state.
+pub var inline_state: InlineState = .{};
+
+/// Update the inline overlay after a keystroke. Gathers candidates,
+/// scores them, and renders the overlay. Call from the input loop
+/// after any content-changing key.
+pub fn updateInline(
+    ed: *const editor_mod.Editor,
+    stdout: std.fs.File,
+    prompt_str: []const u8,
+    env: *const environ_mod.Environ,
+    cmd_cache: *highlight.CommandCache,
+    help_cache: ?*help_mod.HelpCache,
+    hl_ctx: anytype,
+) void {
+    var s = &inline_state;
+
+    // Dismiss if empty or cursor not at end
+    if (ed.len == 0 or ed.cursor != ed.len) {
+        if (s.active) dismissInline(stdout);
+        return;
+    }
+
+    const ctx = analyzeContext(ed.content(), ed.cursor);
+
+    // Don't show for redirect targets or env vars (too noisy)
+    if (ctx.kind == .redirect_target or ctx.kind == .none) {
+        if (s.active) dismissInline(stdout);
+        return;
+    }
+
+    // Need at least 1 char of prefix for non-command positions
+    if (ctx.kind != .command and ctx.prefix.len == 0) {
+        if (s.active) dismissInline(stdout);
+        return;
+    }
+
+    // Gather and score
+    s.all.count = 0;
+    providers.gather(&s.all, &ctx, env, cmd_cache, help_cache);
+    if (s.all.count == 0) {
+        if (s.active) dismissInline(stdout);
+        return;
+    }
+
+    scoreAndFilter(&s.all, ctx.prefix, &s.scored_indices, &s.scored_values, &s.scored_count);
+    if (s.scored_count == 0) {
+        if (s.active) dismissInline(stdout);
+        return;
+    }
+
+    // Don't show if the only candidate exactly matches what's typed
+    if (s.scored_count == 1) {
+        const only = s.all.items[s.scored_indices[0]].textSlice();
+        if (std.mem.eql(u8, only, ctx.prefix)) {
+            if (s.active) dismissInline(stdout);
+            return;
+        }
+    }
+
+    s.word_start = ctx.word_start;
+    s.word_end = ctx.word_end;
+
+    // Reset selection on content change
+    s.selected = 0;
+    s.scroll = 0;
+
+    // Compute layout using actual screen position
+    const layout = computeOverlayLayout();
+    s.max_visible = layout.max_visible;
+    s.direction = layout.direction;
+    s.active = true;
+
+    renderPicker(stdout, prompt_str, ed, &s.all, &s.scored_indices, s.scored_count, s.selected, s.scroll, s.max_visible, "", hl_ctx);
+}
+
+/// Cycle selection forward (Tab).
+pub fn cycleInline(
+    ed: *const editor_mod.Editor,
+    stdout: std.fs.File,
+    prompt_str: []const u8,
+    hl_ctx: anytype,
+) void {
+    var s = &inline_state;
+    if (!s.active or s.scored_count == 0) return;
+    s.selected = if (s.selected + 1 >= s.scored_count) 0 else s.selected + 1;
+    if (s.selected >= s.scroll + s.max_visible) s.scroll = s.selected - s.max_visible + 1;
+    if (s.selected < s.scroll) s.scroll = s.selected;
+    renderPicker(stdout, prompt_str, ed, &s.all, &s.scored_indices, s.scored_count, s.selected, s.scroll, s.max_visible, "", hl_ctx);
+}
+
+/// Cycle selection backward (Shift-Tab).
+pub fn cycleInlineBack(
+    ed: *const editor_mod.Editor,
+    stdout: std.fs.File,
+    prompt_str: []const u8,
+    hl_ctx: anytype,
+) void {
+    var s = &inline_state;
+    if (!s.active or s.scored_count == 0) return;
+    s.selected = if (s.selected == 0) s.scored_count - 1 else s.selected - 1;
+    if (s.selected < s.scroll) s.scroll = s.selected;
+    if (s.selected >= s.scroll + s.max_visible) s.scroll = s.selected - s.max_visible + 1;
+    renderPicker(stdout, prompt_str, ed, &s.all, &s.scored_indices, s.scored_count, s.selected, s.scroll, s.max_visible, "", hl_ctx);
+}
+
+/// Accept the currently selected candidate. Returns true if something was accepted.
+pub fn acceptInline(ed: *editor_mod.Editor, stdout: std.fs.File) bool {
+    var s = &inline_state;
+    if (!s.active or s.scored_count == 0) return false;
+    const idx = s.scored_indices[s.selected];
+    insertCandidate(ed, s.word_start, ed.cursor, &s.all.items[idx]);
+    dismissInline(stdout);
+    return true;
+}
+
+/// Dismiss the inline overlay without accepting.
+pub fn dismissInline(stdout: std.fs.File) void {
+    var s = &inline_state;
+    if (!s.active) return;
+    // Clear the actual rendered lines (not max_visible)
+    const lines_to_clear = if (s.prev_rendered > 0) s.prev_rendered else s.max_visible;
+    if (lines_to_clear > 0) {
+        clearPickerLines(stdout, lines_to_clear, s.direction);
+    }
+    s.active = false;
+    s.scored_count = 0;
+    s.prev_rendered = 0;
 }
 
 // ---------------------------------------------------------------------------

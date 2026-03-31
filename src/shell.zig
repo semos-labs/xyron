@@ -26,6 +26,7 @@ const highlight = @import("highlight.zig");
 const aliases_mod = @import("aliases.zig");
 const complete_help = @import("complete_help.zig");
 const block_mod = @import("block.zig");
+const overlay = @import("overlay.zig");
 
 pub const Shell = struct {
     allocator: std.mem.Allocator,
@@ -128,6 +129,11 @@ pub const Shell = struct {
             const prompt_str = prompt_result.text;
             input.prompt_extra_lines = if (prompt_result.line_count > 1) prompt_result.line_count - 1 else 0;
 
+            // First prompt — estimate near top
+            if (input.cursor_row_estimate == 0) {
+                input.cursor_row_estimate = prompt_result.line_count;
+            }
+
             // Store prompt state for live re-rendering in vim mode
             input.prompt_fresh = true;
             input.prompt_last_exit = self.last_exit_code;
@@ -152,6 +158,13 @@ pub const Shell = struct {
                         var line_copy: [editor_mod.MAX_LINE]u8 = undefined;
                         @memcpy(line_copy[0..line.len], line);
                         self.executeLine(line_copy[0..line.len]);
+                        // Estimate cursor row after command execution
+                        const trimmed_cmd = std.mem.trim(u8, line, " \t\r\n");
+                        if (std.mem.eql(u8, trimmed_cmd, "clear") or std.mem.eql(u8, trimmed_cmd, "reset")) {
+                            input.cursor_row_estimate = 1 + input.prompt_extra_lines;
+                        } else {
+                            input.cursor_row_estimate = overlay.getTermSize().rows;
+                        }
 
                         // Check for replay (history rerun)
                         const hist_cmd = @import("builtins/history.zig");

@@ -45,6 +45,8 @@ pub fn init(env: *environ_mod.Environ, attyx_enabled: bool) LuaState {
     registerFn(L, "exec", apiExec);
     registerFn(L, "prompt", apiPrompt);
     registerFn(L, "vim_mode", apiVimMode);
+    registerFn(L, "block_ui", apiBlockUi);
+    registerFn(L, "overlay", apiOverlay);
     registerFn(L, "alias", apiAlias);
     registerFn(L, "history_query", apiHistoryQuery);
     registerFn(L, "history_replay", apiHistoryReplay);
@@ -225,6 +227,24 @@ var global_hdb: ?*history_db_mod.HistoryDb = null;
 
 pub fn setHistoryDb(hdb: *history_db_mod.HistoryDb) void {
     global_hdb = hdb;
+}
+
+/// xyron.block_ui(enabled) — enable/disable block UI
+fn apiBlockUi(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    if (c.lua_type(state, 1) == c.LUA_TBOOLEAN) {
+        @import("block_ui.zig").enabled = c.lua_toboolean(state, 1) != 0;
+    }
+    return 0;
+}
+
+/// xyron.overlay(enabled) — enable/disable floating overlay for completions
+fn apiOverlay(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    if (c.lua_type(state, 1) == c.LUA_TBOOLEAN) {
+        @import("overlay.zig").enabled = c.lua_toboolean(state, 1) != 0;
+    }
+    return 0;
 }
 
 /// xyron.vim_mode(enabled) — enable/disable vim mode

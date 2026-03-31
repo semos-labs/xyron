@@ -11,6 +11,7 @@ const environ_mod = @import("environ.zig");
 const planner_mod = @import("planner.zig");
 const types = @import("types.zig");
 const builtins = @import("builtins.zig");
+const block_ui = @import("block_ui.zig");
 const attyx_mod = @import("attyx.zig");
 const history_db_mod = @import("history_db.zig");
 const jobs_mod = @import("jobs.zig");
@@ -63,19 +64,82 @@ pub fn executeGroup(
         // In-process builtin (not background)
         if (step.argv.len > 0 and builtins.isBuiltin(step.argv[0]) and !exec_plan.background) {
             ax.stepStarted(exec_plan, step);
-            const result = builtins.execute(step.argv, stdout, stderr, env, hdb, job_table);
-            // 255 = sentinel meaning "not handled, fall through to external"
-            if (result.exit_code != 255) {
-                ax.stepFinished(exec_plan, step, result.exit_code, 0);
-                ax.groupFinished(exec_plan, result.exit_code, types.timestampMs() - start);
-                return .{
-                    .exit_code = result.exit_code,
-                    .duration_ms = types.timestampMs() - start,
-                    .should_exit = result.should_exit,
-                };
+
+            if (block_ui.enabled) {
+                // Block mode: capture builtin output to a pipe, then render as block
+                const pipe_fds = posix.pipe2(.{}) catch
+                    [2]posix.fd_t{ -1, -1 };
+
+                if (pipe_fds[0] < 0) {
+                    // Pipe failed — fall through to non-block path
+                } else blk: {
+                const write_end = std.fs.File{ .handle = pipe_fds[1] };
+                const read_end = std.fs.File{ .handle = pipe_fds[0] };
+
+                const result = builtins.execute(step.argv, write_end, stderr, env, hdb, job_table);
+                posix.close(pipe_fds[1]); // close write end so read gets EOF
+
+                if (result.exit_code == 255) {
+                    // Not handled — close read end, fall through to external
+                    posix.close(pipe_fds[0]);
+                    break :blk;
+                } else {
+                    // Read captured output
+                    var cap_buf: [65536]u8 = undefined;
+                    var cap_total: usize = 0;
+                    while (cap_total < cap_buf.len) {
+                        const n = read_end.read(cap_buf[cap_total..]) catch break;
+                        if (n == 0) break;
+                        cap_total += n;
+                    }
+                    posix.close(pipe_fds[0]);
+
+                    // Trim trailing newlines
+                    var output = cap_buf[0..cap_total];
+                    while (output.len > 0 and output[output.len - 1] == '\n') output = output[0 .. output.len - 1];
+
+                    // Build command display string
+                    var cmd_disp: [256]u8 = undefined;
+                    var cmd_len: usize = 0;
+                    for (step.argv, 0..) |arg, ai| {
+                        if (ai > 0 and cmd_len < cmd_disp.len) { cmd_disp[cmd_len] = ' '; cmd_len += 1; }
+                        const n = @min(arg.len, cmd_disp.len - cmd_len);
+                        @memcpy(cmd_disp[cmd_len..][0..n], arg[0..n]);
+                        cmd_len += n;
+                    }
+
+                    block_ui.renderBlock(stdout, cmd_disp[0..cmd_len], output, result.exit_code);
+                    ax.stepFinished(exec_plan, step, result.exit_code, 0);
+                    ax.groupFinished(exec_plan, result.exit_code, types.timestampMs() - start);
+                    return .{ .exit_code = result.exit_code, .duration_ms = types.timestampMs() - start, .should_exit = result.should_exit };
+                }
+                }
+            } else {
+                const result = builtins.execute(step.argv, stdout, stderr, env, hdb, job_table);
+                // 255 = sentinel meaning "not handled, fall through to external"
+                if (result.exit_code != 255) {
+                    ax.stepFinished(exec_plan, step, result.exit_code, 0);
+                    ax.groupFinished(exec_plan, result.exit_code, types.timestampMs() - start);
+                    return .{
+                        .exit_code = result.exit_code,
+                        .duration_ms = types.timestampMs() - start,
+                        .should_exit = result.should_exit,
+                    };
+                }
             }
             // Fall through to external execution
         }
+    }
+
+    // Block UI: capture output and render bordered block (single commands only)
+    // Skip commands that control the terminal directly (clear, reset, etc.)
+    if (block_ui.enabled and !exec_plan.background and exec_plan.steps.len == 1 and !block_ui.isPassthrough(exec_plan.steps[0].argv)) {
+        const step0 = &exec_plan.steps[0];
+        ax.stepStarted(exec_plan, step0);
+        const code = block_ui.runAndRender(step0.argv, stdout);
+        ax.stepFinished(exec_plan, step0, code, types.timestampMs() - start);
+        ax.groupFinished(exec_plan, code, types.timestampMs() - start);
+        return .{ .exit_code = code, .duration_ms = types.timestampMs() - start };
     }
 
     var result = forkPipeline(exec_plan, ax, env, exec_plan.background);

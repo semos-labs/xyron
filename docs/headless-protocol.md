@@ -157,6 +157,69 @@ Reserved for command block lifecycle. Will carry block_id for Attyx block UI.
 - Unknown request types get `resp_error` with "unknown request"
 - If Attyx disconnects (stdin EOF), Xyron exits cleanly
 
+### get_completions (0x10)
+
+Get completion candidates for a buffer at a cursor position. Uses Xyron's full completion engine (builtins, aliases, lua commands, PATH executables, filesystem, env vars, help-derived flags).
+
+**Request**: `req_id:i64, buffer:str, cursor:i64`
+
+**Response**:
+```
+req_id:      i64
+context_kind: u8    # 0=command, 1=argument, 2=flag, 3=env_var, 4=redirect_target, 5=none
+word_start:   i64   # byte offset where the completing word starts
+word_end:     i64   # byte offset where the completing word ends (usually = cursor)
+count:        i64   # number of candidates
+
+# repeated `count` times (capped at 50):
+  text:        str   # candidate text (what gets inserted)
+  description: str   # help text (may be empty)
+  kind:        u8    # 0=builtin, 1=lua_cmd, 2=alias, 3=external_cmd,
+                     # 4=file, 5=directory, 6=env_var, 7=flag
+  score:       i64   # sort score (higher = better match)
+```
+
+Candidates are pre-sorted by score (fuzzy match quality + kind priority). Attyx should display them in the order received.
+
+**Context kinds** determine what's being completed:
+- `command` (0): first word — builtins, aliases, lua commands, PATH executables
+- `argument` (1): after a command — filesystem paths + help-derived flags/subcommands
+- `flag` (2): starts with `-` — help-derived flags + filesystem
+- `env_var` (3): starts with `$` — environment variable names
+- `redirect_target` (4): after `>`, `<`, `2>` — filesystem paths
+- `none` (5): no completion context
+
+**Candidate kinds** for styling:
+- `builtin` (0): cyan — shell built-in command
+- `lua_cmd` (1): magenta — Lua-defined custom command
+- `alias` (2): yellow — shell alias
+- `external_cmd` (3): green — found in PATH or help-derived subcommand
+- `file` (4): default — regular file
+- `directory` (5): blue — directory (text includes trailing `/`)
+- `env_var` (6): yellow — environment variable (text includes `$` prefix)
+- `flag` (7): cyan — command flag from help introspection
+
+**Word replacement**: when the user selects a candidate, replace `buffer[word_start..word_end]` with the candidate text. Append a space after non-directory candidates.
+
+### get_ghost (0x11)
+
+Get ghost text suggestion from command history. Returns the best prefix-matching history entry for inline display.
+
+**Request**: `req_id:i64, buffer:str`
+
+**Response**:
+```
+req_id:         i64
+has_suggestion: u8    # 1 if suggestion found, 0 if not
+
+# only if has_suggestion == 1:
+  suggestion:   str   # full command string (includes the typed prefix)
+```
+
+The suggestion always starts with the buffer content (prefix match). Ghost text to display is `suggestion[buffer.len..]`. The user accepts with Right arrow.
+
+Suggestions are ranked by fuzzy score + recency (newer commands win ties).
+
 ## Example session (Python)
 
 ```python

@@ -163,6 +163,10 @@ Binary wire format matching Attyx IPC: `[4B payload_len LE][1B msg_type][payload
 | 0x09 | get_shell_state | req_id:i64 |
 | 0x0B | get_prompt | req_id:i64 |
 | 0x0C | resize | rows:i64, cols:i64 |
+| 0x0D | query_history | req_id:i64, text:str, cwd:str, failed:u8, limit:i64 |
+| 0x0E | replay_command | req_id:i64, history_id:i64 |
+| 0x10 | get_completions | req_id:i64, buffer:str, cursor:i64 |
+| 0x11 | get_ghost | req_id:i64, buffer:str |
 
 ### Responses (Xyron → Attyx, 0x80–0x8F)
 
