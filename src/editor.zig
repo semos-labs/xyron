@@ -77,65 +77,79 @@ pub const Editor = struct {
     // Editing operations
     // ------------------------------------------------------------------
 
-    /// Insert a character at the cursor position.
+    /// Insert a single ASCII character at the cursor position.
     pub fn insert(self: *Editor, ch: u8) void {
-        if (self.len >= MAX_LINE) return;
+        self.insertBytes(&.{ch});
+    }
 
-        // Shift everything after cursor right by one
+    /// Insert a multi-byte UTF-8 sequence at the cursor position.
+    pub fn insertUtf8(self: *Editor, bytes: []const u8) void {
+        self.insertBytes(bytes);
+    }
+
+    fn insertBytes(self: *Editor, bytes: []const u8) void {
+        const n = bytes.len;
+        if (self.len + n > MAX_LINE) return;
+
+        // Shift everything after cursor right by n
         if (self.cursor < self.len) {
             std.mem.copyBackwards(
                 u8,
-                self.buf[self.cursor + 1 .. self.len + 1],
+                self.buf[self.cursor + n .. self.len + n],
                 self.buf[self.cursor .. self.len],
             );
         }
-        self.buf[self.cursor] = ch;
-        self.cursor += 1;
-        self.len += 1;
+        @memcpy(self.buf[self.cursor..][0..n], bytes);
+        self.cursor += n;
+        self.len += n;
     }
 
-    /// Delete the character before the cursor (backspace).
+    /// Delete the character (codepoint) before the cursor (backspace).
     pub fn backspace(self: *Editor) void {
         if (self.cursor == 0) return;
-
-        // Shift everything after cursor left by one
+        const char_start = prevCharStart(self.buf[0..self.len], self.cursor);
+        const char_len = self.cursor - char_start;
         if (self.cursor < self.len) {
             std.mem.copyForwards(
                 u8,
-                self.buf[self.cursor - 1 .. self.len - 1],
+                self.buf[char_start .. self.len - char_len],
                 self.buf[self.cursor .. self.len],
             );
         }
-        self.cursor -= 1;
-        self.len -= 1;
+        self.cursor = char_start;
+        self.len -= char_len;
     }
 
-    /// Delete the character at the cursor (delete key).
+    /// Delete the character (codepoint) at the cursor (delete key).
     pub fn delete(self: *Editor) void {
         if (self.cursor >= self.len) return;
-
-        if (self.cursor + 1 < self.len) {
+        const char_len = charLenAt(self.buf[0..self.len], self.cursor);
+        if (self.cursor + char_len < self.len) {
             std.mem.copyForwards(
                 u8,
-                self.buf[self.cursor .. self.len - 1],
-                self.buf[self.cursor + 1 .. self.len],
+                self.buf[self.cursor .. self.len - char_len],
+                self.buf[self.cursor + char_len .. self.len],
             );
         }
-        self.len -= 1;
+        self.len -= char_len;
     }
 
     // ------------------------------------------------------------------
-    // Cursor movement
+    // Cursor movement (UTF-8 aware)
     // ------------------------------------------------------------------
 
-    /// Move cursor one position left.
+    /// Move cursor one codepoint left.
     pub fn moveLeft(self: *Editor) void {
-        if (self.cursor > 0) self.cursor -= 1;
+        if (self.cursor > 0) {
+            self.cursor = prevCharStart(self.buf[0..self.len], self.cursor);
+        }
     }
 
-    /// Move cursor one position right.
+    /// Move cursor one codepoint right.
     pub fn moveRight(self: *Editor) void {
-        if (self.cursor < self.len) self.cursor += 1;
+        if (self.cursor < self.len) {
+            self.cursor += charLenAt(self.buf[0..self.len], self.cursor);
+        }
     }
 
     /// Move cursor to the beginning of the line.
@@ -287,8 +301,56 @@ pub const Editor = struct {
         }
     }
 
-    fn isWordSep(c: u8) bool {
-        return c == ' ' or c == '\t' or c == '/' or c == '.' or c == '-' or c == '_';
+    fn isWordSep(ch: u8) bool {
+        return ch == ' ' or ch == '\t' or ch == '/' or ch == '.' or ch == '-' or ch == '_';
+    }
+
+    // ------------------------------------------------------------------
+    // UTF-8 helpers
+    // ------------------------------------------------------------------
+
+    /// Length of the UTF-8 character starting at `pos`.
+    fn charLenAt(buf: []const u8, pos: usize) usize {
+        if (pos >= buf.len) return 1;
+        const b = buf[pos];
+        if (b < 0x80) return 1;
+        if (b & 0xE0 == 0xC0) return @min(2, buf.len - pos);
+        if (b & 0xF0 == 0xE0) return @min(3, buf.len - pos);
+        if (b & 0xF8 == 0xF0) return @min(4, buf.len - pos);
+        return 1; // invalid byte, treat as 1
+    }
+
+    /// Find the start of the character ending at or before `pos`.
+    fn prevCharStart(buf: []const u8, pos: usize) usize {
+        if (pos == 0) return 0;
+        var i = pos - 1;
+        // Walk back over continuation bytes (10xxxxxx)
+        while (i > 0 and buf[i] & 0xC0 == 0x80) : (i -= 1) {}
+        // Verify it's a valid lead byte
+        if (buf[i] & 0xC0 == 0x80) return pos - 1; // all continuation, just go back 1
+        return i;
+    }
+
+    /// Count visible characters (codepoints) in the buffer (for cursor display).
+    pub fn visibleCursorPos(self: *const Editor) usize {
+        var vis: usize = 0;
+        var i: usize = 0;
+        while (i < self.cursor) {
+            i += charLenAt(self.buf[0..self.len], i);
+            vis += 1;
+        }
+        return vis;
+    }
+
+    /// Count total visible characters in the buffer.
+    pub fn visibleLen(self: *const Editor) usize {
+        var vis: usize = 0;
+        var i: usize = 0;
+        while (i < self.len) {
+            i += charLenAt(self.buf[0..self.len], i);
+            vis += 1;
+        }
+        return vis;
     }
 };
 

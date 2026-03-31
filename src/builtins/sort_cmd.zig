@@ -40,15 +40,12 @@ pub fn runFromPipe(args: []const []const u8) void {
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const parsed = jp.parse(arena.allocator(), input) catch {
+    const typed = pj.parseTypedInput(arena.allocator(), input) catch {
         stderr.writeAll("sort: invalid JSON\n") catch {};
         std.process.exit(1);
     };
-
-    const items = switch (parsed) {
-        .array => |arr| arr,
-        else => { stderr.writeAll("sort: expected array\n") catch {}; std.process.exit(1); },
-    };
+    const items = typed.items;
+    if (items.len == 0) { stderr.writeAll("sort: empty input\n") catch {}; std.process.exit(1); }
 
     // Build index array and sort
     var indices: [512]usize = undefined;
@@ -62,9 +59,17 @@ pub fn runFromPipe(args: []const []const u8) void {
     for (0..count) |i| sorted[i] = items[indices[i]];
 
     if (pj.isTerminal(posix.STDOUT_FILENO)) {
-        pj.renderTable(stdout, sorted[0..count]);
+        if (typed.schema) |*s| {
+            pj.renderTableWithSchema(stdout, sorted[0..count], s);
+        } else {
+            pj.renderTable(stdout, sorted[0..count]);
+        }
     } else {
-        pj.writeJsonArray(stdout, sorted[0..count]);
+        if (typed.schema) |*s| {
+            pj.writeTypedJson(stdout, sorted[0..count], s);
+        } else {
+            pj.writeJsonArray(stdout, sorted[0..count]);
+        }
     }
     std.process.exit(0);
 }

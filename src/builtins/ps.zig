@@ -2,7 +2,9 @@
 // Runs /bin/ps with controlled format, structures the output.
 
 const std = @import("std");
+const posix = std.posix;
 const rich = @import("../rich_output.zig");
+const pj = @import("../pipe_json.zig");
 const Result = @import("mod.zig").BuiltinResult;
 
 pub fn run(args: []const []const u8, stdout: std.fs.File) Result {
@@ -81,14 +83,42 @@ pub fn run(args: []const []const u8, stdout: std.fs.File) Result {
     }
     if (col_count == 0) return .{ .exit_code = code };
 
-    var tbl = rich.Table{};
+    // Extract header names
+    var col_names: [12][]const u8 = undefined;
     for (0..col_count) |c| {
         const start = col_starts[c];
         const end = if (c + 1 < col_count) col_starts[c + 1] else header.len;
-        const hdr = std.mem.trim(u8, header[start..end], " ");
-        // Color based on column name
-        const color: []const u8 = if (std.mem.eql(u8, hdr, "%CPU") or std.mem.eql(u8, hdr, "%MEM")) "\x1b[33m" else if (std.mem.eql(u8, hdr, "PID")) "\x1b[36m" else "";
-        tbl.addColumn(.{ .header = hdr, .color = color });
+        col_names[c] = std.mem.trim(u8, header[start..end], " ");
+    }
+
+    // JSON output when piped
+    if (!pj.isTerminal(posix.STDOUT_FILENO)) {
+        var json_buf: [65536]u8 = undefined;
+        var jp: usize = 0;
+        if (jp < json_buf.len) { json_buf[jp] = '['; jp += 1; }
+        for (1..line_count) |li| {
+            if (li > 1 and jp < json_buf.len) { json_buf[jp] = ','; jp += 1; }
+            if (jp < json_buf.len) { json_buf[jp] = '{'; jp += 1; }
+            const line = lines_buf[li];
+            for (0..col_count) |c| {
+                if (c > 0 and jp < json_buf.len) { json_buf[jp] = ','; jp += 1; }
+                const start = if (col_starts[c] < line.len) col_starts[c] else line.len;
+                const end = if (c + 1 < col_count and col_starts[c + 1] < line.len) col_starts[c + 1] else line.len;
+                const val = if (start < line.len) std.mem.trim(u8, line[start..end], " ") else "";
+                const written = std.fmt.bufPrint(json_buf[jp..], "\"{s}\":\"{s}\"", .{ col_names[c], val }) catch break;
+                jp += written.len;
+            }
+            if (jp < json_buf.len) { json_buf[jp] = '}'; jp += 1; }
+        }
+        if (jp < json_buf.len) { json_buf[jp] = ']'; jp += 1; }
+        stdout.writeAll(json_buf[0..jp]) catch {};
+        return .{ .exit_code = code };
+    }
+
+    var tbl = rich.Table{};
+    for (0..col_count) |c| {
+        const color: []const u8 = if (std.mem.eql(u8, col_names[c], "%CPU") or std.mem.eql(u8, col_names[c], "%MEM")) "\x1b[33m" else if (std.mem.eql(u8, col_names[c], "PID")) "\x1b[36m" else "";
+        tbl.addColumn(.{ .header = col_names[c], .color = color });
     }
 
     for (1..line_count) |li| {

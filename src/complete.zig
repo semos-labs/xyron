@@ -407,7 +407,20 @@ fn computeOverlayLayout() OverlayLayout {
         };
     }
 
-    // DSR failed — use the shell's cursor row estimate
+    // Without block UI, we can't track position accurately.
+    // Always use "below" — pre-scroll with \r\n works reliably.
+    const block_ui_mod = @import("block_ui.zig");
+    if (!block_ui_mod.enabled) {
+        const space = if (term_size.rows > prompt_lines + 1) term_size.rows - prompt_lines - 1 else 3;
+        return .{
+            .direction = .below,
+            .max_visible = @min(MAX_VISIBLE, space),
+            .cursor_row = 0,
+            .term_rows = term_size.rows,
+        };
+    }
+
+    // Block UI mode — use the shell's cursor row estimate
     const est = input_mod.cursor_row_estimate;
     if (est > 0) {
         const space_below = if (term_size.rows > est) term_size.rows - est else 0;
@@ -460,18 +473,10 @@ fn renderPicker(
     const rendered_lines = visible_end - scroll;
     const prev = inline_state.prev_rendered;
 
-    // For "below": pre-scroll based on actual candidate count
-    if (direction == .below) {
-        const scroll_n = @max(rendered_lines, prev);
-        for (0..scroll_n) |_| pos += cp(buf[pos..], "\n");
-        const seq = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{scroll_n}) catch "";
-        pos += seq.len;
-    }
-
     // Render prompt + editor content
     pos += input_mod.renderPromptIntoBuf(buf[pos..], prompt_str, ed, hl_ctx);
 
-    // Save cursor position (after pre-scroll, so restore is correct)
+    // Save cursor position
     pos += cp(buf[pos..], "\x1b[s");
 
     // Compute column widths
@@ -608,9 +613,9 @@ fn renderPicker(
         pos += cp(buf[pos..], "\x1b[0m");
     }
 
-    // For "below": clear leftover lines if list shrank
-    if (direction == .below and prev > rendered_lines) {
-        const extra = prev - rendered_lines;
+    // For "below": leftover clearing handled by \x1b[J above
+    if (false and direction == .below) {
+        const extra: usize = 0;
         for (0..extra) |_| {
             pos += cp(buf[pos..], "\r\n\x1b[K");
         }
@@ -621,7 +626,7 @@ fn renderPicker(
     pos += cp(buf[pos..], "\x1b[u");
 
     // Position cursor within the editor line
-    const after = ed.len - ed.cursor;
+    const after = ed.visibleLen() - ed.visibleCursorPos();
     if (after > 0) {
         const n = std.fmt.bufPrint(buf[pos..], "\x1b[{d}D", .{after}) catch "";
         pos += n.len;
@@ -649,7 +654,7 @@ fn clearPickerLines(stdout: std.fs.File, lines: usize, direction: overlay.Direct
             pos += cp(buf[pos..], "\r\x1b[K");
         }
     } else {
-        // Below: clear lines below prompt
+        // Below: clear each overlay line individually
         for (0..lines) |_| {
             pos += cp(buf[pos..], "\r\n\x1b[K");
         }

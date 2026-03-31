@@ -1,5 +1,7 @@
 const std = @import("std");
+const posix = std.posix;
 const rich = @import("../rich_output.zig");
+const pj = @import("../pipe_json.zig");
 const jobs_mod = @import("../jobs.zig");
 const Result = @import("mod.zig").BuiltinResult;
 
@@ -7,6 +9,21 @@ pub fn run(stdout: std.fs.File, job_table: ?*jobs_mod.JobTable) Result {
     const jt = job_table orelse return .{};
     const all = jt.allJobs();
     if (all.len == 0) return .{};
+
+    // JSON output when piped
+    if (!pj.isTerminal(posix.STDOUT_FILENO)) {
+        var buf: [8192]u8 = undefined;
+        var pos: usize = 0;
+        if (pos < buf.len) { buf[pos] = '['; pos += 1; }
+        for (all, 0..) |*job, i| {
+            if (i > 0 and pos < buf.len) { buf[pos] = ','; pos += 1; }
+            const written = std.fmt.bufPrint(buf[pos..], "{{\"id\":{d},\"state\":\"{s}\",\"command\":\"{s}\"}}", .{ job.id, job.state.label(), job.rawInputSlice() }) catch break;
+            pos += written.len;
+        }
+        if (pos < buf.len) { buf[pos] = ']'; pos += 1; }
+        stdout.writeAll(buf[0..pos]) catch {};
+        return .{};
+    }
 
     var tbl = rich.Table{};
     tbl.addColumn(.{ .header = "id", .align_ = .right, .color = "\x1b[1;37m" });

@@ -108,10 +108,12 @@ pub fn executeGroup(
                         cmd_len += n;
                     }
 
+                    block_ui.last_duration_ms = types.timestampMs() - start;
                     block_ui.renderBlock(stdout, cmd_disp[0..cmd_len], output, result.exit_code);
-                    ax.stepFinished(exec_plan, step, result.exit_code, 0);
-                    ax.groupFinished(exec_plan, result.exit_code, types.timestampMs() - start);
-                    return .{ .exit_code = result.exit_code, .duration_ms = types.timestampMs() - start, .should_exit = result.should_exit };
+                    const dur = types.timestampMs() - start;
+                    ax.stepFinished(exec_plan, step, result.exit_code, dur);
+                    ax.groupFinished(exec_plan, result.exit_code, dur);
+                    return .{ .exit_code = result.exit_code, .duration_ms = dur, .should_exit = result.should_exit };
                 }
                 }
             } else {
@@ -146,20 +148,46 @@ pub fn executeGroup(
                 }
             }
 
-            if (exec_plan.steps.len == 1 and !has_builtin) {
+            // Check if last step is a pipe builtin that renders its own table.
+            // If so, skip block UI capture — let it render directly.
+            const last_is_pipe_builtin = if (last_step.argv.len > 0) isPipeBuiltin(last_step.argv[0]) else false;
+
+            if (last_is_pipe_builtin) {
+                // Pipeline ends with where/select/sort/csv/json — skip block capture,
+                // use regular forkPipeline. Last command renders table to terminal.
+            } else if (exec_plan.steps.len == 1 and !has_builtin) {
                 // Single external command — use /bin/sh path
                 const step0 = &exec_plan.steps[0];
                 ax.stepStarted(exec_plan, step0);
+                block_ui.last_duration_ms = types.timestampMs() - start;
                 const code = block_ui.runAndRender(exec_plan.raw_input, exec_plan.steps, stdout);
-                ax.stepFinished(exec_plan, step0, code, types.timestampMs() - start);
-                ax.groupFinished(exec_plan, code, types.timestampMs() - start);
-                return .{ .exit_code = code, .duration_ms = types.timestampMs() - start };
+                const dur = types.timestampMs() - start;
+                ax.stepFinished(exec_plan, step0, code, dur);
+                ax.groupFinished(exec_plan, code, dur);
+                return .{ .exit_code = code, .duration_ms = dur };
             } else {
                 // Pipeline or has builtins — fork pipeline with stdout capture
+                block_ui.last_duration_ms = types.timestampMs() - start;
                 const code = block_ui.forkAndRender(exec_plan, ax, env, stdout);
-                ax.groupFinished(exec_plan, code, types.timestampMs() - start);
-                return .{ .exit_code = code, .duration_ms = types.timestampMs() - start };
+                const dur = types.timestampMs() - start;
+                ax.groupFinished(exec_plan, code, dur);
+                return .{ .exit_code = code, .duration_ms = dur };
             }
+        }
+    }
+
+    // Non-block mode: capture + store output for overlay restoration
+    // (single external commands only; pipelines go through forkPipeline)
+    if (!block_ui.enabled and !exec_plan.background and exec_plan.steps.len == 1) {
+        const step0 = &exec_plan.steps[0];
+        if (!block_ui.isPassthrough(step0.argv)) {
+            ax.stepStarted(exec_plan, step0);
+            block_ui.last_duration_ms = types.timestampMs() - start;
+            const code = block_ui.runCaptureAndPrintRaw(exec_plan.raw_input, exec_plan.steps, stdout);
+            const dur = types.timestampMs() - start;
+            ax.stepFinished(exec_plan, step0, code, dur);
+            ax.groupFinished(exec_plan, code, dur);
+            return .{ .exit_code = code, .duration_ms = dur };
         }
     }
 
@@ -328,6 +356,16 @@ fn waitForForeground(
 // Child process setup
 // ---------------------------------------------------------------------------
 
+/// Pipe builtins that render their own tables — skip block UI capture.
+fn isPipeBuiltin(name: []const u8) bool {
+    return std.mem.eql(u8, name, "where") or
+        std.mem.eql(u8, name, "select") or
+        std.mem.eql(u8, name, "sort") or
+        std.mem.eql(u8, name, "csv") or
+        std.mem.eql(u8, name, "json") or
+        std.mem.eql(u8, name, "query");
+}
+
 fn childExec(
     steps: []const planner_mod.PlanStep,
     pipes_ptr: *const [MAX_PIPELINE - 1][2]posix.fd_t,
@@ -380,6 +418,44 @@ fn childExec(
     if (argv.len > 0 and std.mem.eql(u8, argv[0], "sort")) {
         @import("builtins/sort_cmd.zig").runFromPipe(if (argv.len > 1) argv[1..] else &.{});
         std.process.exit(0);
+    }
+    if (argv.len > 0 and std.mem.eql(u8, argv[0], "csv")) {
+        @import("builtins/csv.zig").runFromPipe(if (argv.len > 1) argv[1..] else &.{});
+        std.process.exit(0);
+    }
+
+    // Structured builtins: run in-process.
+    // Output JSON only if next step is a xyron pipe builtin; otherwise text.
+    if (argv.len > 0) {
+        const name = argv[0];
+        // Check if next pipeline step expects structured (JSON) input
+        const next_wants_json = if (i + 1 < n and steps[i + 1].argv.len > 0)
+            isPipeBuiltin(steps[i + 1].argv[0])
+        else
+            false;
+
+        if (std.mem.eql(u8, name, "ls") or std.mem.eql(u8, name, "ll")) {
+            // Set flag so ls knows whether to output JSON or table
+            const pj_mod = @import("pipe_json.zig");
+            pj_mod.output_mode = if (next_wants_json) .json else .text;
+
+            const ls_mod = @import("builtins/ls.zig");
+            const stdout_file = std.fs.File{ .handle = posix.STDOUT_FILENO };
+            if (std.mem.eql(u8, name, "ll")) {
+                _ = ls_mod.run(&.{"-la"}, stdout_file);
+            } else {
+                _ = ls_mod.run(if (argv.len > 1) argv[1..] else &.{}, stdout_file);
+            }
+            std.process.exit(0);
+        }
+        if (std.mem.eql(u8, name, "ps")) {
+            const pj_mod = @import("pipe_json.zig");
+            pj_mod.output_mode = if (next_wants_json) .json else .text;
+
+            const ps_mod = @import("builtins/ps.zig");
+            _ = ps_mod.run(if (argv.len > 1) argv[1..] else &.{}, std.fs.File{ .handle = posix.STDOUT_FILENO });
+            std.process.exit(0);
+        }
     }
 
     var argv_buf: [256]?[*:0]const u8 = undefined;

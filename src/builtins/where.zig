@@ -37,22 +37,19 @@ pub fn runFromPipe(args: []const []const u8) void {
     const op = parseOp(args[1]);
     const rhs = args[2];
 
-    // Read and parse JSON
+    // Read and parse JSON (supports typed envelopes)
     var input_buf: [262144]u8 = undefined;
     const input = pj.readStdin(&input_buf);
     if (input.len == 0) { stderr.writeAll("where: no input\n") catch {}; std.process.exit(1); }
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const parsed = jp.parse(arena.allocator(), input) catch {
+    const typed = pj.parseTypedInput(arena.allocator(), input) catch {
         stderr.writeAll("where: invalid JSON\n") catch {};
         std.process.exit(1);
     };
-
-    const items = switch (parsed) {
-        .array => |arr| arr,
-        else => { stderr.writeAll("where: expected array\n") catch {}; std.process.exit(1); },
-    };
+    const items = typed.items;
+    if (items.len == 0) { stderr.writeAll("where: empty input\n") catch {}; std.process.exit(1); }
 
     // Filter
     var results: [512]jp.Value = undefined;
@@ -66,9 +63,18 @@ pub fn runFromPipe(args: []const []const u8) void {
     }
 
     if (pj.isTerminal(posix.STDOUT_FILENO)) {
-        pj.renderTable(stdout, results[0..count]);
+        if (typed.schema) |*s| {
+            pj.renderTableWithSchema(stdout, results[0..count], s);
+        } else {
+            pj.renderTable(stdout, results[0..count]);
+        }
     } else {
-        pj.writeJsonArray(stdout, results[0..count]);
+        // Pass through typed envelope if present
+        if (typed.schema) |*s| {
+            pj.writeTypedJson(stdout, results[0..count], s);
+        } else {
+            pj.writeJsonArray(stdout, results[0..count]);
+        }
     }
     std.process.exit(0);
 }
@@ -149,12 +155,12 @@ fn unquote(s: []const u8) []const u8 {
 }
 
 fn parseOp(s: []const u8) Op {
-    if (std.mem.eql(u8, s, "==") or std.mem.eql(u8, s, "=")) return .eq;
-    if (std.mem.eql(u8, s, "!=")) return .neq;
-    if (std.mem.eql(u8, s, ">")) return .gt;
-    if (std.mem.eql(u8, s, "<")) return .lt;
-    if (std.mem.eql(u8, s, ">=")) return .gte;
-    if (std.mem.eql(u8, s, "<=")) return .lte;
+    if (std.mem.eql(u8, s, "==") or std.mem.eql(u8, s, "=") or std.mem.eql(u8, s, "eq")) return .eq;
+    if (std.mem.eql(u8, s, "!=") or std.mem.eql(u8, s, "neq")) return .neq;
+    if (std.mem.eql(u8, s, ">") or std.mem.eql(u8, s, "gt")) return .gt;
+    if (std.mem.eql(u8, s, "<") or std.mem.eql(u8, s, "lt")) return .lt;
+    if (std.mem.eql(u8, s, ">=") or std.mem.eql(u8, s, "gte")) return .gte;
+    if (std.mem.eql(u8, s, "<=") or std.mem.eql(u8, s, "lte")) return .lte;
     if (std.mem.eql(u8, s, "contains")) return .contains;
     return .eq;
 }

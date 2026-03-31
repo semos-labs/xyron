@@ -14,6 +14,8 @@ const c = std.c;
 
 pub const Key = union(enum) {
     char: u8,
+    /// Multi-byte UTF-8 character (2-4 bytes).
+    utf8: struct { bytes: [4]u8, len: u3 },
     tab,
     shift_tab,
     enter,
@@ -46,6 +48,7 @@ pub const Key = union(enum) {
     alt_f, // word forward
     alt_d, // kill word forward
     alt_backspace, // kill word backward (same as ctrl_w)
+    resize, // terminal resized (SIGWINCH)
     unknown,
 };
 
@@ -61,10 +64,19 @@ pub fn readKey() !Key {
         stashed_byte = null;
         break :blk b;
     } else blk: {
+        // Use raw syscall — Zig's posix.read auto-retries on EINTR,
+        // which swallows SIGWINCH. We need to detect it.
         var buf: [1]u8 = undefined;
-        const n = try posix.read(posix.STDIN_FILENO, &buf);
-        if (n == 0) return .ctrl_d;
-        break :blk buf[0];
+        const rc = c.read(posix.STDIN_FILENO, &buf, 1);
+        if (rc > 0) {
+            break :blk buf[0];
+        } else if (rc == 0) {
+            return .ctrl_d;
+        } else {
+            const err = std.posix.errno(rc);
+            if (err == .INTR) return .resize;
+            return error.InputOutput;
+        }
     };
 
     // Control characters (byte values 0-31)
@@ -90,8 +102,27 @@ pub fn readKey() !Key {
         27 => parseEscapeSequence(), // ESC
         127 => .backspace, // DEL
         32...126 => .{ .char = byte }, // printable ASCII
+        // UTF-8 multi-byte sequences
+        0xC0...0xDF => readUtf8(byte, 2), // 2-byte (Latin, Greek, Cyrillic, etc.)
+        0xE0...0xEF => readUtf8(byte, 3), // 3-byte (CJK, emoji, etc.)
+        0xF0...0xF7 => readUtf8(byte, 4), // 4-byte (emoji, rare scripts)
         else => .unknown,
     };
+}
+
+/// Read remaining UTF-8 continuation bytes and return as a utf8 key.
+fn readUtf8(lead: u8, expected_len: u3) Key {
+    var bytes: [4]u8 = undefined;
+    bytes[0] = lead;
+    var i: usize = 1;
+    while (i < expected_len) : (i += 1) {
+        var buf: [1]u8 = undefined;
+        const rc = c.read(posix.STDIN_FILENO, &buf, 1);
+        if (rc <= 0) return .unknown;
+        if (buf[0] & 0xC0 != 0x80) return .unknown; // not a continuation byte
+        bytes[i] = buf[0];
+    }
+    return .{ .utf8 = .{ .bytes = bytes, .len = expected_len } };
 }
 
 /// Stashed byte from a failed escape sequence parse (ESC + non-bracket).

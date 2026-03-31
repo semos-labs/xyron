@@ -135,6 +135,10 @@ pub const Shell = struct {
         };
         defer term.disableRawMode();
 
+        // Set beam (line) cursor on startup, restore block on exit
+        stdout.writeAll("\x1b[6 q") catch {};
+        defer stdout.writeAll("\x1b[2 q") catch {};
+
         var ed = editor_mod.Editor{};
         ed.vim_enabled = lua_api.vim_mode_enabled;
 
@@ -147,6 +151,18 @@ pub const Shell = struct {
 
             self.reapAndNotify(stdout);
             if (self.ipc_enabled) ipc.poll();
+
+            // Re-render blocks on terminal resize
+            if (winch_pending) {
+                winch_pending = false;
+                const block_ui_mod = @import("block_ui.zig");
+                if (block_ui_mod.enabled) {
+                    block_ui_mod.reRenderVisible(stdout);
+                    // Update cursor estimate after re-render
+                    input.cursor_row_estimate = overlay.getTermSize().rows;
+                }
+                input.prompt_fresh = true;
+            }
 
             // Build prompt from segments
             var pctx = prompt_mod.buildContext(self.last_exit_code, self.last_duration_ms, self.activeJobCount());
@@ -266,6 +282,12 @@ pub const Shell = struct {
                 pos += rl;
                 input_to_parse = expanded_buf[0..pos];
             }
+        }
+
+        // Detect bash/sh commands and delegate to /bin/sh
+        if (shouldDelegateToSh(input_to_parse)) {
+            self.runViaSh(input_to_parse, trimmed);
+            return;
         }
 
         // Parse
@@ -400,6 +422,97 @@ pub const Shell = struct {
             }
         }
     }
+
+    /// Run a command via /bin/sh -c. Used for bash/sh syntax delegation.
+    fn runViaSh(self: *Shell, cmd: []const u8, raw: []const u8) void {
+        const stdout = std.fs.File.stdout();
+        const start = types.timestampMs();
+
+        const block_ui_mod = @import("block_ui.zig");
+        if (block_ui_mod.enabled and !block_ui_mod.isPassthrough(&.{cmd})) {
+            // Block UI: capture output
+            var sh_buf: [4096]u8 = undefined;
+            const sh_cmd = std.fmt.bufPrintZ(&sh_buf, "{s}", .{cmd}) catch {
+                self.last_exit_code = 127;
+                return;
+            };
+            var child = std.process.Child.init(
+                &.{ "/bin/sh", "-c", sh_cmd },
+                std.heap.page_allocator,
+            );
+            child.stdin_behavior = .Inherit;
+            child.stdout_behavior = .Pipe;
+            child.stderr_behavior = .Pipe;
+
+            child.spawn() catch {
+                block_ui_mod.renderBlock(stdout, raw, "xyron: failed to run via sh", 127);
+                self.last_exit_code = 127;
+                return;
+            };
+
+            var out_buf: [65536]u8 = undefined;
+            var total: usize = 0;
+            if (child.stdout) |f| {
+                while (total < out_buf.len) {
+                    const n = f.read(out_buf[total..]) catch break;
+                    if (n == 0) break;
+                    total += n;
+                }
+            }
+            if (child.stderr) |f| {
+                while (total < out_buf.len) {
+                    const n = f.read(out_buf[total..]) catch break;
+                    if (n == 0) break;
+                    total += n;
+                }
+            }
+
+            const term_result = child.wait() catch {
+                block_ui_mod.renderBlock(stdout, raw, "xyron: wait failed", 127);
+                self.last_exit_code = 127;
+                return;
+            };
+            const code: u8 = switch (term_result) { .Exited => |c| c, else => 1 };
+
+            var output = out_buf[0..total];
+            while (output.len > 0 and output[output.len - 1] == '\n') output = output[0 .. output.len - 1];
+
+            block_ui_mod.renderBlock(stdout, raw, output, code);
+            self.last_exit_code = code;
+        } else {
+            // Non-block: run directly
+            var sh_buf: [4096]u8 = undefined;
+            const sh_cmd = std.fmt.bufPrintZ(&sh_buf, "{s}", .{cmd}) catch {
+                self.last_exit_code = 127;
+                return;
+            };
+            var child = std.process.Child.init(
+                &.{ "/bin/sh", "-c", sh_cmd },
+                std.heap.page_allocator,
+            );
+            child.stdin_behavior = .Inherit;
+            child.stdout_behavior = .Inherit;
+            child.stderr_behavior = .Inherit;
+
+            term.suspendRawMode();
+            child.spawn() catch {
+                term.enableRawMode() catch {};
+                stdout.writeAll("xyron: failed to run via sh\n") catch {};
+                self.last_exit_code = 127;
+                return;
+            };
+            const term_result = child.wait() catch {
+                term.enableRawMode() catch {};
+                self.last_exit_code = 127;
+                return;
+            };
+            term.enableRawMode() catch {};
+            self.last_exit_code = switch (term_result) { .Exited => |c| c, else => 1 };
+        }
+
+        self.last_duration_ms = types.timestampMs() - start;
+        _ = self.history_db.recordCommand(raw, "", self.last_exit_code, self.last_duration_ms, types.timestampMs(), false, &.{});
+    }
 };
 
 fn loadLuaConfig(L: lua_api.LuaState) void {
@@ -438,6 +551,45 @@ fn loadRecentHistory(hdb: *history_db_mod.HistoryDb, hist: *history_mod.History)
     while (i > 0) { i -= 1; hist.push(entries[i].raw_input); }
 }
 
+/// Detect if a command should be delegated to /bin/sh.
+/// Catches: `bash ...`, `sh ...`, `./script.sh`, and bash syntax patterns.
+fn shouldDelegateToSh(line: []const u8) bool {
+    // First word
+    var end: usize = 0;
+    while (end < line.len and line[end] != ' ' and line[end] != '\t') : (end += 1) {}
+    const cmd = line[0..end];
+
+    // Explicit sh/bash invocation
+    if (std.mem.eql(u8, cmd, "sh") or std.mem.eql(u8, cmd, "bash") or
+        std.mem.eql(u8, cmd, "zsh") or std.mem.eql(u8, cmd, "/bin/sh") or
+        std.mem.eql(u8, cmd, "/bin/bash") or std.mem.eql(u8, cmd, "/bin/zsh"))
+        return true;
+
+    // Script file with .sh extension
+    if (std.mem.endsWith(u8, cmd, ".sh")) return true;
+
+    // Common bash syntax patterns that xyron doesn't support
+    if (std.mem.startsWith(u8, line, "if [") or std.mem.startsWith(u8, line, "if [["))
+        return true;
+    if (std.mem.startsWith(u8, line, "for ") and std.mem.indexOf(u8, line, " in ") != null)
+        return true;
+    if (std.mem.startsWith(u8, line, "while ") or std.mem.startsWith(u8, line, "until "))
+        return true;
+    if (std.mem.startsWith(u8, line, "case "))
+        return true;
+    if (std.mem.indexOf(u8, line, "$(") != null)
+        return true;
+    if (std.mem.indexOf(u8, line, "&&") != null or std.mem.indexOf(u8, line, "||") != null)
+        return true;
+    if (std.mem.indexOf(u8, line, "<<") != null) // heredoc
+        return true;
+
+    return false;
+}
+
+/// Flag set by SIGWINCH handler — checked in the main loop.
+var winch_pending: bool = false;
+
 fn installSignalHandlers() void {
     const ignore = posix.Sigaction{
         .handler = .{ .handler = noop },
@@ -448,6 +600,18 @@ fn installSignalHandlers() void {
     posix.sigaction(posix.SIG.TSTP, &ignore, null);
     posix.sigaction(posix.SIG.TTOU, &ignore, null);
     posix.sigaction(posix.SIG.TTIN, &ignore, null);
+
+    // SIGWINCH: re-render blocks on terminal resize
+    const winch_act = posix.Sigaction{
+        .handler = .{ .handler = handleWinch },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.WINCH, &winch_act, null);
 }
 
 fn noop(_: i32) callconv(.c) void {}
+
+fn handleWinch(_: i32) callconv(.c) void {
+    winch_pending = true;
+}

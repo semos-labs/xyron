@@ -59,11 +59,21 @@ pub fn run(args: []const []const u8, stdout: std.fs.File) Result {
         count += 1;
     }
 
-    // Sort
+    // Sort: directories first, then alphabetically within each group
     var i: usize = 1;
     while (i < count) : (i += 1) {
         var j = i;
-        while (j > 0 and std.mem.order(u8, names[j][0..name_lens[j]], names[j - 1][0..name_lens[j - 1]]) == .lt) {
+        while (j > 0) {
+            const a_dir = kinds[j] == .directory;
+            const b_dir = kinds[j - 1] == .directory;
+            const should_swap = if (a_dir and !b_dir)
+                true // directory before non-directory
+            else if (!a_dir and b_dir)
+                false
+            else
+                std.mem.order(u8, names[j][0..name_lens[j]], names[j - 1][0..name_lens[j - 1]]) == .lt;
+
+            if (!should_swap) break;
             std.mem.swap([256]u8, &names[j], &names[j - 1]);
             std.mem.swap(std.fs.Dir.Entry.Kind, &kinds[j], &kinds[j - 1]);
             std.mem.swap(u64, &sizes[j], &sizes[j - 1]);
@@ -73,12 +83,16 @@ pub fn run(args: []const []const u8, stdout: std.fs.File) Result {
         }
     }
 
-    // JSON output when piped (for select/where/sort chaining)
+    // Typed JSON output when piped — includes _types for proper formatting
     const pj = @import("../pipe_json.zig");
     if (!pj.isTerminal(posix.STDOUT_FILENO)) {
         var json_buf: [65536]u8 = undefined;
         var jp: usize = 0;
-        if (jp < json_buf.len) { json_buf[jp] = '['; jp += 1; }
+        // Typed envelope
+        const typed_header = "{\"_types\":{\"name\":\"path\",\"type\":\"kind\",\"size\":\"size\"},\"rows\":[";
+        @memcpy(json_buf[0..typed_header.len], typed_header);
+        jp = typed_header.len;
+
         for (0..count) |ei| {
             if (ei > 0 and jp < json_buf.len) { json_buf[jp] = ','; jp += 1; }
             const name = names[ei][0..name_lens[ei]];
@@ -93,7 +107,7 @@ pub fn run(args: []const []const u8, stdout: std.fs.File) Result {
             ) catch break;
             jp += written.len;
         }
-        if (jp < json_buf.len) { json_buf[jp] = ']'; jp += 1; }
+        if (jp + 1 < json_buf.len) { json_buf[jp] = ']'; jp += 1; json_buf[jp] = '}'; jp += 1; }
         stdout.writeAll(json_buf[0..jp]) catch {};
         return .{};
     }

@@ -52,34 +52,39 @@ pub fn runFromPipe(args: []const []const u8) void {
 
     if (field_count == 0) { stderr.writeAll("select: no fields specified\n") catch {}; std.process.exit(1); }
 
-    // Read and parse JSON
+    // Read and parse JSON (supports typed envelopes)
     var input_buf: [262144]u8 = undefined;
     const input = pj.readStdin(&input_buf);
     if (input.len == 0) { stderr.writeAll("select: no input\n") catch {}; std.process.exit(1); }
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
-    const parsed = jp.parse(arena.allocator(), input) catch {
+    const typed = pj.parseTypedInput(arena.allocator(), input) catch {
         stderr.writeAll("select: invalid JSON\n") catch {};
         std.process.exit(1);
     };
+    const items = typed.items;
 
-    const items = switch (parsed) {
-        .array => |arr| arr,
-        else => {
-            // Single object
-            const single = arena.allocator().alloc(jp.Value, 1) catch std.process.exit(1);
-            single[0] = parsed;
-            outputSelected(arena.allocator(), single, field_names[0..field_count], stdout);
-            std.process.exit(0);
-        },
-    };
+    if (items.len == 0) {
+        // Try as single object
+        const parsed = jp.parse(arena.allocator(), input) catch std.process.exit(1);
+        switch (parsed) {
+            .object => {
+                const single = arena.allocator().alloc(jp.Value, 1) catch std.process.exit(1);
+                single[0] = parsed;
+                outputSelected(arena.allocator(), single, field_names[0..field_count], typed.schema, stdout);
+                std.process.exit(0);
+            },
+            else => {},
+        }
+        std.process.exit(1);
+    }
 
-    outputSelected(arena.allocator(), items, field_names[0..field_count], stdout);
+    outputSelected(arena.allocator(), items, field_names[0..field_count], typed.schema, stdout);
     std.process.exit(0);
 }
 
-fn outputSelected(allocator: std.mem.Allocator, items: []const jp.Value, fields: []const []const u8, stdout: std.fs.File) void {
+fn outputSelected(allocator: std.mem.Allocator, items: []const jp.Value, fields: []const []const u8, schema: ?pj.TypeSchema, stdout: std.fs.File) void {
     // Build selected array
     var results: [512]jp.Value = undefined;
     var count: usize = 0;
@@ -92,9 +97,17 @@ fn outputSelected(allocator: std.mem.Allocator, items: []const jp.Value, fields:
     }
 
     if (pj.isTerminal(posix.STDOUT_FILENO)) {
-        pj.renderTable(stdout, results[0..count]);
+        if (schema) |*s| {
+            pj.renderTableWithSchema(stdout, results[0..count], s);
+        } else {
+            pj.renderTable(stdout, results[0..count]);
+        }
     } else {
-        pj.writeJsonArray(stdout, results[0..count]);
+        if (schema) |*s| {
+            pj.writeTypedJson(stdout, results[0..count], s);
+        } else {
+            pj.writeJsonArray(stdout, results[0..count]);
+        }
     }
 }
 

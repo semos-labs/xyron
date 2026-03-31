@@ -9,14 +9,214 @@ const posix = std.posix;
 
 pub var enabled: bool = false;
 
-/// Last rendered block — saved for overlay content restoration.
-var saved_cmd: [512]u8 = undefined;
-var saved_cmd_len: usize = 0;
-var saved_output: [65536]u8 = undefined;
-var saved_output_len: usize = 0;
-var saved_exit_code: u8 = 0;
-/// Total lines in the last rendered block (top + content + bottom).
+/// Set by executor before renderBlock — shown in bottom border.
+pub var last_duration_ms: i64 = 0;
+
+// ---------------------------------------------------------------------------
+// Block output history — stores recent blocks for resize re-rendering
+// ---------------------------------------------------------------------------
+
+const MAX_STORED: usize = 64;
+const OUTPUT_POOL: usize = 512 * 1024; // 512KB shared pool
+
+const StoredBlock = struct {
+    cmd: [256]u8 = undefined,
+    cmd_len: usize = 0,
+    output_start: usize = 0, // index into output_pool
+    output_len: usize = 0,
+    exit_code: u8 = 0,
+    duration_ms: i64 = 0,
+    line_count: usize = 0, // pre-computed: top + content + bottom
+};
+
+var stored_blocks: [MAX_STORED]StoredBlock = [_]StoredBlock{.{}} ** MAX_STORED;
+var stored_count: usize = 0;
+var stored_head: usize = 0; // ring buffer head (oldest)
+var output_pool: [OUTPUT_POOL]u8 = undefined;
+var pool_used: usize = 0;
+
+/// Get the last stored block (for overlay restoration).
 pub var saved_block_lines: usize = 0;
+
+/// Store a block's data for later re-rendering.
+fn storeBlock(command: []const u8, output: []const u8, exit_code: u8) void {
+    // Make room in pool if needed
+    while (pool_used + output.len > OUTPUT_POOL and stored_count > 0) {
+        // Drop oldest block
+        pool_used -= stored_blocks[stored_head].output_len;
+        // Shift pool data
+        const drop_len = stored_blocks[stored_head].output_len;
+        const remaining = pool_used;
+        if (remaining > 0 and drop_len > 0) {
+            std.mem.copyForwards(u8, output_pool[0..remaining], output_pool[drop_len..][0..remaining]);
+        }
+        // Adjust all output_start pointers
+        for (0..MAX_STORED) |i| {
+            if (stored_blocks[i].output_len > 0 and stored_blocks[i].output_start >= drop_len) {
+                stored_blocks[i].output_start -= drop_len;
+            }
+        }
+        stored_head = (stored_head + 1) % MAX_STORED;
+        stored_count -= 1;
+    }
+
+    if (output.len > OUTPUT_POOL) return; // too large
+
+    const idx = (stored_head + stored_count) % MAX_STORED;
+    var blk = &stored_blocks[idx];
+    blk.cmd_len = @min(command.len, blk.cmd.len);
+    @memcpy(blk.cmd[0..blk.cmd_len], command[0..blk.cmd_len]);
+    blk.output_start = pool_used;
+    blk.output_len = output.len;
+    @memcpy(output_pool[pool_used..][0..output.len], output);
+    pool_used += output.len;
+    blk.exit_code = exit_code;
+    blk.duration_ms = last_duration_ms;
+
+    // Count lines
+    var lines: usize = 2; // top + bottom borders
+    if (output.len > 0) {
+        lines += 1;
+        for (output) |ch| { if (ch == '\n') lines += 1; }
+    }
+    blk.line_count = lines;
+    saved_block_lines = lines;
+
+    if (stored_count < MAX_STORED) stored_count += 1;
+}
+
+/// Get stored block by reverse index (0 = most recent).
+fn getStoredBlock(reverse_idx: usize) ?*const StoredBlock {
+    if (reverse_idx >= stored_count) return null;
+    const idx = (stored_head + stored_count - 1 - reverse_idx) % MAX_STORED;
+    return &stored_blocks[idx];
+}
+
+/// Get output slice for a stored block.
+fn getBlockOutput(blk: *const StoredBlock) []const u8 {
+    return output_pool[blk.output_start..][0..blk.output_len];
+}
+
+/// Re-render the last block on SIGWINCH. Only re-renders if it fits
+/// on screen. Older blocks in scrollback stay as-is (terminal limitation).
+pub fn reRenderVisible(stdout: std.fs.File) void {
+    const blk = getStoredBlock(0) orelse return; // most recent block
+    const term_h = getTermHeight();
+    const prompt_lines: usize = 3; // estimate: prompt + input + gap
+
+    // Only re-render if the last block fits on screen
+    if (blk.line_count + prompt_lines > term_h) return;
+
+    // Scroll down to push old reflowed content into scrollback,
+    // then render the last block fresh at the top of a clean area.
+    // This avoids fighting with Attyx's reflow.
+    var i: usize = 0;
+    while (i < term_h) : (i += 1) stdout.writeAll("\n") catch {};
+
+    // Now render the block using normal renderBlock (writes to stdout)
+    restoring = true;
+    renderBlock(stdout, blk.cmd[0..blk.cmd_len], getBlockOutput(blk), blk.exit_code);
+    restoring = false;
+}
+
+fn getTermHeight() usize {
+    const c_ext = struct {
+        const winsize = extern struct { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 };
+        extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
+    };
+    var ws: c_ext.winsize = undefined;
+    if (c_ext.ioctl(posix.STDOUT_FILENO, 0x40087468, &ws) == 0 and ws.ws_row > 0) return ws.ws_row;
+    return 24;
+}
+
+/// Render a block at specific screen rows using absolute positioning.
+/// Returns the next available row after the block.
+fn renderBlockAtRow(stdout: std.fs.File, start_row: usize, command: []const u8, output: []const u8, exit_code: u8) usize {
+    const term_w = getTermWidth();
+    const border_color: []const u8 = if (exit_code == 0) "\x1b[32m" else "\x1b[31m";
+    const reset = "\x1b[0m";
+    var row = start_row;
+
+    // Position + clear + render for each line
+    var line_buf: [8192]u8 = undefined;
+    var pos: usize = 0;
+
+    // Helper to position cursor at row
+    const posAt = struct {
+        fn f(buf: []u8, p: *usize, r: usize) void {
+            const seq = std.fmt.bufPrint(buf[p.*..], "\x1b[{d};1H\x1b[2K", .{r}) catch return;
+            p.* += seq.len;
+        }
+    }.f;
+
+    // Top border
+    pos = 0;
+    posAt(&line_buf, &pos, row);
+    pos += cpb(line_buf[pos..], border_color);
+    pos += cpb(line_buf[pos..], "\xe2\x95\xad\xe2\x94\x80");
+    pos += cpb(line_buf[pos..], reset);
+    pos += cpb(line_buf[pos..], " ");
+    pos += cpb(line_buf[pos..], command);
+    pos += cpb(line_buf[pos..], " ");
+    pos += cpb(line_buf[pos..], border_color);
+    const used = 2 + 1 + command.len + 1;
+    if (term_w > used + 1) {
+        var i: usize = 0;
+        while (i < term_w - used - 1) : (i += 1) pos += cpb(line_buf[pos..], "\xe2\x94\x80");
+    }
+    pos += cpb(line_buf[pos..], "\xe2\x95\xae");
+    pos += cpb(line_buf[pos..], reset);
+    stdout.writeAll(line_buf[0..pos]) catch {};
+    row += 1;
+
+    // Content lines
+    if (output.len > 0) {
+        var line_iter = std.mem.splitScalar(u8, output, '\n');
+        while (line_iter.next()) |line| {
+            pos = 0;
+            posAt(&line_buf, &pos, row);
+            pos += cpb(line_buf[pos..], border_color);
+            pos += cpb(line_buf[pos..], "\xe2\x94\x82");
+            pos += cpb(line_buf[pos..], reset);
+            pos += cpb(line_buf[pos..], " ");
+
+            const max_line = if (term_w > 4) term_w - 4 else 1;
+            const vis_len = visibleLen(line);
+            if (vis_len > max_line) {
+                pos += cpb(line_buf[pos..], truncateToVisible(line, max_line));
+            } else {
+                pos += cpb(line_buf[pos..], line);
+                const pad = max_line - vis_len;
+                var p: usize = 0;
+                while (p < pad) : (p += 1) {
+                    if (pos < line_buf.len) { line_buf[pos] = ' '; pos += 1; }
+                }
+            }
+            pos += cpb(line_buf[pos..], " ");
+            pos += cpb(line_buf[pos..], border_color);
+            pos += cpb(line_buf[pos..], "\xe2\x94\x82");
+            pos += cpb(line_buf[pos..], reset);
+            stdout.writeAll(line_buf[0..pos]) catch {};
+            row += 1;
+        }
+    }
+
+    // Bottom border
+    pos = 0;
+    posAt(&line_buf, &pos, row);
+    pos += cpb(line_buf[pos..], border_color);
+    pos += cpb(line_buf[pos..], "\xe2\x95\xb0");
+    if (term_w > 2) {
+        var i: usize = 0;
+        while (i < term_w - 2) : (i += 1) pos += cpb(line_buf[pos..], "\xe2\x94\x80");
+    }
+    pos += cpb(line_buf[pos..], "\xe2\x95\xaf");
+    pos += cpb(line_buf[pos..], reset);
+    stdout.writeAll(line_buf[0..pos]) catch {};
+    row += 1;
+
+    return row;
+}
 
 /// Re-render the last block to restore content after overlay dismissal.
 /// Caller should position the cursor before calling.
@@ -26,16 +226,16 @@ pub var saved_block_lines: usize = 0;
 /// `start_line`: first block line to render (0-based)
 /// `count`: number of lines to render
 pub fn restoreBlockRange(stdout: std.fs.File, start_line: usize, count: usize) void {
-    if (saved_cmd_len == 0 and saved_output_len == 0) return;
-    if (saved_block_lines == 0 or count == 0) return;
+    const blk = getStoredBlock(0) orelse return; // most recent block
+    if (blk.line_count == 0 or count == 0) return;
 
     restoring = true;
     var render_buf: [65536]u8 = undefined;
 
     const term_w = getTermWidth();
-    const border_color: []const u8 = if (saved_exit_code == 0) "\x1b[32m" else "\x1b[31m";
+    const border_color: []const u8 = if (blk.exit_code == 0) "\x1b[32m" else "\x1b[31m";
     const reset = "\x1b[0m";
-    const output = saved_output[0..saved_output_len];
+    const output = getBlockOutput(blk);
 
     const end_line = start_line + count;
     var current_line: usize = 0;
@@ -48,10 +248,10 @@ pub fn restoreBlockRange(stdout: std.fs.File, start_line: usize, count: usize) v
         pos += cpb(render_buf[pos..], "\xe2\x95\xad\xe2\x94\x80");
         pos += cpb(render_buf[pos..], reset);
         pos += cpb(render_buf[pos..], " ");
-        pos += cpb(render_buf[pos..], saved_cmd[0..saved_cmd_len]);
+        pos += cpb(render_buf[pos..], blk.cmd[0..blk.cmd_len]);
         pos += cpb(render_buf[pos..], " ");
         pos += cpb(render_buf[pos..], border_color);
-        const used = 2 + 1 + saved_cmd_len + 1;
+        const used = 2 + 1 + blk.cmd_len + 1;
         if (term_w > used + 1) {
             var i: usize = 0;
             while (i < term_w - used - 1) : (i += 1) pos += cpb(render_buf[pos..], "\xe2\x94\x80");
@@ -125,18 +325,117 @@ fn cpb(dest: []u8, src: []const u8) usize {
 }
 
 fn saveBlockData(command: []const u8, output: []const u8, exit_code: u8) void {
-    saved_cmd_len = @min(command.len, saved_cmd.len);
-    @memcpy(saved_cmd[0..saved_cmd_len], command[0..saved_cmd_len]);
-    saved_output_len = @min(output.len, saved_output.len);
-    @memcpy(saved_output[0..saved_output_len], output[0..saved_output_len]);
-    saved_exit_code = exit_code;
-    // Count lines: top border (1) + output lines + bottom border (1)
-    var lines: usize = 2; // top + bottom borders
-    if (output.len > 0) {
-        lines += 1; // at least 1 content line
-        for (output) |ch| { if (ch == '\n') lines += 1; }
+    storeBlock(command, output, exit_code);
+}
+
+/// Capture command output, print it raw (no borders), and store for
+/// overlay restoration. Used in non-block mode.
+pub fn runCaptureAndPrintRaw(
+    display: []const u8,
+    steps: []const @import("planner.zig").PlanStep,
+    stdout: std.fs.File,
+) u8 {
+    // Build shell command from pipeline steps
+    var sh_cmd: [4096]u8 = undefined;
+    var sh_len: usize = 0;
+    for (steps, 0..) |*step, si| {
+        if (si > 0 and sh_len < sh_cmd.len - 3) {
+            sh_cmd[sh_len] = ' ';
+            sh_cmd[sh_len + 1] = '|';
+            sh_cmd[sh_len + 2] = ' ';
+            sh_len += 3;
+        }
+        for (step.argv, 0..) |arg, ai| {
+            if (ai > 0 and sh_len < sh_cmd.len) { sh_cmd[sh_len] = ' '; sh_len += 1; }
+            const n = @min(arg.len, sh_cmd.len - sh_len);
+            @memcpy(sh_cmd[sh_len..][0..n], arg[0..n]);
+            sh_len += n;
+        }
     }
-    saved_block_lines = lines;
+
+    var child = std.process.Child.init(
+        &.{ "/bin/sh", "-c", sh_cmd[0..sh_len] },
+        std.heap.page_allocator,
+    );
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Pipe;
+
+    child.spawn() catch {
+        stdout.writeAll("xyron: failed to run command\n") catch {};
+        return 127;
+    };
+
+    var out_buf: [65536]u8 = undefined;
+    var total: usize = 0;
+    if (child.stdout) |f| {
+        while (total < out_buf.len) {
+            const n = f.read(out_buf[total..]) catch break;
+            if (n == 0) break;
+            total += n;
+        }
+        var drain: [4096]u8 = undefined;
+        while (true) { const n = f.read(&drain) catch break; if (n == 0) break; }
+    }
+    if (child.stderr) |f| {
+        while (total < out_buf.len) {
+            const n = f.read(out_buf[total..]) catch break;
+            if (n == 0) break;
+            total += n;
+        }
+        var drain: [4096]u8 = undefined;
+        while (true) { const n = f.read(&drain) catch break; if (n == 0) break; }
+    }
+
+    const term = child.wait() catch return 127;
+    const code: u8 = switch (term) { .Exited => |c| c, else => 1 };
+
+    const output = out_buf[0..total];
+
+    // Print raw output (no borders)
+    if (output.len > 0) {
+        stdout.writeAll(output) catch {};
+        // Ensure trailing newline
+        if (output[output.len - 1] != '\n') stdout.writeAll("\n") catch {};
+    }
+
+    // Store for overlay restoration (trimmed)
+    var trimmed = output;
+    while (trimmed.len > 0 and trimmed[trimmed.len - 1] == '\n') trimmed = trimmed[0 .. trimmed.len - 1];
+    storeBlock(display, trimmed, code);
+
+    return code;
+}
+
+/// Restore stored content without block borders (for non-block mode).
+pub fn restoreRawRange(stdout: std.fs.File, start_line: usize, count: usize) void {
+    const blk = getStoredBlock(0) orelse return;
+    if (blk.line_count == 0 or count == 0) return;
+    const output = getBlockOutput(blk);
+    if (output.len == 0) return;
+
+    var iter = std.mem.splitScalar(u8, output, '\n');
+    var line_idx: usize = 0;
+    var rendered: usize = 0;
+    while (iter.next()) |line| {
+        if (line_idx >= start_line and rendered < count) {
+            if (rendered > 0) stdout.writeAll("\r\n") catch {};
+            stdout.writeAll(line) catch {};
+            rendered += 1;
+        }
+        line_idx += 1;
+        if (rendered >= count) break;
+    }
+}
+
+/// Get the total line count of stored output (without borders).
+pub fn storedOutputLines() usize {
+    const blk = getStoredBlock(0) orelse return 0;
+    const output = getBlockOutput(blk);
+    if (output.len == 0) return 0;
+    var lines: usize = 1;
+    for (output) |ch| { if (ch == '\n') lines += 1; }
+    return lines;
 }
 
 /// Render a command block with bordered output.
@@ -206,14 +505,32 @@ pub fn renderBlock(
         }
     }
 
-    // Bottom border: ╰────────────────────╯
-    // Visual: ╰(1) + ─ * (term_w - 2) + ╯(1)
+    // Bottom border: ╰──────── 1.2s ╯  (with duration if > 500ms)
     stdout.writeAll(border_color) catch {};
     stdout.writeAll("\xe2\x95\xb0") catch {}; // ╰
+
+    // Format duration label
+    const prompt_mod = @import("prompt.zig");
+    var dur_buf: [32]u8 = undefined;
+    var dur_label: []const u8 = "";
+    if (last_duration_ms >= 500) {
+        dur_label = prompt_mod.formatDuration(&dur_buf, last_duration_ms);
+    }
+
     if (term_w > 2) {
+        const dur_vis = if (dur_label.len > 0) dur_label.len + 2 else 0; // " Xs "
+        const fill = if (term_w > 2 + dur_vis) term_w - 2 - dur_vis else 0;
         var i: usize = 0;
-        while (i < term_w - 2) : (i += 1) {
-            stdout.writeAll("\xe2\x94\x80") catch {}; // ─
+        while (i < fill) : (i += 1) stdout.writeAll("\xe2\x94\x80") catch {}; // ─
+
+        if (dur_label.len > 0) {
+            stdout.writeAll(reset) catch {};
+            stdout.writeAll("\x1b[2;33m") catch {}; // dim yellow
+            stdout.writeAll(" ") catch {};
+            stdout.writeAll(dur_label) catch {};
+            stdout.writeAll(" ") catch {};
+            stdout.writeAll("\x1b[0m") catch {};
+            stdout.writeAll(border_color) catch {};
         }
     }
     stdout.writeAll("\xe2\x95\xaf") catch {}; // ╯

@@ -306,15 +306,42 @@ fn renderStatus(dest: []u8, ctx: *const PromptContext) SegResult {
 }
 
 fn renderDuration(dest: []u8, ctx: *const PromptContext) SegResult {
-    if (ctx.last_duration_ms < 1000) return .{ .bytes = 0, .visible = 0 };
+    if (ctx.last_duration_ms < 500) return .{ .bytes = 0, .visible = 0 };
     var pos: usize = 0;
-    pos += cp(dest[pos..], "\x1b[33m");
-    const secs = @divTrunc(ctx.last_duration_ms, 1000);
-    const n = std.fmt.bufPrint(dest[pos..], "took {d}s ", .{secs}) catch return .{ .bytes = 0, .visible = 0 };
+    pos += cp(dest[pos..], "\x1b[2;33m"); // dim yellow
+    var fmt_buf: [32]u8 = undefined;
+    const dur = formatDuration(&fmt_buf, ctx.last_duration_ms);
+    const n = std.fmt.bufPrint(dest[pos..], "{s} ", .{dur}) catch return .{ .bytes = 0, .visible = 0 };
     pos += n.len;
     const vis = n.len;
     pos += cp(dest[pos..], "\x1b[0m");
     return .{ .bytes = pos, .visible = vis };
+}
+
+/// Format a duration in ms to human-readable: 230ms, 1.2s, 2m30s, 1h5m
+pub fn formatDuration(buf: []u8, ms: i64) []const u8 {
+    if (ms < 1000) {
+        return std.fmt.bufPrint(buf, "{d}ms", .{ms}) catch "?";
+    }
+    const total_secs = @divTrunc(ms, 1000);
+    if (total_secs < 60) {
+        const frac = @divTrunc(@mod(ms, 1000), 100);
+        if (frac > 0) {
+            return std.fmt.bufPrint(buf, "{d}.{d}s", .{ total_secs, frac }) catch "?";
+        }
+        return std.fmt.bufPrint(buf, "{d}s", .{total_secs}) catch "?";
+    }
+    const mins = @divTrunc(total_secs, 60);
+    const secs = @mod(total_secs, 60);
+    if (mins < 60) {
+        if (secs > 0) {
+            return std.fmt.bufPrint(buf, "{d}m{d}s", .{ mins, secs }) catch "?";
+        }
+        return std.fmt.bufPrint(buf, "{d}m", .{mins}) catch "?";
+    }
+    const hrs = @divTrunc(mins, 60);
+    const rm = @mod(mins, 60);
+    return std.fmt.bufPrint(buf, "{d}h{d}m", .{ hrs, rm }) catch "?";
 }
 
 fn renderJobs(dest: []u8, seg: *const Segment, ctx: *const PromptContext) SegResult {
@@ -442,9 +469,16 @@ test "renderJobs empty when no jobs" {
     try std.testing.expectEqual(@as(usize, 0), result.bytes);
 }
 
-test "renderDuration hidden under 1s" {
+test "renderDuration hidden under 500ms" {
     var buf: [64]u8 = undefined;
-    const ctx = PromptContext{ .last_duration_ms = 500 };
+    const ctx = PromptContext{ .last_duration_ms = 200 };
     const result = renderDuration(&buf, &ctx);
     try std.testing.expectEqual(@as(usize, 0), result.bytes);
+}
+
+test "renderDuration shows for 500ms+" {
+    var buf: [64]u8 = undefined;
+    const ctx = PromptContext{ .last_duration_ms = 750 };
+    const result = renderDuration(&buf, &ctx);
+    try std.testing.expect(result.bytes > 0);
 }

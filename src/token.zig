@@ -36,6 +36,9 @@ pub fn tokenize(allocator: std.mem.Allocator, input: []const u8) ![]Token {
     errdefer tokens.deinit(allocator);
 
     var i: usize = 0;
+    // Track if current pipe segment starts with a command that uses
+    // > < as comparison operators (where, query), not redirects.
+    var in_comparison_context = isComparisonCmd(input);
 
     while (i < input.len) {
         if (input[i] == ' ' or input[i] == '\t') {
@@ -46,24 +49,49 @@ pub fn tokenize(allocator: std.mem.Allocator, input: []const u8) ![]Token {
         if (input[i] == '|') {
             try tokens.append(allocator, .{ .kind = .pipe, .value = input[i .. i + 1] });
             i += 1;
+            in_comparison_context = false;
+            // Check if next word is a comparison command
+            var peek = i;
+            while (peek < input.len and (input[peek] == ' ' or input[peek] == '\t')) : (peek += 1) {}
+            if (isComparisonCmd(input[peek..])) in_comparison_context = true;
             continue;
         }
 
-        if (input[i] == '2' and i + 1 < input.len and input[i + 1] == '>') {
+        if (input[i] == '2' and i + 1 < input.len and input[i + 1] == '>' and !in_comparison_context) {
             try tokens.append(allocator, .{ .kind = .redirect_err, .value = input[i .. i + 2] });
             i += 2;
             continue;
         }
 
-        if (input[i] == '>') {
-            try tokens.append(allocator, .{ .kind = .redirect_out, .value = input[i .. i + 1] });
-            i += 1;
+        if (input[i] == '>' and !in_comparison_context) {
+            // Check for >=
+            if (i + 1 < input.len and input[i + 1] == '=') {
+                try tokens.append(allocator, .{ .kind = .redirect_out, .value = input[i .. i + 2] });
+                i += 2;
+            } else {
+                try tokens.append(allocator, .{ .kind = .redirect_out, .value = input[i .. i + 1] });
+                i += 1;
+            }
             continue;
         }
 
-        if (input[i] == '<') {
-            try tokens.append(allocator, .{ .kind = .redirect_in, .value = input[i .. i + 1] });
-            i += 1;
+        if (input[i] == '<' and !in_comparison_context) {
+            if (i + 1 < input.len and input[i + 1] == '=') {
+                try tokens.append(allocator, .{ .kind = .redirect_in, .value = input[i .. i + 2] });
+                i += 2;
+            } else {
+                try tokens.append(allocator, .{ .kind = .redirect_in, .value = input[i .. i + 1] });
+                i += 1;
+            }
+            continue;
+        }
+
+        // In comparison context, treat > < >= <= as words
+        if (in_comparison_context and (input[i] == '>' or input[i] == '<')) {
+            var end = i + 1;
+            if (end < input.len and input[end] == '=') end += 1;
+            try tokens.append(allocator, .{ .kind = .word, .value = input[i..end] });
+            i = end;
             continue;
         }
 
@@ -119,6 +147,18 @@ pub fn tokenize(allocator: std.mem.Allocator, input: []const u8) ![]Token {
 
 pub fn freeTokens(allocator: std.mem.Allocator, tokens: []Token) void {
     allocator.free(tokens);
+}
+
+/// Check if a string starts with a command that uses > < as comparison ops.
+fn isComparisonCmd(s: []const u8) bool {
+    // Skip leading whitespace
+    var i: usize = 0;
+    while (i < s.len and (s[i] == ' ' or s[i] == '\t')) : (i += 1) {}
+    const rest = s[i..];
+    return std.mem.startsWith(u8, rest, "where ") or
+        std.mem.startsWith(u8, rest, "query ") or
+        std.mem.eql(u8, rest, "where") or
+        std.mem.eql(u8, rest, "query");
 }
 
 // ---------------------------------------------------------------------------

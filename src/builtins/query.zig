@@ -442,12 +442,12 @@ fn parseQuery(args: []const []const u8) QueryPlan {
 }
 
 fn parseOp(s: []const u8) Op {
-    if (std.mem.eql(u8, s, "==") or std.mem.eql(u8, s, "=")) return .eq;
-    if (std.mem.eql(u8, s, "!=")) return .neq;
-    if (std.mem.eql(u8, s, ">")) return .gt;
-    if (std.mem.eql(u8, s, "<")) return .lt;
-    if (std.mem.eql(u8, s, ">=")) return .gte;
-    if (std.mem.eql(u8, s, "<=")) return .lte;
+    if (std.mem.eql(u8, s, "==") or std.mem.eql(u8, s, "=") or std.mem.eql(u8, s, "eq")) return .eq;
+    if (std.mem.eql(u8, s, "!=") or std.mem.eql(u8, s, "neq")) return .neq;
+    if (std.mem.eql(u8, s, ">") or std.mem.eql(u8, s, "gt")) return .gt;
+    if (std.mem.eql(u8, s, "<") or std.mem.eql(u8, s, "lt")) return .lt;
+    if (std.mem.eql(u8, s, ">=") or std.mem.eql(u8, s, "gte")) return .gte;
+    if (std.mem.eql(u8, s, "<=") or std.mem.eql(u8, s, "lte")) return .lte;
     if (std.mem.eql(u8, s, "contains")) return .contains;
     return .eq;
 }

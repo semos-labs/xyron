@@ -65,6 +65,16 @@ pub fn readLine(
 
         // Keys that work in both modes
         switch (key) {
+            .resize => {
+                // Terminal resized — re-render prompt cleanly.
+                // Block re-rendering requires terminal emulator support
+                // (Attyx tracks blocks via events and re-renders on its side).
+                complete_mod.dismissInline(stdout);
+                const ts = overlay.getTermSize();
+                cursor_row_estimate = @min(cursor_row_estimate, ts.rows);
+                refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
+                continue;
+            },
             .enter => {
                 // If overlay is active and has a non-redundant selection, accept it.
                 // If the selected candidate matches what's already typed, just execute.
@@ -263,6 +273,10 @@ pub fn readLine(
             .char => |ch| {
                 if (ch >= 32) { ed.insert(ch); content_changed = true; }
             },
+            .utf8 => |u| {
+                ed.insertUtf8(u.bytes[0..u.len]);
+                content_changed = true;
+            },
             else => {},
         }
         // Update inline overlay on content changes — it renders prompt+candidates
@@ -399,21 +413,19 @@ pub fn refreshLineWithHistory(
     if (ed.vim_enabled) {
         var pctx = prompt_mod.buildContext(prompt_last_exit, prompt_last_duration, prompt_job_count);
         pctx.vim_normal = (ed.mode == .normal);
-        var pbuf: [prompt_mod.MAX_PROMPT]u8 = undefined;
-        const pr = prompt_mod.render(&pbuf, &pctx, prompt_lua);
+        var pbuf_local: [prompt_mod.MAX_PROMPT]u8 = undefined;
+        const pr = prompt_mod.render(&pbuf_local, &pctx, prompt_lua);
         pos += cp(buf[pos..], pr.text);
         prompt_extra_lines = if (pr.line_count > 1) pr.line_count - 1 else 0;
     } else {
         pos += cp(buf[pos..], prompt_str_default);
     }
 
-    // Vim cursor shape: beam for insert, block for normal
-    if (ed.vim_enabled) {
-        if (ed.mode == .normal) {
-            pos += cp(buf[pos..], "\x1b[2 q");
-        } else {
-            pos += cp(buf[pos..], "\x1b[6 q");
-        }
+    // Cursor shape: beam (line) by default, block in vim normal mode
+    if (ed.vim_enabled and ed.mode == .normal) {
+        pos += cp(buf[pos..], "\x1b[2 q"); // block
+    } else {
+        pos += cp(buf[pos..], "\x1b[6 q"); // beam (line)
     }
 
     const content = ed.content();
@@ -423,9 +435,9 @@ pub fn refreshLineWithHistory(
         pos += cp(buf[pos..], content);
     }
 
-    // At this point cursor is at prompt_len + content.len
-    // Ghost text + cursor positioning
-    var move_back: usize = ed.len - ed.cursor; // chars after cursor in content
+    // At this point cursor is at prompt_len + content visible length
+    // Ghost text + cursor positioning — count visible chars, not bytes
+    var move_back: usize = ed.visibleLen() - ed.visibleCursorPos();
 
     if (ed.cursor == ed.len and ed.len > 0) {
         if (hist) |h| {
@@ -435,7 +447,7 @@ pub fn refreshLineWithHistory(
                 pos += cp(buf[pos..], "\x1b[38;5;246m");
                 pos += cp(buf[pos..], ghost);
                 pos += cp(buf[pos..], "\x1b[0m");
-                move_back = ghost.len;
+                move_back = utf8VisibleLen(ghost);
             }
         }
     }
@@ -487,13 +499,11 @@ pub fn renderPromptIntoBuf(
         pos += cp(out[pos..], prompt_str_default);
     }
 
-    // Vim cursor shape
-    if (ed.vim_enabled) {
-        if (ed.mode == .normal) {
-            pos += cp(out[pos..], "\x1b[2 q");
-        } else {
-            pos += cp(out[pos..], "\x1b[6 q");
-        }
+    // Cursor shape
+    if (ed.vim_enabled and ed.mode == .normal) {
+        pos += cp(out[pos..], "\x1b[2 q");
+    } else {
+        pos += cp(out[pos..], "\x1b[6 q");
     }
 
     // Editor content with highlighting
@@ -505,7 +515,7 @@ pub fn renderPromptIntoBuf(
     }
 
     // Cursor positioning (no ghost text — overlay replaces it)
-    const move_back: usize = ed.len - ed.cursor;
+    const move_back: usize = ed.visibleLen() - ed.visibleCursorPos();
     if (move_back > 0) {
         const n = std.fmt.bufPrint(out[pos..], "\x1b[{d}D", .{move_back}) catch "";
         pos += n.len;
@@ -517,6 +527,21 @@ pub fn renderPromptIntoBuf(
 pub fn showPrompt(stdout: std.fs.File, prompt_str: []const u8) void {
     stdout.writeAll("\r") catch {};
     stdout.writeAll(prompt_str) catch {};
+}
+
+/// Count visible characters (codepoints) in a UTF-8 string.
+fn utf8VisibleLen(s: []const u8) usize {
+    var vis: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] & 0x80 == 0) { i += 1; }
+        else if (s[i] & 0xE0 == 0xC0) { i += 2; }
+        else if (s[i] & 0xF0 == 0xE0) { i += 3; }
+        else if (s[i] & 0xF8 == 0xF0) { i += 4; }
+        else { i += 1; }
+        vis += 1;
+    }
+    return vis;
 }
 
 fn cp(dest: []u8, src: []const u8) usize {
