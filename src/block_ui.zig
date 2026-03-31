@@ -328,6 +328,11 @@ fn saveBlockData(command: []const u8, output: []const u8, exit_code: u8) void {
     storeBlock(command, output, exit_code);
 }
 
+/// Store output without rendering (for non-block mode capture).
+pub fn storeOutputOnly(command: []const u8, output: []const u8, exit_code: u8) void {
+    storeBlock(command, output, exit_code);
+}
+
 /// Capture command output, print it raw (no borders), and store for
 /// overlay restoration. Used in non-block mode.
 pub fn runCaptureAndPrintRaw(

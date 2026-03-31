@@ -407,20 +407,7 @@ fn computeOverlayLayout() OverlayLayout {
         };
     }
 
-    // Without block UI, we can't track position accurately.
-    // Always use "below" — pre-scroll with \r\n works reliably.
-    const block_ui_mod = @import("block_ui.zig");
-    if (!block_ui_mod.enabled) {
-        const space = if (term_size.rows > prompt_lines + 1) term_size.rows - prompt_lines - 1 else 3;
-        return .{
-            .direction = .below,
-            .max_visible = @min(MAX_VISIBLE, space),
-            .cursor_row = 0,
-            .term_rows = term_size.rows,
-        };
-    }
-
-    // Block UI mode — use the shell's cursor row estimate
+    // Use the shell's cursor row estimate (works for both block and non-block mode)
     const est = input_mod.cursor_row_estimate;
     if (est > 0) {
         const space_below = if (term_size.rows > est) term_size.rows - est else 0;
@@ -540,6 +527,17 @@ fn renderPicker(
                 const start = if (block_ui.saved_block_lines > prev) block_ui.saved_block_lines - prev else 0;
                 block_ui.restoreBlockRange(stdout, start, freed);
                 stdout.writeAll("\x1b[u") catch {};
+            } else if (block_ui.storedOutputLines() > 0) {
+                // Non-block: restore raw output
+                var rbuf2: [64]u8 = undefined;
+                const pe3 = @import("input.zig").prompt_extra_lines;
+                stdout.writeAll("\x1b[s") catch {};
+                const seq2 = std.fmt.bufPrint(&rbuf2, "\x1b[{d}A\r", .{prev + pe3}) catch "";
+                stdout.writeAll(seq2) catch {};
+                const total = block_ui.storedOutputLines();
+                const start2 = if (total > prev) total - prev else 0;
+                block_ui.restoreRawRange(stdout, start2, freed);
+                stdout.writeAll("\x1b[u") catch {};
             }
         }
 
@@ -654,7 +652,7 @@ fn clearPickerLines(stdout: std.fs.File, lines: usize, direction: overlay.Direct
             pos += cp(buf[pos..], "\r\x1b[K");
         }
     } else {
-        // Below: clear each overlay line individually
+        // Below: clear each overlay line
         for (0..lines) |_| {
             pos += cp(buf[pos..], "\r\n\x1b[K");
         }
@@ -663,21 +661,57 @@ fn clearPickerLines(stdout: std.fs.File, lines: usize, direction: overlay.Direct
     pos += cp(buf[pos..], "\x1b[u");
     stdout.writeAll(buf[0..pos]) catch {};
 
-    // Restore block content for "above" (after cursor is back on prompt)
+    // Restore content for "below" direction
+    if (direction == .below) {
+        const block_ui = @import("block_ui.zig");
+        // Content below the prompt = tail of stored output
+        const total_stored = if (block_ui.enabled) block_ui.saved_block_lines else block_ui.storedOutputLines();
+        if (total_stored > 0) {
+            var rbuf: [64]u8 = undefined;
+            stdout.writeAll("\x1b[s") catch {};
+            // Overlay was 'lines' rows below the prompt. The content at those
+            // rows corresponds to stored output lines after the prompt position.
+            for (0..lines) |_| stdout.writeAll("\r\n") catch {};
+            // Move back up to start of overlay area
+            const seq3 = std.fmt.bufPrint(&rbuf, "\x1b[{d}A\r", .{lines}) catch "";
+            stdout.writeAll(seq3) catch {};
+            // The stored output ends where the prompt starts. The lines below
+            // the prompt were the LAST 'lines' of output before the prompt.
+            // But we don't know exactly which lines... approximate: restore last lines.
+            if (block_ui.enabled) {
+                const start = if (block_ui.saved_block_lines > lines) block_ui.saved_block_lines - lines else 0;
+                block_ui.restoreBlockRange(stdout, start, lines);
+            } else if (block_ui.storedOutputLines() > 0) {
+                const out_lines = block_ui.storedOutputLines();
+                const start = if (out_lines > lines) out_lines - lines else 0;
+                block_ui.restoreRawRange(stdout, start, lines);
+            }
+            stdout.writeAll("\x1b[u") catch {};
+        }
+    }
+
+    // Restore content for "above" (after cursor is back on prompt)
     if (direction == .above) {
         const block_ui = @import("block_ui.zig");
+        const pe2 = @import("input.zig").prompt_extra_lines;
         if (block_ui.enabled and block_ui.saved_block_lines > 0) {
+            // Block mode: restore with borders
             var rbuf: [64]u8 = undefined;
-
-            // Save cursor, move up, restore block lines, restore cursor
-            const pe2 = @import("input.zig").prompt_extra_lines;
             stdout.writeAll("\x1b[s") catch {};
             const seq2 = std.fmt.bufPrint(&rbuf, "\x1b[{d}A\r", .{lines + pe2}) catch "";
             stdout.writeAll(seq2) catch {};
-
             const start = if (block_ui.saved_block_lines > lines) block_ui.saved_block_lines - lines else 0;
             block_ui.restoreBlockRange(stdout, start, lines);
-
+            stdout.writeAll("\x1b[u") catch {};
+        } else if (block_ui.storedOutputLines() > 0) {
+            // Non-block mode: restore raw output lines
+            var rbuf: [64]u8 = undefined;
+            stdout.writeAll("\x1b[s") catch {};
+            const seq2 = std.fmt.bufPrint(&rbuf, "\x1b[{d}A\r", .{lines + pe2}) catch "";
+            stdout.writeAll(seq2) catch {};
+            const total = block_ui.storedOutputLines();
+            const start = if (total > lines) total - lines else 0;
+            block_ui.restoreRawRange(stdout, start, lines);
             stdout.writeAll("\x1b[u") catch {};
         }
     }

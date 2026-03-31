@@ -61,44 +61,40 @@ pub fn executeGroup(
             return .{ .exit_code = 0, .duration_ms = types.timestampMs() - start };
         }
 
-        // In-process builtin (not background)
+        // In-process builtin (not background) — always capture output
         if (step.argv.len > 0 and builtins.isBuiltin(step.argv[0]) and !exec_plan.background) {
             ax.stepStarted(exec_plan, step);
 
-            if (block_ui.enabled) {
-                // Block mode: capture builtin output to a pipe, then render as block
-                const pipe_fds = posix.pipe2(.{}) catch
-                    [2]posix.fd_t{ -1, -1 };
-
-                if (pipe_fds[0] < 0) {
-                    // Pipe failed — fall through to non-block path
-                } else blk: {
+            const pipe_fds = posix.pipe2(.{}) catch [2]posix.fd_t{ -1, -1 };
+            if (pipe_fds[0] >= 0) blk: {
                 const write_end = std.fs.File{ .handle = pipe_fds[1] };
                 const read_end = std.fs.File{ .handle = pipe_fds[0] };
 
                 const result = builtins.execute(step.argv, write_end, stderr, env, hdb, job_table);
-                posix.close(pipe_fds[1]); // close write end so read gets EOF
+                posix.close(pipe_fds[1]);
 
                 if (result.exit_code == 255) {
-                    // Not handled — close read end, fall through to external
                     posix.close(pipe_fds[0]);
-                    break :blk;
-                } else {
-                    // Read captured output
-                    var cap_buf: [65536]u8 = undefined;
-                    var cap_total: usize = 0;
-                    while (cap_total < cap_buf.len) {
-                        const n = read_end.read(cap_buf[cap_total..]) catch break;
-                        if (n == 0) break;
-                        cap_total += n;
-                    }
-                    posix.close(pipe_fds[0]);
+                    break :blk; // not handled — fall through to external
+                }
 
-                    // Trim trailing newlines
-                    var output = cap_buf[0..cap_total];
-                    while (output.len > 0 and output[output.len - 1] == '\n') output = output[0 .. output.len - 1];
+                // Read captured output
+                var cap_buf: [65536]u8 = undefined;
+                var cap_total: usize = 0;
+                while (cap_total < cap_buf.len) {
+                    const n = read_end.read(cap_buf[cap_total..]) catch break;
+                    if (n == 0) break;
+                    cap_total += n;
+                }
+                posix.close(pipe_fds[0]);
 
-                    // Build command display string
+                var output = cap_buf[0..cap_total];
+                while (output.len > 0 and output[output.len - 1] == '\n') output = output[0 .. output.len - 1];
+
+                block_ui.last_duration_ms = types.timestampMs() - start;
+
+                if (block_ui.enabled) {
+                    // Block mode: render with borders
                     var cmd_disp: [256]u8 = undefined;
                     var cmd_len: usize = 0;
                     for (step.argv, 0..) |arg, ai| {
@@ -107,27 +103,20 @@ pub fn executeGroup(
                         @memcpy(cmd_disp[cmd_len..][0..n], arg[0..n]);
                         cmd_len += n;
                     }
-
-                    block_ui.last_duration_ms = types.timestampMs() - start;
                     block_ui.renderBlock(stdout, cmd_disp[0..cmd_len], output, result.exit_code);
-                    const dur = types.timestampMs() - start;
-                    ax.stepFinished(exec_plan, step, result.exit_code, dur);
-                    ax.groupFinished(exec_plan, result.exit_code, dur);
-                    return .{ .exit_code = result.exit_code, .duration_ms = dur, .should_exit = result.should_exit };
+                } else {
+                    // Non-block: print raw, store for overlay restoration
+                    if (output.len > 0) {
+                        stdout.writeAll(output) catch {};
+                        stdout.writeAll("\n") catch {};
+                    }
+                    block_ui.storeOutputOnly(exec_plan.raw_input, output, result.exit_code);
                 }
-                }
-            } else {
-                const result = builtins.execute(step.argv, stdout, stderr, env, hdb, job_table);
-                // 255 = sentinel meaning "not handled, fall through to external"
-                if (result.exit_code != 255) {
-                    ax.stepFinished(exec_plan, step, result.exit_code, 0);
-                    ax.groupFinished(exec_plan, result.exit_code, types.timestampMs() - start);
-                    return .{
-                        .exit_code = result.exit_code,
-                        .duration_ms = types.timestampMs() - start,
-                        .should_exit = result.should_exit,
-                    };
-                }
+
+                const dur = types.timestampMs() - start;
+                ax.stepFinished(exec_plan, step, result.exit_code, dur);
+                ax.groupFinished(exec_plan, result.exit_code, dur);
+                return .{ .exit_code = result.exit_code, .duration_ms = dur, .should_exit = result.should_exit };
             }
             // Fall through to external execution
         }
@@ -176,11 +165,10 @@ pub fn executeGroup(
         }
     }
 
-    // Non-block mode: capture + store output for overlay restoration
-    // (single external commands only; pipelines go through forkPipeline)
+    // Non-block mode: capture single external commands for overlay restoration
     if (!block_ui.enabled and !exec_plan.background and exec_plan.steps.len == 1) {
         const step0 = &exec_plan.steps[0];
-        if (!block_ui.isPassthrough(step0.argv)) {
+        if (step0.argv.len > 0 and !block_ui.isPassthrough(step0.argv) and !isPipeBuiltin(step0.argv[0])) {
             ax.stepStarted(exec_plan, step0);
             block_ui.last_duration_ms = types.timestampMs() - start;
             const code = block_ui.runCaptureAndPrintRaw(exec_plan.raw_input, exec_plan.steps, stdout);

@@ -213,6 +213,12 @@ pub const Shell = struct {
                             const new_row = input.cursor_row_estimate + block_ui_mod.saved_block_lines + 1 + input.prompt_extra_lines;
                             const term_rows = overlay.getTermSize().rows;
                             input.cursor_row_estimate = @min(new_row, term_rows);
+                        } else if (block_ui_mod.storedOutputLines() > 0) {
+                            // Non-block: use stored output line count
+                            const out_lines = block_ui_mod.storedOutputLines();
+                            const new_row = input.cursor_row_estimate + out_lines + 1 + input.prompt_extra_lines;
+                            const term_rows = overlay.getTermSize().rows;
+                            input.cursor_row_estimate = @min(new_row, term_rows);
                         } else {
                             input.cursor_row_estimate = overlay.getTermSize().rows;
                         }
