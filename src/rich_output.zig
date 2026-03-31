@@ -185,7 +185,10 @@ fn getTermWidth() usize {
         extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
     };
     var ws: c_ext.winsize = undefined;
+    // Try stdout first, then stderr, then /dev/tty.
+    // When stdout is a pipe (block UI capture), stdout ioctl fails.
     if (c_ext.ioctl(std.posix.STDOUT_FILENO, 0x40087468, &ws) == 0 and ws.ws_col > 0) return ws.ws_col;
+    if (c_ext.ioctl(std.posix.STDERR_FILENO, 0x40087468, &ws) == 0 and ws.ws_col > 0) return ws.ws_col;
     return 80;
 }
 

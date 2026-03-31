@@ -125,11 +125,6 @@ pub const Shell = struct {
                     ) catch "";
                     self.attyx.stderr.writeAll(evt) catch {};
                 }
-                // Also print to stderr for non-Attyx consumers
-                const stderr = std.fs.File.stderr();
-                stderr.writeAll("xyron: IPC socket at ") catch {};
-                stderr.writeAll(path) catch {};
-                stderr.writeAll("\n") catch {};
             }
         }
         defer ipc.stop();
@@ -420,6 +415,18 @@ fn loadLuaConfig(L: lua_api.LuaState) void {
     };
 
     std.fs.accessAbsolute(path, .{}) catch return;
+
+    // Set package.path so require() resolves relative to the config dir.
+    // e.g. require("theme") loads ~/.config/xyron/theme.lua
+    const config_dir = if (config_home) |xdg|
+        std.fmt.bufPrint(buf[512..], "{s}/xyron", .{xdg}) catch ""
+    else
+        std.fmt.bufPrint(buf[512..], "{s}/.config/xyron", .{std.posix.getenv("HOME") orelse ""}) catch "";
+
+    if (config_dir.len > 0) {
+        lua_api.setPackagePath(L, config_dir);
+    }
+
     _ = lua_api.loadConfig(L, path);
 }
 

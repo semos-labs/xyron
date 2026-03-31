@@ -362,7 +362,23 @@ fn childExec(
     if (argv.len > 0 and std.mem.eql(u8, argv[0], "json")) {
         const json_cmd = @import("builtins/json.zig");
         json_cmd.runFromPipe(if (argv.len > 1) argv[1..] else &.{});
-        // runFromPipe calls exit, but just in case:
+        std.process.exit(0);
+    }
+    if (argv.len > 0 and std.mem.eql(u8, argv[0], "query")) {
+        const query_cmd = @import("builtins/query.zig");
+        query_cmd.runFromPipe(if (argv.len > 1) argv[1..] else &.{});
+        std.process.exit(0);
+    }
+    if (argv.len > 0 and std.mem.eql(u8, argv[0], "select")) {
+        @import("builtins/select.zig").runFromPipe(if (argv.len > 1) argv[1..] else &.{});
+        std.process.exit(0);
+    }
+    if (argv.len > 0 and std.mem.eql(u8, argv[0], "where")) {
+        @import("builtins/where.zig").runFromPipe(if (argv.len > 1) argv[1..] else &.{});
+        std.process.exit(0);
+    }
+    if (argv.len > 0 and std.mem.eql(u8, argv[0], "sort")) {
+        @import("builtins/sort_cmd.zig").runFromPipe(if (argv.len > 1) argv[1..] else &.{});
         std.process.exit(0);
     }
 

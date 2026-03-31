@@ -65,6 +65,22 @@ pub fn deinit(L: LuaState) void {
     if (L) |state| c.lua_close(state);
 }
 
+/// Set package.path so require() resolves from the config directory.
+pub fn setPackagePath(L: LuaState, config_dir: []const u8) void {
+    const state = L orelse return;
+    // package.path = config_dir.."/?.lua;"..config_dir.."/?/init.lua;"..default
+    var code_buf: [1024]u8 = undefined;
+    const code = std.fmt.bufPrintZ(&code_buf,
+        "package.path = \"{s}/?.lua;{s}/?/init.lua;\" .. package.path",
+        .{ config_dir, config_dir },
+    ) catch return;
+    if (c.luaL_loadstring(state, code) == 0) {
+        _ = pcall(state, 0, 0);
+    } else {
+        c.lua_settop(state, -2); // pop error
+    }
+}
+
 /// Load and execute a config file. Returns false on error.
 pub fn loadConfig(L: LuaState, path: [*:0]const u8) bool {
     const state = L orelse return false;

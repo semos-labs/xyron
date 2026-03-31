@@ -1,4 +1,5 @@
 const std = @import("std");
+const posix = std.posix;
 const rich = @import("../rich_output.zig");
 const Result = @import("mod.zig").BuiltinResult;
 
@@ -70,6 +71,31 @@ pub fn run(args: []const []const u8, stdout: std.fs.File) Result {
             std.mem.swap(usize, &name_lens[j], &name_lens[j - 1]);
             j -= 1;
         }
+    }
+
+    // JSON output when piped (for select/where/sort chaining)
+    const pj = @import("../pipe_json.zig");
+    if (!pj.isTerminal(posix.STDOUT_FILENO)) {
+        var json_buf: [65536]u8 = undefined;
+        var jp: usize = 0;
+        if (jp < json_buf.len) { json_buf[jp] = '['; jp += 1; }
+        for (0..count) |ei| {
+            if (ei > 0 and jp < json_buf.len) { json_buf[jp] = ','; jp += 1; }
+            const name = names[ei][0..name_lens[ei]];
+            var disp: [258]u8 = undefined;
+            @memcpy(disp[0..name.len], name);
+            var dl = name.len;
+            if (kinds[ei] == .directory and dl < 257) { disp[dl] = '/'; dl += 1; }
+            const kind_str = if (kinds[ei] == .directory) "directory" else if (kinds[ei] == .sym_link) "symlink" else "file";
+            const written = std.fmt.bufPrint(json_buf[jp..],
+                "{{\"name\":\"{s}\",\"type\":\"{s}\",\"size\":{d}}}",
+                .{ disp[0..dl], kind_str, sizes[ei] },
+            ) catch break;
+            jp += written.len;
+        }
+        if (jp < json_buf.len) { json_buf[jp] = ']'; jp += 1; }
+        stdout.writeAll(json_buf[0..jp]) catch {};
+        return .{};
     }
 
     for (0..count) |ei| {
