@@ -509,10 +509,11 @@ fn renderPicker(
 
         // Phase 1: clear the freed lines
         {
+            const pe = @import("input.zig").prompt_extra_lines;
             var cbuf: [256]u8 = undefined;
             var cpos: usize = 0;
             cpos += cp(cbuf[cpos..], "\x1b[s");
-            const seq = std.fmt.bufPrint(cbuf[cpos..], "\x1b[{d}A", .{prev}) catch "";
+            const seq = std.fmt.bufPrint(cbuf[cpos..], "\x1b[{d}A", .{prev + pe}) catch "";
             cpos += seq.len;
             for (0..freed) |i| {
                 if (i > 0) cpos += cp(cbuf[cpos..], "\x1b[B");
@@ -527,8 +528,9 @@ fn renderPicker(
             const block_ui = @import("block_ui.zig");
             if (block_ui.enabled and block_ui.saved_block_lines > 0) {
                 var rbuf: [64]u8 = undefined;
+                const pe2 = @import("input.zig").prompt_extra_lines;
                 stdout.writeAll("\x1b[s") catch {};
-                const seq = std.fmt.bufPrint(&rbuf, "\x1b[{d}A\r", .{prev}) catch "";
+                const seq = std.fmt.bufPrint(&rbuf, "\x1b[{d}A\r", .{prev + pe2}) catch "";
                 stdout.writeAll(seq) catch {};
                 const start = if (block_ui.saved_block_lines > prev) block_ui.saved_block_lines - prev else 0;
                 block_ui.restoreBlockRange(stdout, start, freed);
@@ -540,9 +542,10 @@ fn renderPicker(
         pos += cp(buf[pos..], "\x1b[s");
     }
 
-    // Move to overlay start position — based on actual rendered count
+    // Move to overlay start position — skip past prompt extra lines
     if (direction == .above) {
-        const move_up = rendered_lines;
+        const input_mod2 = @import("input.zig");
+        const move_up = rendered_lines + input_mod2.prompt_extra_lines;
         const seq = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{move_up}) catch "";
         pos += seq.len;
     }
@@ -636,8 +639,9 @@ fn clearPickerLines(stdout: std.fs.File, lines: usize, direction: overlay.Direct
     pos += cp(buf[pos..], "\x1b[s");
 
     if (direction == .above) {
-        // Move up to overlay start
-        const seq = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{lines}) catch "";
+        // Move up to overlay start (skip past prompt extra lines)
+        const pe = @import("input.zig").prompt_extra_lines;
+        const seq = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{lines + pe}) catch "";
         pos += seq.len;
         // Clear each overlay line
         for (0..lines) |i| {
@@ -661,8 +665,9 @@ fn clearPickerLines(stdout: std.fs.File, lines: usize, direction: overlay.Direct
             var rbuf: [64]u8 = undefined;
 
             // Save cursor, move up, restore block lines, restore cursor
+            const pe2 = @import("input.zig").prompt_extra_lines;
             stdout.writeAll("\x1b[s") catch {};
-            const seq2 = std.fmt.bufPrint(&rbuf, "\x1b[{d}A\r", .{lines}) catch "";
+            const seq2 = std.fmt.bufPrint(&rbuf, "\x1b[{d}A\r", .{lines + pe2}) catch "";
             stdout.writeAll(seq2) catch {};
 
             const start = if (block_ui.saved_block_lines > lines) block_ui.saved_block_lines - lines else 0;
