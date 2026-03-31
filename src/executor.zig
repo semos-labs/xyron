@@ -131,15 +131,36 @@ pub fn executeGroup(
         }
     }
 
-    // Block UI: capture output and render bordered block (single commands only)
-    // Skip commands that control the terminal directly (clear, reset, etc.)
-    if (block_ui.enabled and !exec_plan.background and exec_plan.steps.len == 1 and !block_ui.isPassthrough(exec_plan.steps[0].argv)) {
-        const step0 = &exec_plan.steps[0];
-        ax.stepStarted(exec_plan, step0);
-        const code = block_ui.runAndRender(step0.argv, stdout);
-        ax.stepFinished(exec_plan, step0, code, types.timestampMs() - start);
-        ax.groupFinished(exec_plan, code, types.timestampMs() - start);
-        return .{ .exit_code = code, .duration_ms = types.timestampMs() - start };
+    // Block UI: capture output and render bordered block.
+    // Single external commands use /bin/sh. Pipelines and commands with
+    // builtins use forkPipeline with stdout captured to a pipe.
+    if (block_ui.enabled and !exec_plan.background and exec_plan.steps.len >= 1) {
+        const last_step = &exec_plan.steps[exec_plan.steps.len - 1];
+        if (!block_ui.isPassthrough(last_step.argv)) {
+            // Check if any step is a builtin (can't delegate to /bin/sh)
+            var has_builtin = false;
+            for (exec_plan.steps) |*s| {
+                if (s.argv.len > 0 and (builtins.isBuiltin(s.argv[0]) or std.mem.eql(u8, s.argv[0], "json"))) {
+                    has_builtin = true;
+                    break;
+                }
+            }
+
+            if (exec_plan.steps.len == 1 and !has_builtin) {
+                // Single external command — use /bin/sh path
+                const step0 = &exec_plan.steps[0];
+                ax.stepStarted(exec_plan, step0);
+                const code = block_ui.runAndRender(exec_plan.raw_input, exec_plan.steps, stdout);
+                ax.stepFinished(exec_plan, step0, code, types.timestampMs() - start);
+                ax.groupFinished(exec_plan, code, types.timestampMs() - start);
+                return .{ .exit_code = code, .duration_ms = types.timestampMs() - start };
+            } else {
+                // Pipeline or has builtins — fork pipeline with stdout capture
+                const code = block_ui.forkAndRender(exec_plan, ax, env, stdout);
+                ax.groupFinished(exec_plan, code, types.timestampMs() - start);
+                return .{ .exit_code = code, .duration_ms = types.timestampMs() - start };
+            }
+        }
     }
 
     var result = forkPipeline(exec_plan, ax, env, exec_plan.background);
@@ -195,6 +216,15 @@ pub fn waitForJobFg(job: *jobs_mod.Job) jobs_mod.JobState {
 // ---------------------------------------------------------------------------
 // Fork pipeline
 // ---------------------------------------------------------------------------
+
+/// Public wrapper for block UI pipeline capture.
+pub fn forkPipelineForBlock(
+    exec_plan: *const planner_mod.ExecutionPlan,
+    ax: *const attyx_mod.Attyx,
+    env: *environ_mod.Environ,
+) GroupResult {
+    return forkPipeline(exec_plan, ax, env, false);
+}
 
 fn forkPipeline(
     exec_plan: *const planner_mod.ExecutionPlan,

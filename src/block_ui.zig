@@ -226,30 +226,30 @@ pub fn renderBlock(
 
 var restoring: bool = false;
 
-/// Run a command, capture its output, and render as a block.
-/// Returns exit code.
+/// Run a command (single or pipeline), capture output, render as block.
+/// `display` is the raw input string for the block title.
+/// `steps` contains the pipeline steps.
 pub fn runAndRender(
-    argv: []const []const u8,
+    display: []const u8,
+    steps: []const @import("planner.zig").PlanStep,
     stdout: std.fs.File,
 ) u8 {
-    // Build command string for display
-    var cmd_display: [512]u8 = undefined;
-    var cmd_len: usize = 0;
-    for (argv, 0..) |arg, i| {
-        if (i > 0 and cmd_len < cmd_display.len) { cmd_display[cmd_len] = ' '; cmd_len += 1; }
-        const n = @min(arg.len, cmd_display.len - cmd_len);
-        @memcpy(cmd_display[cmd_len..][0..n], arg[0..n]);
-        cmd_len += n;
-    }
-
-    // Join argv for /bin/sh
+    // Build shell command from all pipeline steps
     var sh_cmd: [4096]u8 = undefined;
     var sh_len: usize = 0;
-    for (argv, 0..) |arg, i| {
-        if (i > 0 and sh_len < sh_cmd.len) { sh_cmd[sh_len] = ' '; sh_len += 1; }
-        const n = @min(arg.len, sh_cmd.len - sh_len);
-        @memcpy(sh_cmd[sh_len..][0..n], arg[0..n]);
-        sh_len += n;
+    for (steps, 0..) |*step, si| {
+        if (si > 0 and sh_len < sh_cmd.len - 3) {
+            sh_cmd[sh_len] = ' ';
+            sh_cmd[sh_len + 1] = '|';
+            sh_cmd[sh_len + 2] = ' ';
+            sh_len += 3;
+        }
+        for (step.argv, 0..) |arg, ai| {
+            if (ai > 0 and sh_len < sh_cmd.len) { sh_cmd[sh_len] = ' '; sh_len += 1; }
+            const n = @min(arg.len, sh_cmd.len - sh_len);
+            @memcpy(sh_cmd[sh_len..][0..n], arg[0..n]);
+            sh_len += n;
+        }
     }
 
     var child = std.process.Child.init(
@@ -261,7 +261,7 @@ pub fn runAndRender(
     child.stderr_behavior = .Pipe;
 
     child.spawn() catch {
-        renderBlock(stdout, cmd_display[0..cmd_len], "xyron: failed to run command", 127);
+        renderBlock(stdout, display, "xyron: failed to run command", 127);
         return 127;
     };
 
@@ -290,7 +290,7 @@ pub fn runAndRender(
     }
 
     const term = child.wait() catch {
-        renderBlock(stdout, cmd_display[0..cmd_len], "xyron: wait failed", 127);
+        renderBlock(stdout, display, "xyron: wait failed", 127);
         return 127;
     };
     const code: u8 = switch (term) { .Exited => |c| c, else => 1 };
@@ -299,8 +299,69 @@ pub fn runAndRender(
     var output = out_buf[0..total];
     while (output.len > 0 and output[output.len - 1] == '\n') output = output[0 .. output.len - 1];
 
-    renderBlock(stdout, cmd_display[0..cmd_len], output, code);
+    renderBlock(stdout, display, output, code);
     return code;
+}
+
+/// Run a pipeline using forkPipeline (supports builtins like json),
+/// capture stdout via pipe, render as block. Returns exit code.
+pub fn forkAndRender(
+    exec_plan: *const @import("planner.zig").ExecutionPlan,
+    ax: *const @import("attyx.zig").Attyx,
+    env: *@import("environ.zig").Environ,
+    stdout: std.fs.File,
+) u8 {
+    const executor = @import("executor.zig");
+
+    // Create a pipe to capture the pipeline's stdout
+    const pipe_fds = posix.pipe2(.{}) catch {
+        renderBlock(stdout, exec_plan.raw_input, "xyron: pipe failed", 127);
+        return 127;
+    };
+
+    // Redirect stdout to the pipe write end for the child processes
+    const orig_stdout = posix.dup(posix.STDOUT_FILENO) catch {
+        posix.close(pipe_fds[0]);
+        posix.close(pipe_fds[1]);
+        renderBlock(stdout, exec_plan.raw_input, "xyron: dup failed", 127);
+        return 127;
+    };
+    posix.dup2(pipe_fds[1], posix.STDOUT_FILENO) catch {};
+    posix.close(pipe_fds[1]);
+
+    // Fork the pipeline (it writes to our redirected stdout = pipe)
+    const result = executor.forkPipelineForBlock(exec_plan, ax, env);
+
+    // Restore stdout
+    posix.dup2(orig_stdout, posix.STDOUT_FILENO) catch {};
+    posix.close(orig_stdout);
+
+    // Wait for pipeline
+    const W = posix.W;
+    var last_code: u8 = 0;
+    for (0..result.pid_count) |i| {
+        const wait = posix.waitpid(result.pids[i], 0);
+        if (wait.pid == 0) continue;
+        if (W.IFEXITED(wait.status)) last_code = W.EXITSTATUS(wait.status);
+    }
+
+    // Read captured output from pipe
+    const read_end = std.fs.File{ .handle = pipe_fds[0] };
+    var out_buf: [65536]u8 = undefined;
+    var total: usize = 0;
+    while (total < out_buf.len) {
+        const n = read_end.read(out_buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    posix.close(pipe_fds[0]);
+
+    // Trim trailing newlines
+    var output = out_buf[0..total];
+    while (output.len > 0 and output[output.len - 1] == '\n') output = output[0 .. output.len - 1];
+
+    renderBlock(stdout, exec_plan.raw_input, output, last_code);
+    return last_code;
 }
 
 /// Count visible columns in a string, skipping ANSI escape sequences

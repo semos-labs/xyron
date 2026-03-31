@@ -30,7 +30,8 @@ Xyron is tightly coupled with **Attyx** (terminal emulator) at `~/Projects/attyx
 
 1. **Classic shell** — `xyron` — normal interactive shell in any terminal
 2. **Enhanced shell** — `xyron` inside Attyx — shell + native UI bridge (`attyx popup`, etc.)
-3. **Headless runtime** — `xyron --headless` — backend for Attyx frontend, binary protocol on stdin/stdout
+3. **Interactive + IPC** — `xyron --ipc` — interactive shell with Unix socket for external queries
+4. **Headless runtime** — `xyron --headless` — backend for Attyx frontend, binary protocol on stdin/stdout
 
 ## Interactive testing
 
@@ -134,7 +135,52 @@ src/
   json_parser.zig       Minimal JSON parser (objects, arrays, types)
   migrate.zig           Bash/sh analyzer + converter engine
   expand.zig            Variable + tilde expansion
+  ipc.zig               Unix socket IPC for interactive+query mode
+  overlay.zig            Floating overlay system (completion picker positioning)
 ```
+
+---
+
+# IPC Mode (`--ipc`)
+
+Interactive shell with a Unix domain socket side channel. Xyron handles all UI rendering (prompt, overlay, blocks, ghost text) through the PTY. External tools (Attyx, scripts) connect to the socket to query shell state using the binary protocol.
+
+```sh
+xyron --ipc                    # Start with IPC enabled
+# Socket created at $XDG_RUNTIME_DIR/xyron-{pid}.sock
+# Path printed to stderr and emitted as OSC 7339 ipc_ready event
+```
+
+## Architecture
+
+```
+External tool (Attyx, scripts)
+├── PTY ←→ Xyron interactive (all ANSI rendering)
+├── stderr ← OSC 7339 events (lifecycle, state changes)
+└── Unix socket ← binary protocol queries (same as headless)
+```
+
+## Supported IPC requests
+
+Same binary protocol as headless mode:
+
+| Message | Description |
+|---------|-------------|
+| `get_completions` (0x10) | Completion candidates for buffer+cursor |
+| `get_ghost` (0x11) | Ghost text suggestion from history |
+| `get_shell_state` (0x09) | CWD, last exit code, job count |
+| `get_history` (0x08) | Recent history entries |
+| `query_history` (0x0D) | Filtered history search |
+| `list_jobs` (0x07) | Active job table |
+
+## Attyx integration
+
+When running inside Attyx (`ATTYX=1`), the socket path is emitted via OSC:
+```
+\x1b]7339;xyron:{"event":"ipc_ready","socket":"/path/to/socket"}\x07
+```
+
+Attyx launches Xyron with: `xyron --ipc`
 
 ---
 

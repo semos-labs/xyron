@@ -21,6 +21,7 @@ pub fn main() !void {
 
     var headless = false;
     var json_mode = false;
+    var enable_ipc = false;
 
     for (args[1..]) |arg| {
         if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
@@ -39,12 +40,21 @@ pub fn main() !void {
                 \\  -h, --help           Show this help
                 \\  --headless           Headless runtime mode (binary protocol)
                 \\  --headless-json      Headless runtime mode (JSON debug protocol)
+                \\  --ipc                Enable Unix socket IPC for external integration
                 \\
             );
             return;
         }
         if (std.mem.eql(u8, arg, "--headless")) headless = true;
         if (std.mem.eql(u8, arg, "--headless-json")) { headless = true; json_mode = true; }
+        if (std.mem.eql(u8, arg, "--ipc")) enable_ipc = true;
+    }
+
+    // Auto-enable IPC when running inside Attyx
+    if (!enable_ipc and !headless) {
+        if (std.posix.getenv("ATTYX")) |v| {
+            if (std.mem.eql(u8, v, "1")) enable_ipc = true;
+        }
     }
 
     if (headless) {
@@ -57,6 +67,7 @@ pub fn main() !void {
     // Normal interactive shell
     var sh = try shell_mod.Shell.init(allocator);
     defer sh.deinit();
+    sh.ipc_enabled = enable_ipc;
     try sh.run();
 
     std.process.exit(sh.last_exit_code);

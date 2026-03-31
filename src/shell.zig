@@ -27,6 +27,7 @@ const aliases_mod = @import("aliases.zig");
 const complete_help = @import("complete_help.zig");
 const block_mod = @import("block.zig");
 const overlay = @import("overlay.zig");
+const ipc = @import("ipc.zig");
 
 pub const Shell = struct {
     allocator: std.mem.Allocator,
@@ -43,6 +44,7 @@ pub const Shell = struct {
     last_exit_code: u8,
     last_duration_ms: i64,
     running: bool,
+    ipc_enabled: bool,
 
     pub fn init(allocator: std.mem.Allocator) !Shell {
         var attyx = attyx_mod.Attyx.init();
@@ -81,6 +83,7 @@ pub const Shell = struct {
             .last_exit_code = 0,
             .last_duration_ms = 0,
             .running = true,
+            .ipc_enabled = false,
         };
     }
 
@@ -103,6 +106,34 @@ pub const Shell = struct {
         const stdout = std.fs.File.stdout();
         lua_api.setBlockTable(&self.blocks);
         lua_api.setHistoryDb(&self.history_db);
+
+        // Start IPC socket if --ipc flag was passed
+        if (self.ipc_enabled) {
+            ipc.env = &self.env;
+            ipc.cmd_cache = &self.cmd_cache;
+            ipc.help_cache = &self.help_cache;
+            ipc.history = &self.history;
+            ipc.history_db = &self.history_db;
+            ipc.job_table = &self.job_table;
+            if (ipc.start()) |path| {
+                // Notify via OSC if inside Attyx
+                if (self.attyx.enabled) {
+                    var evt_buf: [512]u8 = undefined;
+                    const evt = std.fmt.bufPrint(&evt_buf,
+                        "\x1b]7339;xyron:{{\"event\":\"ipc_ready\",\"socket\":\"{s}\"}}\x07",
+                        .{path},
+                    ) catch "";
+                    self.attyx.stderr.writeAll(evt) catch {};
+                }
+                // Also print to stderr for non-Attyx consumers
+                const stderr = std.fs.File.stderr();
+                stderr.writeAll("xyron: IPC socket at ") catch {};
+                stderr.writeAll(path) catch {};
+                stderr.writeAll("\n") catch {};
+            }
+        }
+        defer ipc.stop();
+
         term.enableRawMode() catch {
             try self.runCooked();
             return;
@@ -120,6 +151,7 @@ pub const Shell = struct {
             }
 
             self.reapAndNotify(stdout);
+            if (self.ipc_enabled) ipc.poll();
 
             // Build prompt from segments
             var pctx = prompt_mod.buildContext(self.last_exit_code, self.last_duration_ms, self.activeJobCount());
@@ -158,10 +190,18 @@ pub const Shell = struct {
                         var line_copy: [editor_mod.MAX_LINE]u8 = undefined;
                         @memcpy(line_copy[0..line.len], line);
                         self.executeLine(line_copy[0..line.len]);
-                        // Estimate cursor row after command execution
+                        // Estimate cursor row after command execution.
+                        // In block UI mode, use the saved block line count for accuracy.
+                        // Otherwise assume the output filled the screen.
                         const trimmed_cmd = std.mem.trim(u8, line, " \t\r\n");
+                        const block_ui_mod = @import("block_ui.zig");
                         if (std.mem.eql(u8, trimmed_cmd, "clear") or std.mem.eql(u8, trimmed_cmd, "reset")) {
                             input.cursor_row_estimate = 1 + input.prompt_extra_lines;
+                        } else if (block_ui_mod.enabled and block_ui_mod.saved_block_lines > 0) {
+                            // Block rendered: previous row + block lines + prompt lines
+                            const new_row = input.cursor_row_estimate + block_ui_mod.saved_block_lines + 1 + input.prompt_extra_lines;
+                            const term_rows = overlay.getTermSize().rows;
+                            input.cursor_row_estimate = @min(new_row, term_rows);
                         } else {
                             input.cursor_row_estimate = overlay.getTermSize().rows;
                         }
