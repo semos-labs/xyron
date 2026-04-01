@@ -39,11 +39,12 @@ const select_cmd = @import("select.zig");
 const where_cmd = @import("where.zig");
 const sort_cmd = @import("sort_cmd.zig");
 const csv_cmd = @import("csv.zig");
+const fz_cmd = @import("fz.zig");
 
 const builtin_names = [_][]const u8{
     "cd", "pwd", "exit", "export", "unset", "env", "which", "type",
     "history", "jobs", "fg", "bg", "alias", "exec", "popup", "inspect",
-    "ls", "ps", "json", "query", "select", "where", "sort", "csv", "migrate",
+    "ls", "ps", "json", "query", "select", "where", "sort", "csv", "fz", "migrate",
 };
 
 const process_only_names = [_][]const u8{
@@ -94,6 +95,7 @@ pub fn execute(
     if (std.mem.eql(u8, name, "where")) return .{ .exit_code = where_cmd.run(args, stdout, stderr) };
     if (std.mem.eql(u8, name, "sort")) return .{ .exit_code = sort_cmd.run(args, stdout, stderr) };
     if (std.mem.eql(u8, name, "csv")) return .{ .exit_code = csv_cmd.run(args, stdout, stderr) };
+    if (std.mem.eql(u8, name, "fz")) return fz_cmd.run(args, stdout);
     if (std.mem.eql(u8, name, "migrate")) return migrate.run(args, stdout, stderr);
     if (std.mem.eql(u8, name, "popup")) return popup.run(args, stdout);
     if (std.mem.eql(u8, name, "inspect")) return inspect.run(args, stdout, hdb);

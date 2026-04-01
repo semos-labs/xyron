@@ -124,17 +124,32 @@ fn loadEntries(db: *history_db_mod.HistoryDb, entries: *[MAX_ENTRIES]Entry) usiz
     var str_buf: [MAX_ENTRIES * 256]u8 = undefined;
     const count = db.recentEntries(&raw_entries, &str_buf);
 
+    // Dedupe: keep only the most recent occurrence of each command.
+    // Entries come newest-first, so first occurrence wins.
+    var deduped: usize = 0;
     for (0..count) |i| {
         const e = &raw_entries[i];
-        entries[i].id = e.id;
         const rl = @min(e.raw_input.len, 256);
-        @memcpy(entries[i].raw[0..rl], e.raw_input[0..rl]);
-        entries[i].raw_len = rl;
-        entries[i].exit_code = e.exit_code;
-        entries[i].duration_ms = e.duration_ms;
-        entries[i].started_at = e.started_at;
+
+        // Check if this command already exists in deduped entries
+        var dupe = false;
+        for (0..deduped) |j| {
+            if (entries[j].raw_len == rl and std.mem.eql(u8, entries[j].raw[0..rl], e.raw_input[0..rl])) {
+                dupe = true;
+                break;
+            }
+        }
+        if (dupe) continue;
+
+        entries[deduped].id = e.id;
+        @memcpy(entries[deduped].raw[0..rl], e.raw_input[0..rl]);
+        entries[deduped].raw_len = rl;
+        entries[deduped].exit_code = e.exit_code;
+        entries[deduped].duration_ms = e.duration_ms;
+        entries[deduped].started_at = e.started_at;
+        deduped += 1;
     }
-    return count;
+    return deduped;
 }
 
 fn scoreEntries(

@@ -125,6 +125,8 @@ pub const Shell = struct {
                     ) catch "";
                     self.attyx.stderr.writeAll(evt) catch {};
                 }
+                // Poll immediately so Attyx's handshake doesn't time out
+                ipc.poll();
             }
         }
         defer ipc.stop();

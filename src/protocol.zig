@@ -30,6 +30,9 @@ pub const MsgType = enum(u8) {
     replay_command = 0x0E,
     get_completions = 0x10, // buffer + cursor → candidates
     get_ghost = 0x11, // buffer → ghost suggestion
+    handshake = 0x12, // Attyx→Xyron: socket_path:str, pane_id:str
+    overlay_select = 0x13, // Attyx→Xyron: index:i64 (user picked a completion)
+    overlay_dismiss = 0x14, // Attyx→Xyron: user dismissed the overlay
 
     // Responses: Xyron → Attyx (0x80–0x8F)
     resp_success = 0x80,
@@ -50,6 +53,9 @@ pub const MsgType = enum(u8) {
     evt_block_finished = 0xAD, // block_id:i64, exit_code:u8, duration_ms:i64, timestamp:i64
     evt_prompt = 0xAB,
     evt_ready = 0xAA,
+    evt_overlay_show = 0xB0, // candidates + selection + position
+    evt_overlay_update = 0xB1, // updated selection/scroll
+    evt_overlay_dismiss = 0xB2, // remove overlay
 
     pub fn isRequest(self: MsgType) bool {
         return @intFromEnum(self) < 0x80;

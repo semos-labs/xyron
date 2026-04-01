@@ -411,6 +411,10 @@ fn childExec(
         @import("builtins/csv.zig").runFromPipe(if (argv.len > 1) argv[1..] else &.{});
         std.process.exit(0);
     }
+    if (argv.len > 0 and std.mem.eql(u8, argv[0], "fz")) {
+        @import("builtins/fz.zig").runFromPipe(if (argv.len > 1) argv[1..] else &.{});
+        std.process.exit(0);
+    }
 
     // Structured builtins: run in-process.
     // Output JSON only if next step is a xyron pipe builtin; otherwise text.

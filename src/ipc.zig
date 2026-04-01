@@ -29,15 +29,53 @@ pub var history: ?*history_mod.History = null;
 pub var history_db: ?*history_db_mod.HistoryDb = null;
 pub var job_table: ?*jobs_mod.JobTable = null;
 
-/// Socket path and fd.
+/// Xyron's socket path and fd.
 var socket_path_buf: [256]u8 = undefined;
 var socket_path_len: usize = 0;
 var listen_fd: posix.fd_t = -1;
 
-/// Get the socket path (for emitting to Attyx).
+/// Attyx's socket path (received via handshake).
+var attyx_socket_buf: [256]u8 = undefined;
+var attyx_socket_len: usize = 0;
+pub var attyx_connected: bool = false;
+
+/// Get the listen fd for poll()-based multiplexing.
+pub fn getListenFd() posix.fd_t {
+    return listen_fd;
+}
+
+/// Get Xyron's socket path.
 pub fn getSocketPath() ?[]const u8 {
     if (socket_path_len == 0) return null;
     return socket_path_buf[0..socket_path_len];
+}
+
+/// Get Attyx's socket path (after handshake).
+pub fn getAttyxSocket() ?[]const u8 {
+    if (attyx_socket_len == 0) return null;
+    return attyx_socket_buf[0..attyx_socket_len];
+}
+
+/// Send a request to Attyx via its socket. Returns response payload or null.
+pub fn sendToAttyx(msg_type: proto.MsgType, payload: []const u8) ?[]const u8 {
+    if (attyx_socket_len == 0) return null;
+
+    const fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch return null;
+    defer posix.close(fd);
+
+    var addr: posix.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
+    @memcpy(addr.path[0..attyx_socket_len], attyx_socket_buf[0..attyx_socket_len]);
+    addr.path[attyx_socket_len] = 0;
+
+    posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch return null;
+
+    // Write request
+    writeToFd(fd, msg_type, payload);
+
+    // Read response
+    const S = struct { var resp_buf: [proto.MAX_PAYLOAD + proto.header_size]u8 = undefined; };
+    const frame = proto.readFrame(fd, &S.resp_buf) orelse return null;
+    return frame.payload;
 }
 
 /// Start the IPC listener. Creates a Unix socket and returns the path.
@@ -114,6 +152,9 @@ fn handleClient(fd: posix.fd_t) void {
         if (!frame.msg_type.isRequest()) continue;
 
         switch (frame.msg_type) {
+            .handshake => handleHandshake(fd, frame.payload),
+            .overlay_select => handleOverlaySelect(fd, frame.payload),
+            .overlay_dismiss => handleOverlayDismiss(fd),
             .get_completions => handleGetCompletions(fd, frame.payload),
             .get_ghost => handleGetGhost(fd, frame.payload),
             .get_shell_state => handleGetShellState(fd, frame.payload),
@@ -136,6 +177,67 @@ fn handleClient(fd: posix.fd_t) void {
 // ---------------------------------------------------------------------------
 // Request handlers (same logic as headless.zig but writes to client fd)
 // ---------------------------------------------------------------------------
+
+/// Attyx pane ID for this shell instance.
+var attyx_pane_id_buf: [64]u8 = undefined;
+var attyx_pane_id_len: usize = 0;
+
+/// Get the Attyx pane ID (after handshake).
+pub fn getAttyxPaneId() ?[]const u8 {
+    if (attyx_pane_id_len == 0) return null;
+    return attyx_pane_id_buf[0..attyx_pane_id_len];
+}
+
+/// Pending overlay action from Attyx (checked by the input loop).
+pub const OverlayAction = enum { none, dismiss, select };
+pub var pending_overlay_action: OverlayAction = .none;
+pub var pending_overlay_index: usize = 0;
+
+fn handleOverlaySelect(fd: posix.fd_t, payload: []const u8) void {
+    var r = proto.PayloadReader.init(payload);
+    const index: usize = @intCast(@max(r.readInt(), 0));
+    pending_overlay_action = .select;
+    pending_overlay_index = index;
+    // ACK
+    var buf: [16]u8 = undefined;
+    var w = proto.PayloadWriter.init(&buf);
+    w.writeU8(1); // ok
+    writeToFd(fd, .resp_success, w.written());
+}
+
+fn handleOverlayDismiss(fd: posix.fd_t) void {
+    pending_overlay_action = .dismiss;
+    var buf: [16]u8 = undefined;
+    var w = proto.PayloadWriter.init(&buf);
+    w.writeU8(1);
+    writeToFd(fd, .resp_success, w.written());
+}
+
+fn handleHandshake(fd: posix.fd_t, payload: []const u8) void {
+    var r = proto.PayloadReader.init(payload);
+    const attyx_path = r.readStr();
+    const pane_id = r.readStr();
+
+    // Store Attyx socket path
+    const len = @min(attyx_path.len, attyx_socket_buf.len);
+    @memcpy(attyx_socket_buf[0..len], attyx_path[0..len]);
+    attyx_socket_len = len;
+
+    // Store pane ID
+    const pid_len = @min(pane_id.len, attyx_pane_id_buf.len);
+    @memcpy(attyx_pane_id_buf[0..pid_len], pane_id[0..pid_len]);
+    attyx_pane_id_len = pid_len;
+
+    attyx_connected = true;
+
+    // Respond with xyron's socket path, name, version
+    var buf: [512]u8 = undefined;
+    var w = proto.PayloadWriter.init(&buf);
+    w.writeStr(if (getSocketPath()) |p| p else "");
+    w.writeStr("xyron");
+    w.writeStr("0.1.0");
+    writeToFd(fd, .resp_success, w.written());
+}
 
 fn handleGetCompletions(fd: posix.fd_t, payload: []const u8) void {
     var r = proto.PayloadReader.init(payload);

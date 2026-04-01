@@ -64,18 +64,36 @@ pub fn readKey() !Key {
         stashed_byte = null;
         break :blk b;
     } else blk: {
-        // Use raw syscall — Zig's posix.read auto-retries on EINTR,
-        // which swallows SIGWINCH. We need to detect it.
-        var buf: [1]u8 = undefined;
-        const rc = c.read(posix.STDIN_FILENO, &buf, 1);
-        if (rc > 0) {
-            break :blk buf[0];
-        } else if (rc == 0) {
-            return .ctrl_d;
-        } else {
-            const err = std.posix.errno(rc);
-            if (err == .INTR) return .resize;
-            return error.InputOutput;
+        // Poll stdin + IPC socket simultaneously. This lets xyron handle
+        // IPC requests (like handshake) while waiting for user input.
+        const ipc_mod = @import("ipc.zig");
+        while (true) {
+            var fds: [2]posix.pollfd = .{
+                .{ .fd = posix.STDIN_FILENO, .events = posix.POLL.IN, .revents = 0 },
+                .{ .fd = ipc_mod.getListenFd(), .events = posix.POLL.IN, .revents = 0 },
+            };
+            const nfds: usize = if (fds[1].fd >= 0) 2 else 1;
+            const ready = posix.poll(fds[0..nfds], -1) catch |err| {
+                if (err == error.Interrupted) return .resize; // SIGWINCH
+                return error.InputOutput;
+            };
+            if (ready == 0) continue;
+
+            // Handle IPC if ready (before stdin so handshake completes fast)
+            if (nfds > 1 and fds[1].revents & posix.POLL.IN != 0) {
+                ipc_mod.poll();
+            }
+
+            // Handle stdin if ready
+            if (fds[0].revents & posix.POLL.IN != 0) {
+                var buf: [1]u8 = undefined;
+                const rc = c.read(posix.STDIN_FILENO, &buf, 1);
+                if (rc > 0) break :blk buf[0];
+                if (rc == 0) return .ctrl_d;
+                const err = std.posix.errno(rc);
+                if (err == .INTR) return .resize;
+                return error.InputOutput;
+            }
         }
     };
 

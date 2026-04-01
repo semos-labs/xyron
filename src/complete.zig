@@ -450,6 +450,17 @@ fn renderPicker(
     hl_ctx: anytype,
 ) void {
     _ = filter;
+    const ipc_mod = @import("ipc.zig");
+
+    // Attyx-connected: delegate overlay rendering to Attyx
+    if (ipc_mod.attyx_connected) {
+        sendOverlayToAttyx(all, indices, count, selected, scroll, max_visible);
+        // Still need to refresh the prompt line (Attyx handles overlay separately)
+        const input_mod_a = @import("input.zig");
+        input_mod_a.refreshLine(stdout, prompt_str, ed, hl_ctx);
+        return;
+    }
+
     var buf: [16384]u8 = undefined;
     var pos: usize = 0;
 
@@ -940,10 +951,17 @@ pub fn acceptInline(ed: *editor_mod.Editor, stdout: std.fs.File) bool {
 pub fn dismissInline(stdout: std.fs.File) void {
     var s = &inline_state;
     if (!s.active) return;
-    // Clear the actual rendered lines (not max_visible)
-    const lines_to_clear = if (s.prev_rendered > 0) s.prev_rendered else s.max_visible;
-    if (lines_to_clear > 0) {
-        clearPickerLines(stdout, lines_to_clear, s.direction);
+
+    const ipc_mod = @import("ipc.zig");
+    if (ipc_mod.attyx_connected) {
+        // Attyx handles overlay — just send dismiss event
+        dismissAttyxOverlay();
+    } else {
+        // Terminal overlay — clear rendered lines
+        const lines_to_clear = if (s.prev_rendered > 0) s.prev_rendered else s.max_visible;
+        if (lines_to_clear > 0) {
+            clearPickerLines(stdout, lines_to_clear, s.direction);
+        }
     }
     s.active = false;
     s.scored_count = 0;
@@ -953,6 +971,52 @@ pub fn dismissInline(stdout: std.fs.File) void {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Attyx overlay delegation
+// ---------------------------------------------------------------------------
+
+/// Send overlay state to Attyx via IPC socket.
+fn sendOverlayToAttyx(
+    all: *const CandidateBuffer,
+    indices: *const [MAX_CANDIDATES]usize,
+    count: usize,
+    selected: usize,
+    scroll: usize,
+    max_visible: usize,
+) void {
+    const proto = @import("protocol.zig");
+    const ipc_mod = @import("ipc.zig");
+
+    const visible_end = @min(scroll + max_visible, count);
+    const visible_count = visible_end - scroll;
+
+    // Build payload: selected:i64, scroll:i64, total:i64, visible_count:i64,
+    // then per visible candidate: text:str, desc:str, kind:u8
+    var buf: [proto.MAX_PAYLOAD]u8 = undefined;
+    var w = proto.PayloadWriter.init(&buf);
+    w.writeInt(@intCast(selected));
+    w.writeInt(@intCast(scroll));
+    w.writeInt(@intCast(count));
+    w.writeInt(@intCast(visible_count));
+
+    for (scroll..visible_end) |i| {
+        const idx = indices[i];
+        const cand = &all.items[idx];
+        w.writeStr(cand.textSlice());
+        w.writeStr(cand.descSlice());
+        w.writeU8(@intFromEnum(cand.kind));
+    }
+
+    _ = ipc_mod.sendToAttyx(.evt_overlay_show, w.written());
+}
+
+/// Tell Attyx to dismiss the overlay.
+pub fn dismissAttyxOverlay() void {
+    const ipc_mod = @import("ipc.zig");
+    if (!ipc_mod.attyx_connected) return;
+    _ = ipc_mod.sendToAttyx(.evt_overlay_dismiss, &.{});
+}
 
 test "analyzeContext: command position" {
     const ctx = analyzeContext("", 0);

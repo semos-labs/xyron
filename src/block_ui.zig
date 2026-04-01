@@ -755,7 +755,8 @@ pub fn isPassthrough(argv: []const []const u8) bool {
         std.mem.eql(u8, base, "top") or
         std.mem.eql(u8, base, "htop") or
         std.mem.eql(u8, base, "ssh") or
-        std.mem.eql(u8, base, "tmux");
+        std.mem.eql(u8, base, "tmux") or
+        std.mem.eql(u8, base, "fz");
 }
 
 fn getTermWidth() usize {
