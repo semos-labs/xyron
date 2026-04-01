@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const lua_api = @import("lua_api.zig");
+const git_info_mod = @import("git_info.zig");
 
 pub const MAX_PROMPT: usize = 2048;
 pub const MAX_SEGMENTS: usize = 16;
@@ -23,8 +24,11 @@ pub const PromptContext = struct {
     user: []const u8 = "",
     hostname: []const u8 = "",
     git_branch: []const u8 = "",
+    git: GitInfo = .{},
     vim_normal: bool = false, // true when in vim normal mode
 };
+
+pub const GitInfo = git_info_mod.GitInfo;
 
 // ---------------------------------------------------------------------------
 // Built-in segment types
@@ -103,6 +107,86 @@ pub fn defaultConfig() PromptConfig {
     return cfg;
 }
 
+// ---------------------------------------------------------------------------
+// Widget configuration store
+// ---------------------------------------------------------------------------
+
+/// Git widget icons/labels — configurable via xyron.prompt.configure("git", {...})
+pub const GitWidgetConfig = struct {
+    icon_branch: [16]u8 = undefined,
+    icon_branch_len: usize = 0,
+    icon_staged: [8]u8 = undefined,
+    icon_staged_len: usize = 0,
+    icon_modified: [8]u8 = undefined,
+    icon_modified_len: usize = 0,
+    icon_deleted: [8]u8 = undefined,
+    icon_deleted_len: usize = 0,
+    icon_untracked: [8]u8 = undefined,
+    icon_untracked_len: usize = 0,
+    icon_conflicts: [8]u8 = undefined,
+    icon_conflicts_len: usize = 0,
+    icon_ahead: [8]u8 = undefined,
+    icon_ahead_len: usize = 0,
+    icon_behind: [8]u8 = undefined,
+    icon_behind_len: usize = 0,
+    icon_clean: [8]u8 = undefined,
+    icon_clean_len: usize = 0,
+    icon_lines_added: [8]u8 = undefined,
+    icon_lines_added_len: usize = 0,
+    icon_lines_removed: [8]u8 = undefined,
+    icon_lines_removed_len: usize = 0,
+
+    // Visibility toggles (all default to true)
+    show_staged: bool = true,
+    show_modified: bool = true,
+    show_deleted: bool = true,
+    show_untracked: bool = true,
+    show_conflicts: bool = true,
+    show_ahead_behind: bool = true,
+    show_loc: bool = true,
+    show_clean: bool = true,
+    show_state: bool = true, // rebase/merge/cherry-pick
+
+    pub fn getIcon(_: *const GitWidgetConfig, buf: []const u8, len: usize, default: []const u8) []const u8 {
+        return if (len > 0) buf[0..len] else default;
+    }
+};
+
+var git_widget_config: GitWidgetConfig = .{};
+
+pub fn getGitWidgetConfig() *const GitWidgetConfig {
+    return &git_widget_config;
+}
+
+pub fn setGitWidgetConfig(cfg: GitWidgetConfig) void {
+    git_widget_config = cfg;
+}
+
+/// Custom widget registry — Lua functions registered via xyron.prompt.register()
+const MAX_CUSTOM_WIDGETS = 16;
+var custom_widget_names: [MAX_CUSTOM_WIDGETS][64]u8 = undefined;
+var custom_widget_name_lens: [MAX_CUSTOM_WIDGETS]usize = .{0} ** MAX_CUSTOM_WIDGETS;
+var custom_widget_refs: [MAX_CUSTOM_WIDGETS]c_int = .{0} ** MAX_CUSTOM_WIDGETS;
+var custom_widget_count: usize = 0;
+
+pub fn registerCustomWidget(name: []const u8, ref: c_int) void {
+    if (custom_widget_count >= MAX_CUSTOM_WIDGETS) return;
+    const len = @min(name.len, 64);
+    @memcpy(custom_widget_names[custom_widget_count][0..len], name[0..len]);
+    custom_widget_name_lens[custom_widget_count] = len;
+    custom_widget_refs[custom_widget_count] = ref;
+    custom_widget_count += 1;
+}
+
+pub fn findCustomWidget(name: []const u8) ?c_int {
+    for (0..custom_widget_count) |i| {
+        if (std.mem.eql(u8, custom_widget_names[i][0..custom_widget_name_lens[i]], name)) {
+            return custom_widget_refs[i];
+        }
+    }
+    return null;
+}
+
 // Global prompt config — set by Lua or default
 var global_config: ?PromptConfig = null;
 
@@ -135,7 +219,8 @@ pub fn buildContext(last_exit: u8, last_duration: i64, job_count: usize) PromptC
     ctx.cwd = std.posix.getcwd(&static_cwd_buf) catch "?";
     ctx.home = std.posix.getenv("HOME") orelse "";
     ctx.user = std.posix.getenv("USER") orelse "";
-    ctx.git_branch = readGitBranch() orelse "";
+    ctx.git = git_info_mod.read();
+    ctx.git_branch = ctx.git.branch;
 
     return ctx;
 }
@@ -356,14 +441,178 @@ fn renderJobs(dest: []u8, seg: *const Segment, ctx: *const PromptContext) SegRes
 }
 
 fn renderGitBranch(dest: []u8, seg: *const Segment, ctx: *const PromptContext) SegResult {
-    if (ctx.git_branch.len == 0) return .{ .bytes = 0, .visible = 0 };
+    const g = &ctx.git;
+    if (g.branch.len == 0) return .{ .bytes = 0, .visible = 0 };
+    const wcfg = getGitWidgetConfig();
     var pos: usize = 0;
+    var vis: usize = 0;
+
+    // Branch icon + name (+ worktree)
     pos += cp(dest[pos..], seg.color);
-    pos += cp(dest[pos..], " ");
-    pos += cp(dest[pos..], ctx.git_branch);
-    const vis = 1 + ctx.git_branch.len;
+    const branch_icon = wcfg.getIcon(&wcfg.icon_branch, wcfg.icon_branch_len, "");
+    if (branch_icon.len > 0) {
+        pos += cp(dest[pos..], " ");
+        vis += 1;
+        pos += cp(dest[pos..], branch_icon);
+        vis += visLen(branch_icon);
+        pos += cp(dest[pos..], " ");
+        vis += 1;
+    } else {
+        pos += cp(dest[pos..], " ");
+        vis += 1;
+    }
+    pos += cp(dest[pos..], g.branch);
+    vis += g.branch.len;
+    // Worktree: show as branch:worktree-name
+    if (g.is_worktree and g.worktree_name.len > 0) {
+        pos += cp(dest[pos..], "\x1b[2m:\x1b[22m");
+        vis += 1;
+        pos += cp(dest[pos..], g.worktree_name);
+        vis += g.worktree_name.len;
+    }
     if (seg.color.len > 0) pos += cp(dest[pos..], "\x1b[0m");
+
+    // State indicators (rebase/merge/cherry-pick)
+    if (wcfg.show_state) {
+        if (g.is_rebasing) { const r = appendState(dest[pos..], "|REBASE"); pos += r.bytes; vis += r.visible; }
+        else if (g.is_merging) { const r = appendState(dest[pos..], "|MERGE"); pos += r.bytes; vis += r.visible; }
+        else if (g.is_cherry_picking) { const r = appendState(dest[pos..], "|PICK"); pos += r.bytes; vis += r.visible; }
+    }
+
+    // Ahead/behind
+    if (wcfg.show_ahead_behind and (g.ahead > 0 or g.behind > 0)) {
+        if (g.ahead > 0) {
+            pos += cp(dest[pos..], " "); vis += 1;
+            const icon = wcfg.getIcon(&wcfg.icon_ahead, wcfg.icon_ahead_len, "\xe2\x87\xa1");
+            const r = appendIndicator(dest[pos..], "\x1b[32m", icon, g.ahead);
+            pos += r.bytes; vis += r.visible;
+        }
+        if (g.behind > 0) {
+            pos += cp(dest[pos..], " "); vis += 1;
+            const icon = wcfg.getIcon(&wcfg.icon_behind, wcfg.icon_behind_len, "\xe2\x87\xa3");
+            const r = appendIndicator(dest[pos..], "\x1b[31m", icon, g.behind);
+            pos += r.bytes; vis += r.visible;
+        }
+    }
+
+    // File status
+    var has_visible_status = false;
+    if (wcfg.show_conflicts and g.conflicts > 0) {
+        pos += cp(dest[pos..], " "); vis += 1;
+        has_visible_status = true;
+        const icon = wcfg.getIcon(&wcfg.icon_conflicts, wcfg.icon_conflicts_len, "\xe2\x9c\x96");
+        const r = appendIndicator(dest[pos..], "\x1b[1;31m", icon, g.conflicts);
+        pos += r.bytes; vis += r.visible;
+    }
+    if (wcfg.show_staged and g.staged > 0) {
+        pos += cp(dest[pos..], " "); vis += 1;
+        has_visible_status = true;
+        const icon = wcfg.getIcon(&wcfg.icon_staged, wcfg.icon_staged_len, "+");
+        const r = appendIndicator(dest[pos..], "\x1b[32m", icon, g.staged);
+        pos += r.bytes; vis += r.visible;
+    }
+    if (wcfg.show_modified and g.modified > 0) {
+        pos += cp(dest[pos..], " "); vis += 1;
+        has_visible_status = true;
+        const icon = wcfg.getIcon(&wcfg.icon_modified, wcfg.icon_modified_len, "~");
+        const r = appendIndicator(dest[pos..], "\x1b[33m", icon, g.modified);
+        pos += r.bytes; vis += r.visible;
+    }
+    if (wcfg.show_deleted and g.deleted > 0) {
+        pos += cp(dest[pos..], " "); vis += 1;
+        has_visible_status = true;
+        const icon = wcfg.getIcon(&wcfg.icon_deleted, wcfg.icon_deleted_len, "-");
+        const r = appendIndicator(dest[pos..], "\x1b[31m", icon, g.deleted);
+        pos += r.bytes; vis += r.visible;
+    }
+    if (wcfg.show_untracked and g.untracked > 0) {
+        pos += cp(dest[pos..], " "); vis += 1;
+        has_visible_status = true;
+        const icon = wcfg.getIcon(&wcfg.icon_untracked, wcfg.icon_untracked_len, "?");
+        const r = appendIndicator(dest[pos..], "\x1b[2m", icon, g.untracked);
+        pos += r.bytes; vis += r.visible;
+    }
+
+    // Clean indicator (only when no visible status)
+    if (!has_visible_status and wcfg.show_clean and g.branch.len > 0) {
+        const clean_icon = wcfg.getIcon(&wcfg.icon_clean, wcfg.icon_clean_len, "");
+        if (clean_icon.len > 0) {
+            pos += cp(dest[pos..], " "); vis += 1;
+            pos += cp(dest[pos..], "\x1b[32m");
+            pos += cp(dest[pos..], clean_icon);
+            vis += visLen(clean_icon);
+            pos += cp(dest[pos..], "\x1b[0m");
+        }
+    }
+
+    // Lines added/removed
+    if (wcfg.show_loc) {
+        if (g.lines_added > 0) {
+            pos += cp(dest[pos..], " "); vis += 1;
+            const icon = wcfg.getIcon(&wcfg.icon_lines_added, wcfg.icon_lines_added_len, "+");
+            const r = appendIndicator(dest[pos..], "\x1b[32m", icon, g.lines_added);
+            pos += r.bytes; vis += r.visible;
+        }
+        if (g.lines_removed > 0) {
+            pos += cp(dest[pos..], " "); vis += 1;
+            const icon = wcfg.getIcon(&wcfg.icon_lines_removed, wcfg.icon_lines_removed_len, "-");
+            const r = appendIndicator(dest[pos..], "\x1b[31m", icon, g.lines_removed);
+            pos += r.bytes; vis += r.visible;
+        }
+    }
+
     return .{ .bytes = pos, .visible = vis };
+}
+
+fn appendState(dest: []u8, label: []const u8) SegResult {
+    var pos: usize = 0;
+    pos += cp(dest[pos..], "\x1b[33m");
+    pos += cp(dest[pos..], label);
+    pos += cp(dest[pos..], "\x1b[0m");
+    return .{ .bytes = pos, .visible = label.len };
+}
+
+fn appendIndicator(dest: []u8, color: []const u8, icon: []const u8, count: usize) SegResult {
+    var pos: usize = 0;
+    pos += cp(dest[pos..], color);
+    pos += cp(dest[pos..], icon);
+    pos += cp(dest[pos..], " ");
+    const num = std.fmt.bufPrint(dest[pos..], "{d}", .{count}) catch "";
+    pos += num.len;
+    pos += cp(dest[pos..], "\x1b[0m");
+    return .{ .bytes = pos, .visible = visLen(icon) + 1 + num.len };
+}
+
+/// Visible width of a string that may contain ANSI escapes.
+fn visLenAnsi(s: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] == 0x1b and i + 1 < s.len and s[i + 1] == '[') {
+            // Skip CSI sequence: ESC [ ... final_byte
+            i += 2;
+            while (i < s.len and s[i] < 0x40) : (i += 1) {}
+            if (i < s.len) i += 1; // skip final byte
+        } else if (s[i] < 0x80) { i += 1; n += 1; }
+        else if (s[i] < 0xE0) { i += 2; n += 1; }
+        else if (s[i] < 0xF0) { i += 3; n += 1; }
+        else { i += 4; n += 1; }
+    }
+    return n;
+}
+
+/// Estimate visible width of a UTF-8 string (count codepoints, not bytes).
+fn visLen(s: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        if (s[i] < 0x80) { i += 1; }
+        else if (s[i] < 0xE0) { i += 2; }
+        else if (s[i] < 0xF0) { i += 3; }
+        else { i += 4; }
+        n += 1;
+    }
+    return n;
 }
 
 fn renderText(dest: []u8, seg: *const Segment) SegResult {
@@ -391,52 +640,12 @@ fn renderLuaSegment(dest: []u8, seg: *const Segment, lua: lua_api.LuaState) SegR
         const text = std.mem.span(r);
         const n = cp(dest, text);
         c.lua_settop(state, -(1) - 1);
-        return .{ .bytes = n, .visible = n }; // Lua segments are assumed visible
+        return .{ .bytes = n, .visible = visLenAnsi(text) };
     }
     c.lua_settop(state, -(1) - 1);
     return .{ .bytes = 0, .visible = 0 };
 }
 
-// ---------------------------------------------------------------------------
-// Git branch detection (cheap — reads .git/HEAD only)
-// ---------------------------------------------------------------------------
-
-var git_branch_buf: [128]u8 = undefined;
-
-fn readGitBranch() ?[]const u8 {
-    // Walk up from cwd looking for .git/HEAD
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var dir = std.posix.getcwd(&path_buf) catch return null;
-
-    while (true) {
-        var head_path: [std.fs.max_path_bytes]u8 = undefined;
-        const hp = std.fmt.bufPrint(&head_path, "{s}/.git/HEAD", .{dir}) catch return null;
-
-        const file = std.fs.openFileAbsolute(hp, .{}) catch {
-            // Go up one directory
-            const sep = std.mem.lastIndexOf(u8, dir, "/") orelse return null;
-            if (sep == 0) return null;
-            dir = dir[0..sep];
-            continue;
-        };
-        defer file.close();
-
-        const n = file.read(&git_branch_buf) catch return null;
-        const content = git_branch_buf[0..n];
-
-        // "ref: refs/heads/main\n" → "main"
-        const prefix = "ref: refs/heads/";
-        if (std.mem.startsWith(u8, content, prefix)) {
-            const rest = content[prefix.len..];
-            const end = std.mem.indexOf(u8, rest, "\n") orelse rest.len;
-            return rest[0..end];
-        }
-
-        // Detached HEAD — show short hash
-        if (n >= 8) return content[0..8];
-        return null;
-    }
-}
 
 fn cp(dest: []u8, src: []const u8) usize {
     const n = @min(src.len, dest.len);

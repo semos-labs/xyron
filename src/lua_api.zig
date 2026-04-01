@@ -43,10 +43,15 @@ pub fn init(env: *environ_mod.Environ, attyx_enabled: bool) LuaState {
     registerFn(L, "on", apiOn);
     registerFn(L, "command", apiCommand);
     registerFn(L, "exec", apiExec);
-    registerFn(L, "prompt", apiPrompt);
+    // xyron.prompt = { register = fn, configure = fn, init = fn }
+    c.lua_createtable(L, 0, 3);
+    registerFn(L, "register", apiPromptRegister);
+    registerFn(L, "configure", apiPromptConfigure);
+    registerFn(L, "init", apiPromptInit);
+    c.lua_setfield(L, -2, "prompt");
     registerFn(L, "vim_mode", apiVimMode);
     registerFn(L, "block_ui", apiBlockUi);
-    registerFn(L, "overlay", apiOverlay);
+    registerFn(L, "completion", apiCompletion);
     registerFn(L, "alias", apiAlias);
     registerFn(L, "history_query", apiHistoryQuery);
     registerFn(L, "history_replay", apiHistoryReplay);
@@ -255,11 +260,26 @@ fn apiBlockUi(L: ?*c.lua_State) callconv(.c) c_int {
 }
 
 /// xyron.overlay(enabled) — enable/disable floating overlay for completions
-fn apiOverlay(L: ?*c.lua_State) callconv(.c) c_int {
+/// xyron.completion(enabled, opts?) — configure completion behavior
+/// enabled: boolean — enable/disable completions entirely
+/// opts: optional table { on_demand = bool } — when true, no as-you-type; only Tab/Ctrl+Space
+fn apiCompletion(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L orelse return 0;
+    const ov = @import("overlay.zig");
+
     if (c.lua_type(state, 1) == c.LUA_TBOOLEAN) {
-        @import("overlay.zig").enabled = c.lua_toboolean(state, 1) != 0;
+        ov.enabled = c.lua_toboolean(state, 1) != 0;
     }
+
+    // Parse optional opts table
+    if (c.lua_type(state, 2) == c.LUA_TTABLE) {
+        _ = c.lua_getfield(state, 2, "on_demand");
+        if (c.lua_type(state, -1) == c.LUA_TBOOLEAN) {
+            ov.on_demand = c.lua_toboolean(state, -1) != 0;
+        }
+        c.lua_pop(state, 1);
+    }
+
     return 0;
 }
 
@@ -455,7 +475,8 @@ fn apiAlias(L: ?*c.lua_State) callconv(.c) c_int {
 /// xyron.prompt({segments}) — configure prompt from Lua.
 /// Each element is either a string (builtin name or literal) or a function.
 /// Builtin names: "cwd", "symbol", "status", "duration", "jobs", "git_branch"
-fn apiPrompt(L: ?*c.lua_State) callconv(.c) c_int {
+/// xyron.prompt.init({...}) — set up prompt segments (same as old xyron.prompt())
+fn apiPromptInit(L: ?*c.lua_State) callconv(.c) c_int {
     const prompt_mod = @import("prompt.zig");
     const state = L orelse return 0;
 
@@ -478,10 +499,18 @@ fn apiPrompt(L: ?*c.lua_State) callconv(.c) c_int {
                 else if (std.mem.eql(u8, n, "status")) { cfg.addBuiltin(.status, "\x1b[31m"); }
                 else if (std.mem.eql(u8, n, "duration")) { cfg.addBuiltin(.duration, "\x1b[33m"); }
                 else if (std.mem.eql(u8, n, "jobs")) { cfg.addBuiltin(.jobs, "\x1b[33m"); }
+                else if (std.mem.eql(u8, n, "git")) { cfg.addBuiltin(.git_branch, "\x1b[35m"); }
                 else if (std.mem.eql(u8, n, "git_branch")) { cfg.addBuiltin(.git_branch, "\x1b[35m"); }
                 else if (std.mem.eql(u8, n, "\n")) { cfg.addNewline(); }
                 else if (std.mem.eql(u8, n, "spacer")) { cfg.addBuiltin(.spacer, ""); }
-                else { cfg.addText(n, ""); } // literal text
+                else {
+                    // Check custom widgets
+                    if (prompt_mod.findCustomWidget(n)) |ref| {
+                        cfg.addLua(ref);
+                    } else {
+                        cfg.addText(n, ""); // literal text
+                    }
+                }
             }
         } else if (t == c.LUA_TFUNCTION) {
             const ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
@@ -494,6 +523,84 @@ fn apiPrompt(L: ?*c.lua_State) callconv(.c) c_int {
 
     prompt_mod.setConfig(cfg);
     return 0;
+}
+
+/// xyron.prompt.register(name, fn(config)) — register a custom widget
+fn apiPromptRegister(L: ?*c.lua_State) callconv(.c) c_int {
+    const prompt_mod = @import("prompt.zig");
+    const state = L orelse return 0;
+
+    if (c.lua_type(state, 1) != c.LUA_TSTRING) return 0;
+    if (c.lua_type(state, 2) != c.LUA_TFUNCTION) return 0;
+
+    const name_ptr = c.lua_tolstring(state, 1, null) orelse return 0;
+    const name = std.mem.span(name_ptr);
+    const ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX); // pops the function
+
+    prompt_mod.registerCustomWidget(name, ref);
+    return 0;
+}
+
+/// xyron.prompt.configure(name, config_table) — configure a widget
+fn apiPromptConfigure(L: ?*c.lua_State) callconv(.c) c_int {
+    const prompt_mod = @import("prompt.zig");
+    const state = L orelse return 0;
+
+    if (c.lua_type(state, 1) != c.LUA_TSTRING) return 0;
+    if (c.lua_type(state, 2) != c.LUA_TTABLE) return 0;
+
+    const name_ptr = c.lua_tolstring(state, 1, null) orelse return 0;
+    const name = std.mem.span(name_ptr);
+
+    if (std.mem.eql(u8, name, "git") or std.mem.eql(u8, name, "git_branch")) {
+        var cfg = prompt_mod.GitWidgetConfig{};
+        readIconField(state, 2, "branch", &cfg.icon_branch, &cfg.icon_branch_len);
+        readIconField(state, 2, "staged", &cfg.icon_staged, &cfg.icon_staged_len);
+        readIconField(state, 2, "modified", &cfg.icon_modified, &cfg.icon_modified_len);
+        readIconField(state, 2, "deleted", &cfg.icon_deleted, &cfg.icon_deleted_len);
+        readIconField(state, 2, "untracked", &cfg.icon_untracked, &cfg.icon_untracked_len);
+        readIconField(state, 2, "conflicts", &cfg.icon_conflicts, &cfg.icon_conflicts_len);
+        readIconField(state, 2, "ahead", &cfg.icon_ahead, &cfg.icon_ahead_len);
+        readIconField(state, 2, "behind", &cfg.icon_behind, &cfg.icon_behind_len);
+        readIconField(state, 2, "clean", &cfg.icon_clean, &cfg.icon_clean_len);
+        readIconField(state, 2, "lines_added", &cfg.icon_lines_added, &cfg.icon_lines_added_len);
+        readIconField(state, 2, "lines_removed", &cfg.icon_lines_removed, &cfg.icon_lines_removed_len);
+        // Visibility toggles
+        readBoolField(state, 2, "show_staged", &cfg.show_staged);
+        readBoolField(state, 2, "show_modified", &cfg.show_modified);
+        readBoolField(state, 2, "show_deleted", &cfg.show_deleted);
+        readBoolField(state, 2, "show_untracked", &cfg.show_untracked);
+        readBoolField(state, 2, "show_conflicts", &cfg.show_conflicts);
+        readBoolField(state, 2, "show_ahead_behind", &cfg.show_ahead_behind);
+        readBoolField(state, 2, "show_loc", &cfg.show_loc);
+        readBoolField(state, 2, "show_clean", &cfg.show_clean);
+        readBoolField(state, 2, "show_state", &cfg.show_state);
+        prompt_mod.setGitWidgetConfig(cfg);
+    }
+
+    return 0;
+}
+
+fn readIconField(state: *c.lua_State, table_idx: c_int, field: [*:0]const u8, out: []u8, out_len: *usize) void {
+    _ = c.lua_getfield(state, table_idx, field);
+    if (c.lua_type(state, -1) == c.LUA_TSTRING) {
+        var len: usize = 0;
+        const ptr = c.lua_tolstring(state, -1, &len);
+        if (ptr) |p| {
+            const n = @min(len, out.len);
+            @memcpy(out[0..n], @as([*]const u8, @ptrCast(p))[0..n]);
+            out_len.* = n;
+        }
+    }
+    c.lua_settop(state, -(1) - 1); // pop
+}
+
+fn readBoolField(state: *c.lua_State, table_idx: c_int, field: [*:0]const u8, out: *bool) void {
+    _ = c.lua_getfield(state, table_idx, field);
+    if (c.lua_type(state, -1) == c.LUA_TBOOLEAN) {
+        out.* = c.lua_toboolean(state, -1) != 0;
+    }
+    c.lua_settop(state, -(1) - 1);
 }
 
 // ---------------------------------------------------------------------------

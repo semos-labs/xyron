@@ -42,6 +42,7 @@ pub const Key = union(enum) {
     ctrl_u, // kill to start of line
     ctrl_w, // kill word backward
     ctrl_y, // yank (paste kill buffer)
+    ctrl_space, // trigger completion
     escape,
     // Alt/Meta combos (ESC + key)
     alt_b, // word backward
@@ -99,6 +100,7 @@ pub fn readKey() !Key {
 
     // Control characters (byte values 0-31)
     return switch (byte) {
+        0 => .ctrl_space, // ^@ — Ctrl+Space
         1 => .ctrl_a, // ^A — home
         2 => .ctrl_b, // ^B — left
         3 => .ctrl_c, // ^C — interrupt

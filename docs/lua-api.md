@@ -89,6 +89,18 @@ xyron.vim_mode(true)  -- enable vim-style modal editing
 
 Insert mode: normal typing. Normal mode: h/l/w/b/0/$/x/dw/db/dd/D/i/a/I/A.
 
+### Completion
+
+```lua
+xyron.completion(true)                          -- enable (default)
+xyron.completion(false)                         -- disable all completions
+xyron.completion(true, { on_demand = true })    -- only on Tab/Ctrl+Space (no as-you-type)
+```
+
+When enabled (default), completions trigger as-you-type in Attyx or via Tab/Ctrl+Space in any terminal. `on_demand` disables as-you-type — completions only appear when explicitly triggered.
+
+Keys: Tab/Ctrl+Space (trigger), Ctrl+P/N or arrows (navigate), Enter/Tab/Ctrl+Y (accept), Esc (cancel).
+
 ### Attyx integration
 
 ```lua

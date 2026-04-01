@@ -31,14 +31,14 @@ pub fn gather(
         },
         .argument => {
             // Help-derived flags and subcommands first, then filesystem
-            if (help_cache) |hc| provideHelpFlags(out, ctx.cmd_name, ctx.prefix, hc, env);
+            if (help_cache) |hc| provideHelpFlags(out, ctx, hc, env);
             provideFilesystem(out, ctx.prefix, env);
         },
         .redirect_target => {
             provideFilesystem(out, ctx.prefix, env);
         },
         .flag => {
-            if (help_cache) |hc| provideHelpFlags(out, ctx.cmd_name, ctx.prefix, hc, env);
+            if (help_cache) |hc| provideHelpFlags(out, ctx, hc, env);
             provideFilesystem(out, ctx.prefix, env);
         },
         .env_var => {
@@ -125,7 +125,6 @@ fn providePathCommands(
     cmd_cache: *highlight.CommandCache,
 ) void {
     _ = cmd_cache;
-    if (prefix.len == 0) return; // don't list all PATH commands on empty prefix
 
     const path_val = env.get("PATH") orelse return;
     var path_iter = std.mem.splitScalar(u8, path_val, ':');
@@ -224,16 +223,38 @@ fn provideEnvVars(out: *complete.CandidateBuffer, prefix: []const u8, env: *cons
 
 fn provideHelpFlags(
     out: *complete.CandidateBuffer,
-    cmd_name: []const u8,
-    prefix: []const u8,
+    ctx: *const complete.CompletionContext,
     help_cache: *help_mod.HelpCache,
     env: *const environ_mod.Environ,
 ) void {
-    if (cmd_name.len == 0) return;
-    // Ensure help is cached for this command
-    help_cache.ensureCached(cmd_name, env);
-    // Query matching flags
-    help_cache.queryFlags(cmd_name, prefix, out);
+    if (ctx.cmd_name.len == 0) return;
+
+    // Walk subcommand chain: e.g. "docker" → "docker compose" → "docker compose up"
+    // At each level, check if the next arg is a known subcommand.
+    var cmd_buf: [512]u8 = undefined;
+    const base_len = @min(ctx.cmd_name.len, cmd_buf.len);
+    @memcpy(cmd_buf[0..base_len], ctx.cmd_name[0..base_len]);
+    var cmd_len: usize = base_len;
+
+    // Cache and resolve each subcommand level
+    help_cache.ensureCached(cmd_buf[0..cmd_len], env);
+
+    for (ctx.cmd_args[0..ctx.cmd_args_len]) |arg| {
+        // Check if this arg is a known subcommand at current level
+        if (!help_cache.isSubcommand(cmd_buf[0..cmd_len], arg)) break;
+
+        // Extend: "docker" + " " + "compose"
+        if (cmd_len + 1 + arg.len > cmd_buf.len) break;
+        cmd_buf[cmd_len] = ' ';
+        @memcpy(cmd_buf[cmd_len + 1 ..][0..arg.len], arg);
+        cmd_len += 1 + arg.len;
+
+        // Cache the deeper level
+        help_cache.ensureCached(cmd_buf[0..cmd_len], env);
+    }
+
+    // Query flags/subcommands at the resolved depth
+    help_cache.queryFlags(cmd_buf[0..cmd_len], ctx.prefix, out);
 }
 
 // ---------------------------------------------------------------------------

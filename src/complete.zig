@@ -21,12 +21,18 @@ const overlay = @import("overlay.zig");
 
 pub const ContextKind = enum { command, argument, flag, env_var, redirect_target, none };
 
+pub const MAX_SUBCMD_DEPTH: usize = 8;
+
 pub const CompletionContext = struct {
     kind: ContextKind,
     prefix: []const u8,
     word_start: usize,
     word_end: usize,
     cmd_name: []const u8,
+    /// Intermediate non-flag arguments between cmd and cursor prefix.
+    /// Used to resolve subcommand chains (e.g. "docker" + ["compose"] + "up").
+    cmd_args: [MAX_SUBCMD_DEPTH][]const u8 = .{&.{}} ** MAX_SUBCMD_DEPTH,
+    cmd_args_len: usize = 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -129,9 +135,10 @@ pub fn getCompletions(
 const MAX_FILTER: usize = 128;
 const MAX_VISIBLE: usize = 12;
 
-pub const PickerResult = enum { accepted, cancelled };
+pub const PickerResult = enum { accepted, cancelled, interrupted };
 
-/// Run the interactive completion picker. Blocks until user accepts or cancels.
+/// Run the interactive completion picker (inline list below prompt).
+/// Blocks until user accepts or cancels.
 pub fn runPicker(
     ed: *editor_mod.Editor,
     stdout: std.fs.File,
@@ -142,107 +149,307 @@ pub fn runPicker(
     hl_ctx: anytype,
 ) PickerResult {
     // Analyze context and gather candidates
-    const ctx = analyzeContext(ed.content(), ed.cursor);
     var all = CandidateBuffer{};
-    providers.gather(&all, &ctx, env, cmd_cache, help_cache);
-    if (all.count == 0) return .cancelled;
+    var word_start: usize = 0;
 
-    // If single candidate, insert immediately
-    if (all.count == 1) {
-        insertCandidate(ed, ctx.word_start, ctx.word_end, &all.items[0]);
-        return .accepted;
-    }
-
-    // Picker state
-    var filter: [MAX_FILTER]u8 = undefined;
-    @memcpy(filter[0..ctx.prefix.len], ctx.prefix);
-    var filter_len = ctx.prefix.len;
-    var selected: usize = 0;
-    var scroll: usize = 0;
-
-    // Score and sort
     var scored_indices: [MAX_CANDIDATES]usize = undefined;
     var scored_values: [MAX_CANDIDATES]i32 = undefined;
     var scored_count: usize = 0;
 
-    scoreAndFilter(&all, filter[0..filter_len], &scored_indices, &scored_values, &scored_count);
+    // Helper: re-gather and score based on current editor content
+    const regather = struct {
+        fn run(
+            e: *editor_mod.Editor,
+            a: *CandidateBuffer,
+            ws: *usize,
+            si: *[MAX_CANDIDATES]usize,
+            sv: *[MAX_CANDIDATES]i32,
+            sc: *usize,
+            sel: *usize,
+            scr: *usize,
+            ev: *const environ_mod.Environ,
+            cc: *highlight.CommandCache,
+            hc: ?*help_mod.HelpCache,
+        ) void {
+            const ctx = analyzeContext(e.content(), e.cursor);
+            ws.* = ctx.word_start;
+            a.count = 0;
+            providers.gather(a, &ctx, ev, cc, hc);
+            scoreAndFilter(a, ctx.prefix, si, sv, sc);
+            sel.* = 0;
+            scr.* = 0;
+        }
+    }.run;
 
-    if (scored_count == 0) return .cancelled;
+    var selected: usize = 0;
+    var scroll: usize = 0;
 
-    // Overlay setup: detect actual screen position via DSR
-    const layout = computeOverlayLayout();
-    const max_visible = layout.max_visible;
-    // Store direction + word_start for renderPicker to use
-    inline_state.direction = layout.direction;
-    inline_state.word_start = ctx.word_start;
+    regather(ed, &all, &word_start, &scored_indices, &scored_values, &scored_count, &selected, &scroll, env, cmd_cache, help_cache);
 
-    // Render initial picker
-    renderPicker(stdout, prompt_str, ed, &all, &scored_indices, scored_count, selected, scroll, max_visible, filter[0..filter_len], hl_ctx);
+    if (scored_count == 0 and all.count == 0) return .cancelled;
+
+    // If single candidate, insert immediately
+    if (all.count == 1 and scored_count == 1) {
+        insertCandidate(ed, word_start, ed.cursor, &all.items[scored_indices[0]]);
+        return .accepted;
+    }
+
+    const max_visible: usize = @min(MAX_VISIBLE, overlay.getTermSize().rows / 3);
+    var prev_lines: usize = 0;
+
+    // Query prompt row once via DSR
+    var prompt_row = overlay.getCursorPos().row;
+    if (prompt_row == 0) prompt_row = overlay.getTermSize().rows; // fallback
+
+    // Render initial list
+    renderInlineList(stdout, prompt_str, ed, &all, &scored_indices, scored_count, selected, scroll, max_visible, &prev_lines, &prompt_row, hl_ctx);
 
     // Picker key loop
     while (true) {
         const key = keys.readKey() catch break;
 
+        var content_changed = false;
         switch (key) {
-            .enter, .right => {
+            // Accept
+            .enter, .tab, .ctrl_y => {
                 if (scored_count > 0) {
                     const idx = scored_indices[selected];
-                    insertCandidate(ed, ctx.word_start, ed.cursor, &all.items[idx]);
+                    insertCandidate(ed, word_start, ed.cursor, &all.items[idx]);
                 }
-                clearPickerLines(stdout, max_visible, inline_state.direction);
+                clearInlineList(stdout, prev_lines, prompt_row);
                 return .accepted;
             },
-            .tab => {
-                // Cycle forward (same as down)
-                if (scored_count > 0) {
-                    selected = if (selected + 1 >= scored_count) 0 else selected + 1;
-                    if (selected >= scroll + max_visible) scroll = selected - max_visible + 1;
-                    if (selected < scroll) scroll = selected;
-                }
+            // Dismiss
+            .escape => {
+                clearInlineList(stdout, prev_lines, prompt_row);
+                return .cancelled;
             },
-            .shift_tab => {
-                // Cycle backward (same as up, wrapping)
+            // Interrupt — dismiss and propagate ^C
+            .ctrl_c => {
+                clearInlineList(stdout, prev_lines, prompt_row);
+                return .interrupted;
+            },
+            // Navigate
+            .up, .ctrl_p => {
                 if (scored_count > 0) {
                     selected = if (selected == 0) scored_count - 1 else selected - 1;
                     if (selected < scroll) scroll = selected;
                     if (selected >= scroll + max_visible) scroll = selected - max_visible + 1;
                 }
             },
-            .escape, .ctrl_c => {
-                clearPickerLines(stdout, max_visible, inline_state.direction);
+            .down, .ctrl_n => {
+                if (scored_count > 0) {
+                    selected = if (selected + 1 >= scored_count) 0 else selected + 1;
+                    if (selected >= scroll + max_visible) scroll = selected - max_visible + 1;
+                    if (selected < scroll) scroll = selected;
+                }
+            },
+            // Editing
+            .backspace => {
+                if (ed.cursor > word_start) {
+                    ed.backspace();
+                    content_changed = true;
+                }
+            },
+            .delete => { ed.delete(); content_changed = true; },
+            .ctrl_w, .alt_backspace => { ed.killWordBackward(); content_changed = true; },
+            .ctrl_u => { ed.killToStart(); content_changed = true; },
+            .ctrl_k => { ed.killToEnd(); content_changed = true; },
+            .alt_d => { ed.killWordForward(); content_changed = true; },
+            // Movement (dismiss picker, let the main loop handle positioning)
+            .left, .ctrl_b, .right, .ctrl_f,
+            .home, .ctrl_a, .end_key, .ctrl_e,
+            .alt_b, .alt_f => {
+                clearInlineList(stdout, prev_lines, prompt_row);
                 return .cancelled;
             },
-            .up => {
-                if (selected > 0) selected -= 1;
-                if (selected < scroll) scroll = selected;
-            },
-            .down => {
-                if (scored_count > 0 and selected + 1 < scored_count) selected += 1;
-                if (selected >= scroll + max_visible) scroll = selected - max_visible + 1;
-            },
-            .backspace => {
-                if (filter_len > 0) {
-                    filter_len -= 1;
-                    ed.backspace();
-                    rescore(&all, filter[0..filter_len], &scored_indices, &scored_values, &scored_count, &selected, &scroll);
-                }
-            },
             .char => |ch| {
-                if (ch >= 32 and filter_len < MAX_FILTER) {
-                    filter[filter_len] = ch;
-                    filter_len += 1;
+                if (ch >= 32) {
                     ed.insert(ch);
-                    rescore(&all, filter[0..filter_len], &scored_indices, &scored_values, &scored_count, &selected, &scroll);
+                    content_changed = true;
                 }
+            },
+            .utf8 => |u| {
+                ed.insertUtf8(u.bytes[0..u.len]);
+                content_changed = true;
             },
             else => {},
         }
 
-        renderPicker(stdout, prompt_str, ed, &all, &scored_indices, scored_count, selected, scroll, max_visible, filter[0..filter_len], hl_ctx);
+        // Re-gather candidates on content change (providers use prefix from editor)
+        if (content_changed) {
+            regather(ed, &all, &word_start, &scored_indices, &scored_values, &scored_count, &selected, &scroll, env, cmd_cache, help_cache);
+        }
+
+        renderInlineList(stdout, prompt_str, ed, &all, &scored_indices, scored_count, selected, scroll, max_visible, &prev_lines, &prompt_row, hl_ctx);
     }
 
-    clearPickerLines(stdout, max_visible, inline_state.direction);
+    clearInlineList(stdout, prev_lines, prompt_row);
     return .cancelled;
+}
+
+/// Render inline completion list below the prompt.
+///
+/// Uses absolute row positioning. The caller passes `prompt_row` which is
+/// queried once via DSR before the picker loop starts.
+fn renderInlineList(
+    stdout: std.fs.File,
+    prompt_str: []const u8,
+    ed: *const editor_mod.Editor,
+    all: *const CandidateBuffer,
+    indices: *const [MAX_CANDIDATES]usize,
+    count: usize,
+    selected: usize,
+    scroll: usize,
+    max_visible: usize,
+    prev_lines: *usize,
+    prompt_row: *usize,
+    hl_ctx: anytype,
+) void {
+    var buf: [16384]u8 = undefined;
+    var pos: usize = 0;
+
+    const visible_end = @min(scroll + max_visible, count);
+    const rendered = visible_end - scroll;
+    const new_lines = rendered + @as(usize, if (count > max_visible) 1 else 0);
+    const term_rows = overlay.getTermSize().rows;
+
+    // Ensure there's room below the prompt. If prompt is near the bottom,
+    // emit newlines to scroll, then update prompt_row accordingly.
+    const space_below = if (term_rows >= prompt_row.*) term_rows - prompt_row.* else 0;
+    if (new_lines > space_below) {
+        const need = new_lines - space_below;
+        for (0..need) |_| {
+            pos += cp(buf[pos..], "\n");
+        }
+        prompt_row.* -= @min(need, prompt_row.* - 1);
+        stdout.writeAll(buf[0..pos]) catch {};
+        pos = 0;
+    }
+
+    // Jump to prompt row and redraw prompt
+    const goto_prompt = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H\x1b[K", .{prompt_row.*}) catch "";
+    pos += goto_prompt.len;
+    const input_mod = @import("input.zig");
+    pos += input_mod.renderPromptIntoBuf(buf[pos..], prompt_str, ed, hl_ctx);
+
+    // Compute column widths for alignment
+    var max_name_w: usize = 0;
+    var max_desc_w: usize = 0;
+    var has_any_desc = false;
+    for (scroll..visible_end) |i| {
+        const idx = indices[i];
+        const cand = &all.items[idx];
+        max_name_w = @max(max_name_w, cand.text_len);
+        if (cand.desc_len > 0) {
+            has_any_desc = true;
+            max_desc_w = @max(max_desc_w, cand.desc_len);
+        }
+    }
+    const name_col = if (has_any_desc) max_name_w + 2 else max_name_w;
+    const row_width = 1 + name_col + max_desc_w + 1;
+
+    // Render list items at absolute rows below prompt
+    for (scroll..visible_end, 0..) |i, li| {
+        const row = prompt_row.* + 1 + li;
+        const goto = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H\x1b[K", .{row}) catch "";
+        pos += goto.len;
+
+        const idx = indices[i];
+        const cand = &all.items[idx];
+        const text = cand.textSlice();
+        const desc = cand.descSlice();
+        const is_sel = i == selected;
+        const color = kindColor(cand.kind, is_sel);
+
+        if (is_sel) {
+            pos += cp(buf[pos..], "  \x1b[7m ");
+        } else {
+            pos += cp(buf[pos..], "   ");
+        }
+
+        pos += cp(buf[pos..], color);
+        pos += cp(buf[pos..], text);
+        pos += cp(buf[pos..], "\x1b[0m");
+        if (is_sel) pos += cp(buf[pos..], "\x1b[7m");
+
+        if (has_any_desc) {
+            const name_pad = if (name_col > text.len) name_col - text.len else 1;
+            var p: usize = 0;
+            while (p < name_pad and pos < buf.len) : (p += 1) {
+                buf[pos] = ' ';
+                pos += 1;
+            }
+        }
+
+        if (desc.len > 0) {
+            pos += cp(buf[pos..], "\x1b[2m");
+            pos += cp(buf[pos..], desc);
+            pos += cp(buf[pos..], "\x1b[22m");
+        }
+
+        if (is_sel) {
+            const name_pad_w = if (has_any_desc) (if (name_col > text.len) name_col - text.len else 1) else 0;
+            const content_w = 1 + text.len + name_pad_w + desc.len;
+            if (row_width > content_w) {
+                var trail: usize = 0;
+                while (trail < row_width - content_w and pos < buf.len) : (trail += 1) {
+                    buf[pos] = ' ';
+                    pos += 1;
+                }
+            }
+            pos += cp(buf[pos..], "\x1b[27m");
+        }
+        pos += cp(buf[pos..], "\x1b[0m");
+    }
+
+    // Scroll indicator
+    if (count > max_visible) {
+        const row = prompt_row.* + 1 + rendered;
+        const goto = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H\x1b[K", .{row}) catch "";
+        pos += goto.len;
+        pos += cp(buf[pos..], "\x1b[2m  ");
+        const indicator = std.fmt.bufPrint(buf[pos..], "[{d}/{d}]", .{ selected + 1, count }) catch "";
+        pos += indicator.len;
+        pos += cp(buf[pos..], "\x1b[22m");
+    }
+
+    // Clear leftover lines from a previous larger render
+    if (prev_lines.* > new_lines) {
+        for (new_lines..prev_lines.*) |li| {
+            const row = prompt_row.* + 1 + li;
+            if (row > term_rows) break;
+            const goto = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H\x1b[K", .{row}) catch "";
+            pos += goto.len;
+        }
+    }
+
+    prev_lines.* = new_lines;
+
+    // Move cursor back to prompt line at the right column
+    const prompt_w = promptVisibleWidth(prompt_str);
+    const cursor_col = prompt_w + ed.visibleCursorPos() + 1; // 1-based
+    const goto_cur = std.fmt.bufPrint(buf[pos..], "\x1b[{d};{d}H", .{ prompt_row.*, cursor_col }) catch "";
+    pos += goto_cur.len;
+
+    stdout.writeAll(buf[0..pos]) catch {};
+}
+
+/// Clear the inline list rows below the prompt.
+fn clearInlineList(stdout: std.fs.File, prev_lines: usize, prompt_row: usize) void {
+    if (prev_lines == 0) return;
+    var buf: [512]u8 = undefined;
+    var pos: usize = 0;
+    // Clear each list row individually
+    for (0..prev_lines) |i| {
+        const row = prompt_row + 1 + i;
+        const goto = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H\x1b[K", .{row}) catch "";
+        pos += goto.len;
+    }
+    // Return cursor to prompt
+    const goto_cur = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H", .{prompt_row}) catch "";
+    pos += goto_cur.len;
+    stdout.writeAll(buf[0..pos]) catch {};
 }
 
 fn rescore(
@@ -255,8 +462,8 @@ fn rescore(
     scroll: *usize,
 ) void {
     scoreAndFilter(all, filter, indices, values, count);
-    if (selected.* >= count.*) selected.* = if (count.* > 0) count.* - 1 else 0;
-    if (scroll.* > selected.*) scroll.* = selected.*;
+    selected.* = 0;
+    scroll.* = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +479,8 @@ pub fn analyzeContext(content: []const u8, cursor: usize) CompletionContext {
     const prefix = text[word_start..];
 
     var cmd_name: []const u8 = "";
+    var cmd_args: [MAX_SUBCMD_DEPTH][]const u8 = .{&.{}} ** MAX_SUBCMD_DEPTH;
+    var cmd_args_len: usize = 0;
     var is_cmd_pos = true;
     var after_redirect = false;
     var i: usize = 0;
@@ -280,7 +489,7 @@ pub fn analyzeContext(content: []const u8, cursor: usize) CompletionContext {
         while (i < word_start and (text[i] == ' ' or text[i] == '\t')) : (i += 1) {}
         if (i >= word_start) break;
 
-        if (text[i] == '|') { is_cmd_pos = true; after_redirect = false; cmd_name = ""; i += 1; continue; }
+        if (text[i] == '|') { is_cmd_pos = true; after_redirect = false; cmd_name = ""; cmd_args_len = 0; i += 1; continue; }
         if (text[i] == '>' or text[i] == '<') { after_redirect = true; i += 1; continue; }
         if (text[i] == '2' and i + 1 < word_start and text[i + 1] == '>') { after_redirect = true; i += 2; continue; }
 
@@ -292,13 +501,20 @@ pub fn analyzeContext(content: []const u8, cursor: usize) CompletionContext {
         if (is_cmd_pos) {
             if (isAssignment(word)) continue;
             cmd_name = word;
+            cmd_args_len = 0;
             is_cmd_pos = false;
+        } else {
+            // Collect non-flag args as potential subcommands
+            if (word.len > 0 and word[0] != '-' and cmd_args_len < MAX_SUBCMD_DEPTH) {
+                cmd_args[cmd_args_len] = word;
+                cmd_args_len += 1;
+            }
         }
     }
 
     const kind: ContextKind = if (after_redirect) .redirect_target else if (prefix.len > 0 and prefix[0] == '$') .env_var else if (is_cmd_pos) .command else if (prefix.len > 0 and prefix[0] == '-') .flag else .argument;
 
-    return .{ .kind = kind, .prefix = prefix, .word_start = word_start, .word_end = cursor, .cmd_name = cmd_name };
+    return .{ .kind = kind, .prefix = prefix, .word_start = word_start, .word_end = cursor, .cmd_name = cmd_name, .cmd_args = cmd_args, .cmd_args_len = cmd_args_len };
 }
 
 fn isAssignment(word: []const u8) bool {
@@ -1036,6 +1252,30 @@ test "analyzeContext: flag position" {
 test "analyzeContext: redirect target" {
     const ctx = analyzeContext("echo hello > ", 13);
     try std.testing.expectEqual(ContextKind.redirect_target, ctx.kind);
+}
+
+test "analyzeContext: subcommand args collected" {
+    // "docker compose u" → cmd_name="docker", cmd_args=["compose"], prefix="u"
+    const ctx = analyzeContext("docker compose u", 16);
+    try std.testing.expectEqual(ContextKind.argument, ctx.kind);
+    try std.testing.expectEqualStrings("docker", ctx.cmd_name);
+    try std.testing.expectEqualStrings("u", ctx.prefix);
+    try std.testing.expectEqual(@as(usize, 1), ctx.cmd_args_len);
+    try std.testing.expectEqualStrings("compose", ctx.cmd_args[0]);
+}
+
+test "analyzeContext: flags not collected as subcmds" {
+    // "docker --debug compose u" → cmd_args should only have "compose", not "--debug"
+    const ctx = analyzeContext("docker --debug compose u", 24);
+    try std.testing.expectEqual(@as(usize, 1), ctx.cmd_args_len);
+    try std.testing.expectEqualStrings("compose", ctx.cmd_args[0]);
+}
+
+test "analyzeContext: pipe resets subcmd args" {
+    // "ls | grep fo" → cmd_name="grep", no cmd_args
+    const ctx = analyzeContext("ls -la | grep fo", 16);
+    try std.testing.expectEqualStrings("grep", ctx.cmd_name);
+    try std.testing.expectEqual(@as(usize, 0), ctx.cmd_args_len);
 }
 
 test "scoreAndFilter ranks by score" {

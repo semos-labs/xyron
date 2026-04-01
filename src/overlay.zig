@@ -8,6 +8,7 @@ const std = @import("std");
 const posix = std.posix;
 
 pub var enabled: bool = true;
+pub var on_demand: bool = false;
 
 /// Screen position
 pub const Pos = struct { row: usize, col: usize };

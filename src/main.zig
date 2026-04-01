@@ -70,5 +70,6 @@ pub fn main() !void {
     sh.ipc_enabled = enable_ipc;
     try sh.run();
 
-    std.process.exit(sh.last_exit_code);
+    // Interactive shell exits 0. Last command's exit code is for
+    // $? inside the shell, not the shell process itself.
 }

@@ -76,20 +76,11 @@ pub fn readLine(
                 continue;
             },
             .enter => {
-                // If overlay is active and has a non-redundant selection, accept it.
-                // If the selected candidate matches what's already typed, just execute.
+                // If overlay is active, accept the selection
                 if (complete_mod.inline_state.active and complete_mod.inline_state.scored_count > 0) {
-                    const s = &complete_mod.inline_state;
-                    const sel_idx = s.scored_indices[s.selected];
-                    const sel_text = s.all.items[sel_idx].textSlice();
-                    const current = ed.content()[s.word_start..ed.cursor];
-                    if (!std.mem.eql(u8, sel_text, current)) {
-                        _ = complete_mod.acceptInline(ed, stdout);
-                        refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
-                        continue;
-                    } else {
-                        complete_mod.dismissInline(stdout);
-                    }
+                    _ = complete_mod.acceptInline(ed, stdout);
+                    refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
+                    continue;
                 }
                 ed.mode = .insert;
                 const block_ui_mod = @import("block_ui.zig");
@@ -205,29 +196,50 @@ pub fn readLine(
         // Insert mode (or vim disabled)
         var content_changed = false;
         switch (key) {
-            .tab => {
-                if (hl) |ctx| {
-                    if (complete_mod.inline_state.active) {
-                        // Cycle through inline overlay
-                        complete_mod.cycleInline(ed, stdout, prompt_str, ctx);
-                        continue;
-                    } else {
-                        // Fallback: open blocking picker (overlay disabled)
-                        _ = complete_mod.runPicker(
-                            ed, stdout, prompt_str, ctx.env, ctx.cache,
-                            ctx.help_cache, ctx,
-                        );
-                        content_changed = true;
+            .tab, .ctrl_space => {
+                if (overlay.enabled) {
+                    if (hl) |ctx| {
+                        if (complete_mod.inline_state.active) {
+                            // Accept selection (Tab doubles as accept when overlay is open)
+                            if (complete_mod.acceptInline(ed, stdout)) {
+                                content_changed = true;
+                            }
+                        } else {
+                            // Trigger completion
+                            const ipc_mod = @import("ipc.zig");
+                            if (ipc_mod.attyx_connected) {
+                                complete_mod.updateInline(ed, stdout, prompt_str, ctx.env, ctx.cache, ctx.help_cache, ctx);
+                                if (!complete_mod.inline_state.active) {
+                                    refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
+                                }
+                            } else {
+                                const result = complete_mod.runPicker(
+                                    ed, stdout, prompt_str, ctx.env, ctx.cache,
+                                    ctx.help_cache, ctx,
+                                );
+                                if (result == .interrupted) {
+                                    // Propagate ^C as interrupt
+                                    const block_ui_mod2 = @import("block_ui.zig");
+                                    if (block_ui_mod2.enabled) {
+                                        if (prompt_extra_lines > 0) {
+                                            var erase_buf2: [64]u8 = undefined;
+                                            const en2 = std.fmt.bufPrint(&erase_buf2, "\x1b[{d}A", .{prompt_extra_lines}) catch "";
+                                            stdout.writeAll(en2) catch {};
+                                        }
+                                        stdout.writeAll("\r\x1b[J") catch {};
+                                    } else {
+                                        stdout.writeAll("^C\r\n") catch {};
+                                    }
+                                    ed.clear();
+                                    if (hist) |h| h.resetNavigation();
+                                    return .interrupt;
+                                }
+                                content_changed = true;
+                            }
+                        }
                     }
                 }
-            },
-            .shift_tab => {
-                if (hl) |ctx| {
-                    if (complete_mod.inline_state.active) {
-                        complete_mod.cycleInlineBack(ed, stdout, prompt_str, ctx);
-                        continue;
-                    }
-                }
+                if (!content_changed) continue;
             },
             .escape => {
                 if (complete_mod.inline_state.active) {
@@ -244,10 +256,7 @@ pub fn readLine(
             },
             .right, .ctrl_f => {
                 if (complete_mod.inline_state.active) {
-                    // Accept inline completion
-                    if (complete_mod.acceptInline(ed, stdout)) {
-                        content_changed = true;
-                    }
+                    complete_mod.dismissInline(stdout);
                 } else if (ed.cursor == ed.len) {
                     if (getGhostSuggestion(ed, hist)) |ghost| {
                         ed.setContent(ghost);
@@ -255,7 +264,7 @@ pub fn readLine(
                         continue;
                     }
                 }
-                if (!content_changed) ed.moveRight();
+                ed.moveRight();
             },
             .home, .ctrl_a => { complete_mod.dismissInline(stdout); ed.moveHome(); },
             .end_key, .ctrl_e => { complete_mod.dismissInline(stdout); ed.moveEnd(); },
@@ -268,7 +277,15 @@ pub fn readLine(
             .ctrl_u => { ed.killToStart(); content_changed = true; },
             .ctrl_w, .alt_backspace => { ed.killWordBackward(); content_changed = true; },
             .alt_d => { ed.killWordForward(); content_changed = true; },
-            .ctrl_y => ed.yank(),
+            .ctrl_y => {
+                if (complete_mod.inline_state.active) {
+                    if (complete_mod.acceptInline(ed, stdout)) {
+                        content_changed = true;
+                    }
+                } else {
+                    ed.yank();
+                }
+            },
             .ctrl_t => ed.transpose(),
             .char => |ch| {
                 if (ch >= 32) { ed.insert(ch); content_changed = true; }
@@ -279,9 +296,13 @@ pub fn readLine(
             },
             else => {},
         }
-        // Update inline overlay on content changes — it renders prompt+candidates
-        // in one flush, so skip the separate refreshLine to avoid double render/flash.
-        if (content_changed and overlay.enabled and hl != null) {
+        // Update inline overlay on content changes.
+        // As-you-type: only when enabled, not on_demand, and Attyx is connected.
+        // On-demand mode: only updates existing overlay (already open via Tab/Ctrl+Space).
+        const ipc_mod = @import("ipc.zig");
+        const as_you_type = overlay.enabled and !overlay.on_demand and ipc_mod.attyx_connected;
+        const update_existing = overlay.enabled and complete_mod.inline_state.active and ipc_mod.attyx_connected;
+        if (content_changed and (as_you_type or update_existing) and hl != null) {
             if (hl) |ctx| {
                 complete_mod.updateInline(ed, stdout, prompt_str, ctx.env, ctx.cache, ctx.help_cache, ctx);
             }

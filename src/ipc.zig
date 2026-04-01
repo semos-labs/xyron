@@ -56,7 +56,7 @@ pub fn getAttyxSocket() ?[]const u8 {
     return attyx_socket_buf[0..attyx_socket_len];
 }
 
-/// Send a request to Attyx via its socket. Returns response payload or null.
+/// Send a fire-and-forget event to Attyx. No response expected.
 pub fn sendToAttyx(msg_type: proto.MsgType, payload: []const u8) ?[]const u8 {
     if (attyx_socket_len == 0) return null;
 
@@ -69,10 +69,25 @@ pub fn sendToAttyx(msg_type: proto.MsgType, payload: []const u8) ?[]const u8 {
 
     posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch return null;
 
-    // Write request
+    writeToFd(fd, msg_type, payload);
+    return null;
+}
+
+/// Send a request to Attyx and wait for response.
+pub fn requestFromAttyx(msg_type: proto.MsgType, payload: []const u8) ?[]const u8 {
+    if (attyx_socket_len == 0) return null;
+
+    const fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch return null;
+    defer posix.close(fd);
+
+    var addr: posix.sockaddr.un = .{ .family = posix.AF.UNIX, .path = undefined };
+    @memcpy(addr.path[0..attyx_socket_len], attyx_socket_buf[0..attyx_socket_len]);
+    addr.path[attyx_socket_len] = 0;
+
+    posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) catch return null;
+
     writeToFd(fd, msg_type, payload);
 
-    // Read response
     const S = struct { var resp_buf: [proto.MAX_PAYLOAD + proto.header_size]u8 = undefined; };
     const frame = proto.readFrame(fd, &S.resp_buf) orelse return null;
     return frame.payload;

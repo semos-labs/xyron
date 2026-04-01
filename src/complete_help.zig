@@ -27,25 +27,54 @@ pub const HelpCache = struct {
         return result;
     }
 
-    /// Ensure help flags are cached for a command.
+    /// Ensure help flags are cached for a command (supports subcommands like "docker compose").
     pub fn ensureCached(self: *HelpCache, cmd: []const u8, env: *const environ_mod.Environ) void {
         const db = &(self.db orelse return);
 
         // Check if already cached and fresh
         if (isCached(db, cmd)) return;
 
-        // Resolve command path
+        // Split "docker compose" → base="docker", sub_args=["compose"]
         const alloc = std.heap.page_allocator;
-        const path = path_search.findInPath(alloc, cmd, env) catch return;
+        var parts: [16][]const u8 = undefined;
+        var part_count: usize = 0;
+        var iter = std.mem.splitScalar(u8, cmd, ' ');
+        while (iter.next()) |p| {
+            if (p.len == 0) continue;
+            if (part_count < parts.len) {
+                parts[part_count] = p;
+                part_count += 1;
+            }
+        }
+        if (part_count == 0) return;
+
+        // Resolve the base command path
+        const path = path_search.findInPath(alloc, parts[0], env) catch return;
         if (path == null) return;
         defer alloc.free(path.?);
 
-        // Run --help and capture output
-        const output = runHelp(alloc, path.?) catch return;
+        // Run: <cmd_path> [sub_args...] --help
+        const output = runHelpWithArgs(alloc, path.?, parts[1..part_count]) catch return;
         defer alloc.free(output);
 
-        // Parse flags from output
+        // Parse flags from output and store under the full command key
         parseAndStore(db, cmd, output);
+    }
+
+    /// Check if `name` is a known subcommand of `cmd` in the cache.
+    pub fn isSubcommand(self: *HelpCache, cmd: []const u8, name: []const u8) bool {
+        var db = &(self.db orelse return false);
+
+        var stmt = db.prepare(
+            "SELECT 1 FROM command_help_flags WHERE command = ?1 AND flag = ?2 AND flag NOT LIKE '-%' LIMIT 1",
+        ) catch return false;
+        defer stmt.deinit();
+
+        stmt.bindText(1, cmd);
+        stmt.bindText(2, name);
+
+        const has_row = stmt.step() catch return false;
+        return has_row;
     }
 
     /// Query cached flags matching a prefix. Returns flags with descriptions.
@@ -112,8 +141,16 @@ fn isCached(db: *sqlite.Db, cmd: []const u8) bool {
 // Help execution
 // ---------------------------------------------------------------------------
 
-fn runHelp(alloc: std.mem.Allocator, cmd_path: []const u8) ![]const u8 {
-    var child = std.process.Child.init(&.{ cmd_path, "--help" }, alloc);
+fn runHelpWithArgs(alloc: std.mem.Allocator, cmd_path: []const u8, sub_args: []const []const u8) ![]const u8 {
+    // Build argv: [cmd_path, sub_args..., "--help"]
+    var argv_buf: [18][]const u8 = undefined;
+    argv_buf[0] = cmd_path;
+    const n_sub = @min(sub_args.len, 16);
+    for (0..n_sub) |j| argv_buf[1 + j] = sub_args[j];
+    argv_buf[1 + n_sub] = "--help";
+    const argv = argv_buf[0 .. 2 + n_sub];
+
+    var child = std.process.Child.init(argv, alloc);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
@@ -170,22 +207,31 @@ fn parseAndStore(db: *sqlite.Db, cmd: []const u8, output: []const u8) void {
     while (line_iter.next()) |line| {
         const trimmed = std.mem.trimLeft(u8, line, " \t");
 
-        // Detect section headers like "Commands:", "Available commands:"
-        if (trimmed.len > 0 and !startsWithSpace(line) and std.mem.endsWith(u8, trimmed, ":")) {
-            const lower_check = std.mem.indexOf(u8, line, "ommand") != null or
+        // Detect section headers (non-indented lines)
+        if (trimmed.len > 0 and !startsWithSpace(line)) {
+            const has_cmd_keyword = std.mem.indexOf(u8, line, "ommand") != null or
                 std.mem.indexOf(u8, line, "OMMAND") != null or
                 std.mem.indexOf(u8, line, "ubcommand") != null;
-            in_commands_section = lower_check;
-            continue;
+
+            if (has_cmd_keyword) {
+                // "Commands:", "CORE COMMANDS", "Management Commands:", etc.
+                in_commands_section = true;
+                continue;
+            }
+            // Non-indented descriptive headers (git-style): any non-indented line
+            // that doesn't look like a flag or usage line may precede subcommands.
+            // Don't clear in_commands_section for these — git uses them as group labels.
+            if (!std.mem.startsWith(u8, trimmed, "usage:") and
+                !std.mem.startsWith(u8, trimmed, "Usage:") and
+                !std.mem.startsWith(u8, trimmed, "USAGE") and
+                trimmed[0] != '-' and trimmed[0] != '[')
+            {
+                // Potential section header — don't disable commands section
+            } else {
+                in_commands_section = false;
+            }
         }
 
-        // Non-indented non-empty line ends a commands section (new section header)
-        if (trimmed.len > 0 and !startsWithSpace(line)) {
-            in_commands_section = false;
-        }
-
-        // Skip blank lines but don't end commands section — many tools
-        // use blank lines within their commands list for visual grouping
         if (trimmed.len == 0) continue;
 
         // Parse flags: lines starting with -
@@ -194,14 +240,34 @@ fn parseAndStore(db: *sqlite.Db, cmd: []const u8, output: []const u8) void {
             continue;
         }
 
-        // Parse subcommands: indented lines in a commands section
-        // Pattern: "  subcmd    Description text" or "  subcmd  <arg>  Description"
-        if (in_commands_section and startsWithSpace(line) and trimmed.len > 0) {
+        // Parse subcommands: indented lines matching "word    description" pattern.
+        // Two detection modes:
+        //   1. Explicitly in a "Commands:" section
+        //   2. Indented line with alpha word + large gap + description (universal pattern)
+        if (startsWithSpace(line) and trimmed.len > 0 and isAlphaStart(trimmed[0])) {
             var end: usize = 0;
-            while (end < trimmed.len and trimmed[end] != ' ' and trimmed[end] != '\t') : (end += 1) {}
-            if (end >= 2 and end <= 30 and isAlphaStart(trimmed[0])) {
-                const desc = extractSubcmdDescription(trimmed[end..]);
-                storeEntry(db, cmd, trimmed[0..end], desc, now);
+            while (end < trimmed.len and trimmed[end] != ' ' and trimmed[end] != '\t' and trimmed[end] != ':') : (end += 1) {}
+
+            if (end >= 2 and end <= 30) {
+                // Check for a large gap (2+ spaces) after the word — indicates
+                // a two-column layout (subcommand + description)
+                var gap: usize = 0;
+                var gi = end;
+                // Skip trailing colon (gh-style: "auth:   Authenticate...")
+                if (gi < trimmed.len and trimmed[gi] == ':') gi += 1;
+                while (gi < trimmed.len and (trimmed[gi] == ' ' or trimmed[gi] == '\t')) : (gi += 1) { gap += 1; }
+
+                if (in_commands_section or gap >= 2) {
+                    const word = trimmed[0..end];
+                    // Reject words that look like file paths or arguments
+                    if (!std.mem.startsWith(u8, word, "/") and
+                        !std.mem.startsWith(u8, word, ".") and
+                        std.mem.indexOf(u8, word, "=") == null)
+                    {
+                        const desc = extractSubcmdDescription(trimmed[end..]);
+                        storeEntry(db, cmd, word, desc, now);
+                    }
+                }
             }
         }
     }
@@ -354,4 +420,93 @@ test "parseAndStore extracts flags" {
     _ = try stmt.step();
     const count = stmt.columnInt(0);
     try std.testing.expect(count >= 3);
+}
+
+test "parseAndStore extracts git-style subcommands" {
+    var db = try sqlite.Db.open(":memory:");
+    defer db.close();
+    initSchema(&db);
+
+    // Git-style output: descriptive section headers (no "Commands:" keyword),
+    // subcommands indented with multi-space gap before description
+    const output =
+        \\usage: git [options] <command> [<args>]
+        \\
+        \\start a working area
+        \\   clone      Clone a repository into a new directory
+        \\   init       Create an empty Git repository
+        \\
+        \\work on the current change
+        \\   add        Add file contents to the index
+        \\   mv         Move or rename a file
+        \\   restore    Restore working tree files
+        \\
+        \\examine the history and state
+        \\   diff       Show changes between commits
+        \\   log        Show commit logs
+        \\   status     Show the working tree status
+    ;
+    parseAndStore(&db, "git", output);
+
+    // Should find subcommands like clone, init, add, diff, log, status
+    var stmt = try db.prepare("SELECT flag FROM command_help_flags WHERE command = 'git' AND flag NOT LIKE '-%' ORDER BY flag");
+    defer stmt.deinit();
+    var found: usize = 0;
+    while (try stmt.step()) { found += 1; }
+    try std.testing.expect(found >= 6); // clone, init, add, mv, restore, diff, log, status
+}
+
+test "parseAndStore extracts docker-style subcommands" {
+    var db = try sqlite.Db.open(":memory:");
+    defer db.close();
+    initSchema(&db);
+
+    const output =
+        \\Usage:  docker [OPTIONS] COMMAND
+        \\
+        \\Management Commands:
+        \\  compose     Docker Compose
+        \\  container   Manage containers
+        \\  image       Manage images
+        \\
+        \\Commands:
+        \\  build       Build an image from a Dockerfile
+        \\  exec        Execute a command in a running container
+        \\  ps          List containers
+        \\  run         Create and run a new container
+    ;
+    parseAndStore(&db, "docker", output);
+
+    var stmt = try db.prepare("SELECT COUNT(*) FROM command_help_flags WHERE command = 'docker' AND flag NOT LIKE '-%'");
+    defer stmt.deinit();
+    _ = try stmt.step();
+    try std.testing.expect(stmt.columnInt(0) >= 7); // compose, container, image, build, exec, ps, run
+}
+
+test "parseAndStore extracts gh-style subcommands" {
+    var db = try sqlite.Db.open(":memory:");
+    defer db.close();
+    initSchema(&db);
+
+    // gh-style: uppercase headers without colon, subcommands with trailing colon
+    const output =
+        \\USAGE
+        \\  gh <command> <subcommand> [flags]
+        \\
+        \\CORE COMMANDS
+        \\  auth:        Authenticate gh and git with GitHub
+        \\  issue:       Manage issues
+        \\  pr:          Manage pull requests
+        \\  repo:        Manage repositories
+        \\
+        \\ADDITIONAL COMMANDS
+        \\  alias:       Create command shortcuts
+        \\  api:         Make an authenticated GitHub API request
+    ;
+    parseAndStore(&db, "gh", output);
+
+    var stmt = try db.prepare("SELECT COUNT(*) FROM command_help_flags WHERE command = 'gh' AND flag NOT LIKE '-%'");
+    defer stmt.deinit();
+    _ = try stmt.step();
+    try std.testing.expect(stmt.columnInt(0) >= 6); // auth, issue, pr, repo, alias, api
 }
