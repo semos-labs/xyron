@@ -197,9 +197,14 @@ pub fn runPicker(
     const max_visible: usize = @min(MAX_VISIBLE, overlay.getTermSize().rows / 3);
     var prev_lines: usize = 0;
 
-    // Query prompt row once via DSR
-    var prompt_row = overlay.getCursorPos().row;
-    if (prompt_row == 0) prompt_row = overlay.getTermSize().rows; // fallback
+    // Get the cursor row (the ">" line of the prompt).
+    // cursor_row_estimate tracks the row of the cursor line (last prompt line).
+    // DSR is unreliable in multiplexed environments (Attyx IPC, etc).
+    const input_mod_r = @import("input.zig");
+    var prompt_row: usize = if (input_mod_r.cursor_row_estimate > 0)
+        input_mod_r.cursor_row_estimate
+    else
+        overlay.getTermSize().rows;
 
     // Render initial list
     renderInlineList(stdout, prompt_str, ed, &all, &scored_indices, scored_count, selected, scroll, max_visible, &prev_lines, &prompt_row, hl_ctx);
@@ -313,9 +318,14 @@ fn renderInlineList(
     const rendered = visible_end - scroll;
     const new_lines = rendered + @as(usize, if (count > max_visible) 1 else 0);
     const term_rows = overlay.getTermSize().rows;
+    const input_mod = @import("input.zig");
+    const extra = input_mod.prompt_extra_lines;
 
-    // Ensure there's room below the prompt. If prompt is near the bottom,
-    // emit newlines to scroll, then update prompt_row accordingly.
+    // prompt_row is the cursor row (last line of prompt, e.g. the ">" line).
+    // Full prompt starts at prompt_row - extra.
+    // List goes below at prompt_row + 1.
+
+    // Ensure there's room below the prompt for the list.
     const space_below = if (term_rows >= prompt_row.*) term_rows - prompt_row.* else 0;
     if (new_lines > space_below) {
         const need = new_lines - space_below;
@@ -327,10 +337,21 @@ fn renderInlineList(
         pos = 0;
     }
 
-    // Jump to prompt row and redraw prompt
-    const goto_prompt = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H\x1b[K", .{prompt_row.*}) catch "";
-    pos += goto_prompt.len;
-    const input_mod = @import("input.zig");
+    // Jump to the start of the full prompt (accounting for extra lines above cursor)
+    const prompt_start_row = if (prompt_row.* > extra) prompt_row.* - extra else 1;
+
+    // Clear all prompt lines
+    for (0..extra + 1) |li| {
+        const row = prompt_start_row + li;
+        const g = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H\x1b[K", .{row}) catch "";
+        pos += g.len;
+    }
+
+    // Render prompt at prompt_start_row (set prompt_fresh so renderPromptIntoBuf
+    // doesn't emit cursor-up or \x1b[J which would fight with our absolute positioning)
+    const goto_start = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H", .{prompt_start_row}) catch "";
+    pos += goto_start.len;
+    input_mod.prompt_fresh = true;
     pos += input_mod.renderPromptIntoBuf(buf[pos..], prompt_str, ed, hl_ctx);
 
     // Compute column widths for alignment
