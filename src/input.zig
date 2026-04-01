@@ -93,10 +93,15 @@ pub fn readLine(
                     }
                     stdout.writeAll("\r\x1b[J") catch {}; // clear from cursor to end of screen
                 } else {
-                    // Classic mode: re-render prompt + content cleanly (no ghost), then newline
-                    stdout.writeAll("\r\x1b[K") catch {};
+                    // Classic mode: move to first prompt line, clear from there,
+                    // re-render prompt + content, then newline
                     var clr_buf: [8192]u8 = undefined;
                     var clr_pos: usize = 0;
+                    if (prompt_extra_lines > 0) {
+                        const up = std.fmt.bufPrint(clr_buf[clr_pos..], "\x1b[{d}A", .{prompt_extra_lines}) catch "";
+                        clr_pos += up.len;
+                    }
+                    clr_pos += cp(clr_buf[clr_pos..], "\r\x1b[J");
                     clr_pos += cp(clr_buf[clr_pos..], prompt_str);
                     const hl_mod = @import("highlight.zig");
                     if (hl) |ctx| {

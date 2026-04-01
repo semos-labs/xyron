@@ -62,6 +62,15 @@ pub const Shell = struct {
         loadRecentHistory(&hdb, &hist);
         attyx.historyInitialized(hdb.totalEntries());
 
+        // Initialize jump database and record initial cwd
+        const jump_cmd = @import("builtins/jump.zig");
+        jump_cmd.initDb(allocator);
+        {
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd = std.posix.getcwd(&cwd_buf) catch "";
+            if (cwd.len > 0) jump_cmd.recordCd(cwd);
+        }
+
         var env_inst = try environ_mod.Environ.init(allocator, &attyx);
 
         // Initialize Lua
@@ -99,6 +108,8 @@ pub const Shell = struct {
         self.cmd_cache.deinit();
         lua_api.deinit(self.lua);
         self.history_db.deinit();
+        const jump_cmd = @import("builtins/jump.zig");
+        jump_cmd.deinitDb();
         self.env.deinit();
     }
 

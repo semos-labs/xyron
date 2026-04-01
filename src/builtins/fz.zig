@@ -123,8 +123,9 @@ fn runInteractive(items: *const ItemList, opts: Options, stdout: std.fs.File) bo
     const use_tui = !opts.inline_mode;
 
     // Alternate screen for TUI mode
-    if (use_tui) tty.writeAll("\x1b[?1049h\x1b[?25h") catch {};
-    defer if (use_tui) tty.writeAll("\x1b[?1049l") catch {};
+    var alt_screen_active = false;
+    if (use_tui) { tty.writeAll("\x1b[?1049h\x1b[?25h") catch {}; alt_screen_active = true; }
+    defer if (alt_screen_active) tty.writeAll("\x1b[?1049l") catch {};
 
     var state = PickerState{
         .items = items,
@@ -146,6 +147,12 @@ fn runInteractive(items: *const ItemList, opts: Options, stdout: std.fs.File) bo
 
         switch (key_buf[0]) {
             10, 13 => { // Enter
+                // Exit alternate screen BEFORE writing result,
+                // otherwise the output gets erased by screen restore.
+                if (alt_screen_active) {
+                    tty.writeAll("\x1b[?1049l") catch {};
+                    alt_screen_active = false;
+                }
                 if (!use_tui) state.clearInline(tty);
                 // Output selected items
                 if (opts.multi and state.selected_count > 0) {

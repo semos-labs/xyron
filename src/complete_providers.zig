@@ -80,6 +80,8 @@ fn provideBuiltins(out: *complete.CandidateBuffer, prefix: []const u8) void {
         .{ .name = "migrate", .desc = "Analyze/convert bash scripts" },
         .{ .name = "popup", .desc = "Show content in popup" },
         .{ .name = "inspect", .desc = "Inspect runtime objects" },
+        .{ .name = "jump", .desc = "Smart directory jumper" },
+        .{ .name = "j", .desc = "Jump to directory (shorthand)" },
     };
     for (entries) |e| {
         if (prefix.len == 0 or std.mem.startsWith(u8, e.name, prefix)) {

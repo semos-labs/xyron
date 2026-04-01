@@ -415,6 +415,20 @@ fn childExec(
         @import("builtins/fz.zig").runFromPipe(if (argv.len > 1) argv[1..] else &.{});
         std.process.exit(0);
     }
+    if (argv.len > 0 and (std.mem.eql(u8, argv[0], "jump") or std.mem.eql(u8, argv[0], "j"))) {
+        const jump_mod = @import("builtins/jump.zig");
+        // Re-open the database in the child — SQLite handles don't survive fork()
+        jump_mod.deinitDb();
+        jump_mod.initDb(std.heap.page_allocator);
+        const stdout_f = std.fs.File{ .handle = posix.STDOUT_FILENO };
+        const stderr_f = std.fs.File{ .handle = posix.STDERR_FILENO };
+        const args = if (argv.len > 1) argv[1..] else &[_][]const u8{};
+        const r = if (std.mem.eql(u8, argv[0], "j"))
+            jump_mod.runJ(args, stderr_f)
+        else
+            jump_mod.run(args, stdout_f, stderr_f);
+        std.process.exit(r.exit_code);
+    }
 
     // Structured builtins: run in-process.
     // Output JSON only if next step is a xyron pipe builtin; otherwise text.
