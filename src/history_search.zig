@@ -9,6 +9,7 @@ const c = std.c;
 const fuzzy = @import("fuzzy.zig");
 const history_db_mod = @import("history_db.zig");
 const prompt_mod = @import("prompt.zig");
+const style = @import("style.zig");
 
 const MAX_ENTRIES: usize = 200;
 
@@ -268,10 +269,10 @@ fn render(
     const cols = ts.cols;
     const rows = ts.rows;
 
-    pos += cp(buf[pos..], "\x1b[H");
+    pos += style.home(buf[pos..]);
 
     // ── Title bar ──
-    pos += cp(buf[pos..], "\x1b[2m");
+    pos += style.dim(buf[pos..]);
     pos += cp(buf[pos..], "  History Search");
     const tw: usize = 16;
     var count_buf: [32]u8 = undefined;
@@ -279,25 +280,27 @@ fn render(
     const count_pad = if (cols > tw + count_str.len + 4) cols - tw - count_str.len - 4 else 1;
     { var p: usize = 0; while (p < count_pad and pos < buf.len) : (p += 1) { buf[pos] = ' '; pos += 1; } }
     pos += cp(buf[pos..], count_str);
-    pos += cp(buf[pos..], "  \x1b[0m\x1b[K\r\n");
+    pos += cp(buf[pos..], "  ");
+    pos += style.reset(buf[pos..]);
+    pos += style.clearLine(buf[pos..]);
+    pos += style.crlf(buf[pos..]);
 
     // ── Filter bar ──
-    pos += cp(buf[pos..], "  \x1b[33m> \x1b[0m");
+    pos += cp(buf[pos..], "  ");
+    pos += style.colored(buf[pos..], .yellow, "> ");
     if (filter.len > 0) {
-        pos += cp(buf[pos..], "\x1b[1m");
-        pos += cp(buf[pos..], filter);
-        pos += cp(buf[pos..], "\x1b[0m");
+        pos += style.boldText(buf[pos..], filter);
     } else {
-        pos += cp(buf[pos..], "\x1b[2msearch...\x1b[0m");
+        pos += style.dimText(buf[pos..], "search...");
     }
-    pos += cp(buf[pos..], "\x1b[K\r\n");
+    pos += style.clearLine(buf[pos..]);
+    pos += style.crlf(buf[pos..]);
 
     // ── Separator ──
-    pos += cp(buf[pos..], "\x1b[2m");
-    { var w: usize = 0; while (w < cols and pos < buf.len - 3) : (w += 1) {
-        buf[pos] = 0xe2; buf[pos + 1] = 0x94; buf[pos + 2] = 0x80; pos += 3;
-    }}
-    pos += cp(buf[pos..], "\x1b[0m\r\n");
+    pos += style.dim(buf[pos..]);
+    pos += style.hline(buf[pos..], cols);
+    pos += style.reset(buf[pos..]);
+    pos += style.crlf(buf[pos..]);
 
     // ── Entries ──
     const max_vis = visibleRows(ts);
@@ -306,14 +309,15 @@ fn render(
     if (count == 0) {
         const empty_row = rows / 2;
         { var er: usize = 3; while (er < empty_row and pos < buf.len - 20) : (er += 1) {
-            pos += cp(buf[pos..], "\x1b[K\r\n");
+            pos += style.clearLine(buf[pos..]);
+            pos += style.crlf(buf[pos..]);
         }}
         const msg = if (filter.len > 0) "No matches" else "No history";
         const pad_l = if (cols > msg.len) (cols - msg.len) / 2 else 0;
         { var pl: usize = 0; while (pl < pad_l and pos < buf.len) : (pl += 1) { buf[pos] = ' '; pos += 1; } }
-        pos += cp(buf[pos..], "\x1b[2m");
-        pos += cp(buf[pos..], msg);
-        pos += cp(buf[pos..], "\x1b[0m\x1b[K\r\n");
+        pos += style.dimText(buf[pos..], msg);
+        pos += style.clearLine(buf[pos..]);
+        pos += style.crlf(buf[pos..]);
     } else {
         for (scroll..vis_end) |vi| {
             const idx = scored_idx[vi];
@@ -322,16 +326,18 @@ fn render(
 
             // Arrow
             if (is_sel) {
-                pos += cp(buf[pos..], "\x1b[36m > \x1b[0m");
+                pos += style.colored(buf[pos..], .cyan, " > ");
             } else {
                 pos += cp(buf[pos..], "   ");
             }
 
             // Status icon
             if (e.exit_code == 0) {
-                pos += cp(buf[pos..], "\x1b[32m\xe2\x97\x8f\x1b[0m ");
+                pos += style.colored(buf[pos..], .green, style.box.bullet);
+                pos += cp(buf[pos..], " ");
             } else {
-                pos += cp(buf[pos..], "\x1b[31m\xe2\x9c\x97\x1b[0m ");
+                pos += style.colored(buf[pos..], .red, style.box.cross);
+                pos += cp(buf[pos..], " ");
             }
 
             // Command text
@@ -340,10 +346,10 @@ fn render(
             const max_cmd = if (cols > right_w + 6) cols - right_w - 6 else 20;
             const disp_len = @min(cmd.len, max_cmd);
 
-            if (is_sel) pos += cp(buf[pos..], "\x1b[1m");
+            if (is_sel) pos += style.bold(buf[pos..]);
             pos += cp(buf[pos..], cmd[0..disp_len]);
-            if (cmd.len > max_cmd) pos += cp(buf[pos..], "\xe2\x80\xa6");
-            pos += cp(buf[pos..], "\x1b[0m");
+            if (cmd.len > max_cmd) pos += cp(buf[pos..], style.box.ellipsis);
+            pos += style.reset(buf[pos..]);
 
             // Right-align: duration + time
             const age = relativeTime(e.started_at);
@@ -365,20 +371,20 @@ fn render(
             }
 
             if (has_dur) {
-                pos += cp(buf[pos..], "\x1b[33m");
-                pos += cp(buf[pos..], dur_str);
-                pos += cp(buf[pos..], "\x1b[0m  ");
+                pos += style.colored(buf[pos..], .yellow, dur_str);
+                pos += cp(buf[pos..], "  ");
             }
-            pos += cp(buf[pos..], "\x1b[2m");
-            pos += cp(buf[pos..], age);
-            pos += cp(buf[pos..], "\x1b[0m\x1b[K\r\n");
+            pos += style.dimText(buf[pos..], age);
+            pos += style.clearLine(buf[pos..]);
+            pos += style.crlf(buf[pos..]);
         }
     }
 
     // Pad remaining
     const used_rows = 3 + (vis_end - scroll);
     { var r: usize = used_rows; while (r + 2 < rows and pos < buf.len - 10) : (r += 1) {
-        pos += cp(buf[pos..], "\x1b[K\r\n");
+        pos += style.clearLine(buf[pos..]);
+        pos += style.crlf(buf[pos..]);
     }}
 
     // ── Scrollbar ──
@@ -388,25 +394,34 @@ fn render(
         for (0..max_vis) |ri| {
             const row = 4 + ri;
             const in_bar = ri >= bar_pos and ri < bar_pos + bar_h;
-            const goto = std.fmt.bufPrint(buf[pos..], "\x1b[{d};{d}H", .{ row, cols }) catch "";
-            pos += goto.len;
-            pos += cp(buf[pos..], if (in_bar) "\x1b[2m\xe2\x96\x90\x1b[0m" else "\x1b[2m\xe2\x96\x91\x1b[0m");
+            pos += style.moveTo(buf[pos..], row, cols);
+            pos += style.dimText(buf[pos..], if (in_bar) style.box.scrollbar_thumb else style.box.scrollbar_track);
         }
     }
 
     // ── Status bar ──
-    const status_goto = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H", .{rows}) catch "";
-    pos += status_goto.len;
-    pos += cp(buf[pos..], "\x1b[2m  ");
-    pos += cp(buf[pos..], "\x1b[22;1mEnter\x1b[22m select  ");
-    pos += cp(buf[pos..], "\x1b[1mEsc\x1b[22m cancel  ");
-    pos += cp(buf[pos..], "\x1b[1m^W\x1b[22m del word");
-    pos += cp(buf[pos..], "\x1b[0m\x1b[K");
+    pos += style.moveTo(buf[pos..], rows, 1);
+    pos += style.dim(buf[pos..]);
+    pos += cp(buf[pos..], "  ");
+    pos += style.unbold(buf[pos..]);
+    pos += style.bold(buf[pos..]);
+    pos += cp(buf[pos..], "Enter");
+    pos += style.unbold(buf[pos..]);
+    pos += cp(buf[pos..], " select  ");
+    pos += style.bold(buf[pos..]);
+    pos += cp(buf[pos..], "Esc");
+    pos += style.unbold(buf[pos..]);
+    pos += cp(buf[pos..], " cancel  ");
+    pos += style.bold(buf[pos..]);
+    pos += cp(buf[pos..], "^W");
+    pos += style.unbold(buf[pos..]);
+    pos += cp(buf[pos..], " del word");
+    pos += style.reset(buf[pos..]);
+    pos += style.clearLine(buf[pos..]);
 
     // Cursor in filter
     const cursor_col = 5 + filter.len;
-    const goto_filter = std.fmt.bufPrint(buf[pos..], "\x1b[2;{d}H", .{cursor_col}) catch "";
-    pos += goto_filter.len;
+    pos += style.moveTo(buf[pos..], 2, cursor_col);
 
     tty.writeAll(buf[0..pos]) catch {};
 }

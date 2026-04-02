@@ -5,7 +5,15 @@
 const std = @import("std");
 const posix = std.posix;
 const secrets_mod = @import("../secrets.zig");
+const style = @import("../style.zig");
 const Result = @import("mod.zig").BuiltinResult;
+
+/// Local copy helper — same as style.zig's internal cp.
+fn cp(dest: []u8, src: []const u8) usize {
+    const n = @min(src.len, dest.len);
+    @memcpy(dest[0..n], src[0..n]);
+    return n;
+}
 
 pub fn run(stdout: std.fs.File, stderr: std.fs.File) Result {
     const alloc = std.heap.page_allocator;
@@ -13,32 +21,104 @@ pub fn run(stdout: std.fs.File, stderr: std.fs.File) Result {
 
     // Already initialized?
     if (store.isInitialized()) {
-        stdout.writeAll("\x1b[2m── Secrets already initialized ──\x1b[0m\n\n") catch {};
-        stdout.writeAll("  Key:  \x1b[1m") catch {};
-        stdout.writeAll(store.keyId()) catch {};
-        stdout.writeAll("\x1b[0m\n") catch {};
-        stdout.writeAll("  File: \x1b[2m") catch {};
-        stdout.writeAll(store.filePath()) catch {};
-        stdout.writeAll("\x1b[0m\n\n") catch {};
-        stdout.writeAll("Run \x1b[1mxyron secrets open\x1b[0m to manage secrets.\n") catch {};
+        {
+            var sbuf: [256]u8 = undefined;
+            var sp: usize = 0;
+            sp += style.dimText(&sbuf, "── Secrets already initialized ──");
+            sp += cp(sbuf[sp..], "\n\n");
+            stdout.writeAll(sbuf[0..sp]) catch {};
+        }
+        {
+            var sbuf: [256]u8 = undefined;
+            var sp: usize = 0;
+            sp += cp(sbuf[0..], "  Key:  ");
+            sp += style.boldText(sbuf[sp..], store.keyId());
+            sp += cp(sbuf[sp..], "\n");
+            stdout.writeAll(sbuf[0..sp]) catch {};
+        }
+        {
+            var sbuf: [256]u8 = undefined;
+            var sp: usize = 0;
+            sp += cp(sbuf[0..], "  File: ");
+            sp += style.dimText(sbuf[sp..], store.filePath());
+            sp += cp(sbuf[sp..], "\n\n");
+            stdout.writeAll(sbuf[0..sp]) catch {};
+        }
+        {
+            var sbuf: [256]u8 = undefined;
+            var sp: usize = 0;
+            sp += cp(sbuf[0..], "Run ");
+            sp += style.boldText(sbuf[sp..], "xyron secrets open");
+            sp += cp(sbuf[sp..], " to manage secrets.\n");
+            stdout.writeAll(sbuf[0..sp]) catch {};
+        }
         return .{};
     }
 
     // Step 1: check GPG
-    stdout.writeAll("\n\x1b[1m  Xyron Secrets Setup\x1b[0m\n\n") catch {};
+    {
+        var sbuf: [256]u8 = undefined;
+        var sp: usize = 0;
+        sp += cp(sbuf[0..], "\n");
+        sp += style.boldText(sbuf[sp..], "  Xyron Secrets Setup");
+        sp += cp(sbuf[sp..], "\n\n");
+        stdout.writeAll(sbuf[0..sp]) catch {};
+    }
     stdout.writeAll("  Secrets are encrypted with GPG. Let's get you set up.\n\n") catch {};
-    stdout.writeAll("  \x1b[2mStep 1/3\x1b[0m  Checking GPG...\n") catch {};
+    {
+        var sbuf: [128]u8 = undefined;
+        var sp: usize = 0;
+        sp += cp(sbuf[0..], "  ");
+        sp += style.dimText(sbuf[sp..], "Step 1/3");
+        sp += cp(sbuf[sp..], "  Checking GPG...\n");
+        stdout.writeAll(sbuf[0..sp]) catch {};
+    }
 
     if (!gpgAvailable(alloc)) {
-        stderr.writeAll("\n  \x1b[31mGPG is not installed.\x1b[0m\n") catch {};
-        stderr.writeAll("  Install it with: \x1b[1mbrew install gnupg\x1b[0m (macOS)\n") catch {};
-        stderr.writeAll("                   \x1b[1msudo apt install gpg\x1b[0m (Ubuntu/Debian)\n\n") catch {};
+        {
+            var sbuf: [128]u8 = undefined;
+            var sp: usize = 0;
+            sp += cp(sbuf[0..], "\n  ");
+            sp += style.colored(sbuf[sp..], .red, "GPG is not installed.");
+            sp += cp(sbuf[sp..], "\n");
+            stderr.writeAll(sbuf[0..sp]) catch {};
+        }
+        {
+            var sbuf: [128]u8 = undefined;
+            var sp: usize = 0;
+            sp += cp(sbuf[0..], "  Install it with: ");
+            sp += style.boldText(sbuf[sp..], "brew install gnupg");
+            sp += cp(sbuf[sp..], " (macOS)\n");
+            stderr.writeAll(sbuf[0..sp]) catch {};
+        }
+        {
+            var sbuf: [128]u8 = undefined;
+            var sp: usize = 0;
+            sp += cp(sbuf[0..], "                   ");
+            sp += style.boldText(sbuf[sp..], "sudo apt install gpg");
+            sp += cp(sbuf[sp..], " (Ubuntu/Debian)\n\n");
+            stderr.writeAll(sbuf[0..sp]) catch {};
+        }
         return .{ .exit_code = 1 };
     }
-    stdout.writeAll("           \x1b[32mGPG found.\x1b[0m\n\n") catch {};
+    {
+        var sbuf: [128]u8 = undefined;
+        var sp: usize = 0;
+        sp += cp(sbuf[0..], "           ");
+        sp += style.colored(sbuf[sp..], .green, "GPG found.");
+        sp += cp(sbuf[sp..], "\n\n");
+        stdout.writeAll(sbuf[0..sp]) catch {};
+    }
 
     // Step 2: find or create a key
-    stdout.writeAll("  \x1b[2mStep 2/3\x1b[0m  GPG key\n\n") catch {};
+    {
+        var sbuf: [128]u8 = undefined;
+        var sp: usize = 0;
+        sp += cp(sbuf[0..], "  ");
+        sp += style.dimText(sbuf[sp..], "Step 2/3");
+        sp += cp(sbuf[sp..], "  GPG key\n\n");
+        stdout.writeAll(sbuf[0..sp]) catch {};
+    }
 
     const has_keys = gpgHasKeys(alloc);
     const tty = std.fs.openFileAbsolute("/dev/tty", .{ .mode = .read_only }) catch return .{ .exit_code = 1 };
@@ -51,7 +131,14 @@ pub fn run(stdout: std.fs.File, stderr: std.fs.File) Result {
         stdout.writeAll("  You have existing GPG keys:\n\n") catch {};
         listGpgKeys(stdout, alloc);
 
-        stdout.writeAll("\n  Enter key ID, email, or \x1b[1mn\x1b[0m to create a new one: ") catch {};
+        {
+            var sbuf: [128]u8 = undefined;
+            var sp: usize = 0;
+            sp += cp(sbuf[0..], "\n  Enter key ID, email, or ");
+            sp += style.boldText(sbuf[sp..], "n");
+            sp += cp(sbuf[sp..], " to create a new one: ");
+            stdout.writeAll(sbuf[0..sp]) catch {};
+        }
 
         var input: [256]u8 = undefined;
         const n = tty.read(&input) catch return .{ .exit_code = 1 };
@@ -66,7 +153,14 @@ pub fn run(stdout: std.fs.File, stderr: std.fs.File) Result {
             if (!createGpgKey(stdout, stderr, tty, alloc)) return .{ .exit_code = 1 };
             key_id_len = getLastGpgKeyId(alloc, &key_id_buf);
             if (key_id_len == 0) {
-                stderr.writeAll("\n  \x1b[31mFailed to find newly created key.\x1b[0m\n") catch {};
+                {
+                    var sbuf: [128]u8 = undefined;
+                    var sp: usize = 0;
+                    sp += cp(sbuf[0..], "\n  ");
+                    sp += style.colored(sbuf[sp..], .red, "Failed to find newly created key.");
+                    sp += cp(sbuf[sp..], "\n");
+                    stderr.writeAll(sbuf[0..sp]) catch {};
+                }
                 return .{ .exit_code = 1 };
             }
         } else {
@@ -79,7 +173,14 @@ pub fn run(stdout: std.fs.File, stderr: std.fs.File) Result {
         if (!createGpgKey(stdout, stderr, tty, alloc)) return .{ .exit_code = 1 };
         key_id_len = getLastGpgKeyId(alloc, &key_id_buf);
         if (key_id_len == 0) {
-            stderr.writeAll("\n  \x1b[31mFailed to find newly created key.\x1b[0m\n") catch {};
+            {
+                var sbuf: [128]u8 = undefined;
+                var sp: usize = 0;
+                sp += cp(sbuf[0..], "\n  ");
+                sp += style.colored(sbuf[sp..], .red, "Failed to find newly created key.");
+                sp += cp(sbuf[sp..], "\n");
+                stderr.writeAll(sbuf[0..sp]) catch {};
+            }
             return .{ .exit_code = 1 };
         }
     }
@@ -87,27 +188,71 @@ pub fn run(stdout: std.fs.File, stderr: std.fs.File) Result {
     stdout.writeAll("\n") catch {};
 
     // Step 3: create the secrets file
-    stdout.writeAll("  \x1b[2mStep 3/3\x1b[0m  Creating encrypted vault...\n") catch {};
+    {
+        var sbuf: [128]u8 = undefined;
+        var sp: usize = 0;
+        sp += cp(sbuf[0..], "  ");
+        sp += style.dimText(sbuf[sp..], "Step 3/3");
+        sp += cp(sbuf[sp..], "  Creating encrypted vault...\n");
+        stdout.writeAll(sbuf[0..sp]) catch {};
+    }
 
     @memcpy(store.key_id[0..key_id_len], key_id_buf[0..key_id_len]);
     store.key_id_len = key_id_len;
     store.saveKeyId();
 
     store.save() catch {
-        stderr.writeAll("           \x1b[31mFailed to create secrets file.\x1b[0m\n") catch {};
+        {
+            var sbuf: [128]u8 = undefined;
+            var sp: usize = 0;
+            sp += cp(sbuf[0..], "           ");
+            sp += style.colored(sbuf[sp..], .red, "Failed to create secrets file.");
+            sp += cp(sbuf[sp..], "\n");
+            stderr.writeAll(sbuf[0..sp]) catch {};
+        }
         return .{ .exit_code = 1 };
     };
 
-    stdout.writeAll("           \x1b[32mDone!\x1b[0m\n\n") catch {};
-    stdout.writeAll("  \x1b[2mKey:\x1b[0m  ") catch {};
-    stdout.writeAll(key_id_buf[0..key_id_len]) catch {};
-    stdout.writeAll("\n  \x1b[2mFile:\x1b[0m ") catch {};
-    stdout.writeAll(store.filePath()) catch {};
-    stdout.writeAll("\n\n") catch {};
+    {
+        var sbuf: [128]u8 = undefined;
+        var sp: usize = 0;
+        sp += cp(sbuf[0..], "           ");
+        sp += style.colored(sbuf[sp..], .green, "Done!");
+        sp += cp(sbuf[sp..], "\n\n");
+        stdout.writeAll(sbuf[0..sp]) catch {};
+    }
+    {
+        var sbuf: [256]u8 = undefined;
+        var sp: usize = 0;
+        sp += cp(sbuf[0..], "  ");
+        sp += style.dimText(sbuf[sp..], "Key:");
+        sp += cp(sbuf[sp..], "  ");
+        sp += cp(sbuf[sp..], key_id_buf[0..key_id_len]);
+        sp += cp(sbuf[sp..], "\n  ");
+        sp += style.dimText(sbuf[sp..], "File:");
+        sp += cp(sbuf[sp..], " ");
+        sp += cp(sbuf[sp..], store.filePath());
+        sp += cp(sbuf[sp..], "\n\n");
+        stdout.writeAll(sbuf[0..sp]) catch {};
+    }
     stdout.writeAll("  Add your first secret:\n") catch {};
-    stdout.writeAll("    \x1b[1mxyron secrets add API_KEY sk-xxx --description \"OpenAI key\"\x1b[0m\n\n") catch {};
+    {
+        var sbuf: [256]u8 = undefined;
+        var sp: usize = 0;
+        sp += cp(sbuf[0..], "    ");
+        sp += style.boldText(sbuf[sp..], "xyron secrets add API_KEY sk-xxx --description \"OpenAI key\"");
+        sp += cp(sbuf[sp..], "\n\n");
+        stdout.writeAll(sbuf[0..sp]) catch {};
+    }
     stdout.writeAll("  Or browse with:\n") catch {};
-    stdout.writeAll("    \x1b[1mxyron secrets open\x1b[0m\n\n") catch {};
+    {
+        var sbuf: [128]u8 = undefined;
+        var sp: usize = 0;
+        sp += cp(sbuf[0..], "    ");
+        sp += style.boldText(sbuf[sp..], "xyron secrets open");
+        sp += cp(sbuf[sp..], "\n\n");
+        stdout.writeAll(sbuf[0..sp]) catch {};
+    }
 
     return .{};
 }
@@ -174,9 +319,18 @@ fn listGpgKeys(stdout: std.fs.File, alloc: std.mem.Allocator) void {
             var fi: usize = 0;
             while (field_iter.next()) |field| : (fi += 1) {
                 if (fi == 9 and field.len > 0) {
+                    // Build: "    <yellow>idx.</yellow> field\n"
                     var nbuf: [256]u8 = undefined;
-                    const msg = std.fmt.bufPrint(&nbuf, "    \x1b[33m{d}.\x1b[0m {s}\n", .{ idx, field }) catch "";
-                    stdout.writeAll(msg) catch {};
+                    var np: usize = 0;
+                    np += cp(nbuf[0..], "    ");
+                    const idx_str = std.fmt.bufPrint(nbuf[np + style.fg(nbuf[np..], .yellow) ..], "{d}.", .{idx}) catch "";
+                    np += style.fg(nbuf[np..], .yellow);
+                    np += idx_str.len;
+                    np += style.reset(nbuf[np..]);
+                    np += cp(nbuf[np..], " ");
+                    np += cp(nbuf[np..], field);
+                    np += cp(nbuf[np..], "\n");
+                    stdout.writeAll(nbuf[0..np]) catch {};
                     idx += 1;
                 }
             }
@@ -197,7 +351,14 @@ fn createGpgKey(stdout: std.fs.File, stderr: std.fs.File, tty: std.fs.File, allo
     const email = std.mem.trimRight(u8, email_buf[0..email_n], "\n\r ");
     if (email.len == 0) { stderr.writeAll("  Email required.\n") catch {}; return false; }
 
-    stdout.writeAll("\n  \x1b[2mGenerating key (this may take a moment)...\x1b[0m\n") catch {};
+    {
+        var sbuf: [128]u8 = undefined;
+        var sp: usize = 0;
+        sp += cp(sbuf[0..], "\n  ");
+        sp += style.dimText(sbuf[sp..], "Generating key (this may take a moment)...");
+        sp += cp(sbuf[sp..], "\n");
+        stdout.writeAll(sbuf[0..sp]) catch {};
+    }
 
     var batch_buf: [512]u8 = undefined;
     const batch = std.fmt.bufPrint(&batch_buf,
@@ -212,7 +373,14 @@ fn createGpgKey(stdout: std.fs.File, stderr: std.fs.File, tty: std.fs.File, allo
     child.stderr_behavior = .Ignore;
 
     child.spawn() catch {
-        stderr.writeAll("  \x1b[31mFailed to start gpg.\x1b[0m\n") catch {};
+        {
+            var sbuf: [128]u8 = undefined;
+            var sp: usize = 0;
+            sp += cp(sbuf[0..], "  ");
+            sp += style.colored(sbuf[sp..], .red, "Failed to start gpg.");
+            sp += cp(sbuf[sp..], "\n");
+            stderr.writeAll(sbuf[0..sp]) catch {};
+        }
         return false;
     };
 
@@ -224,11 +392,25 @@ fn createGpgKey(stdout: std.fs.File, stderr: std.fs.File, tty: std.fs.File, allo
 
     const term = child.wait() catch return false;
     if (switch (term) { .Exited => |cc| cc, else => 1 } != 0) {
-        stderr.writeAll("  \x1b[31mKey generation failed.\x1b[0m\n") catch {};
+        {
+            var sbuf: [128]u8 = undefined;
+            var sp: usize = 0;
+            sp += cp(sbuf[0..], "  ");
+            sp += style.colored(sbuf[sp..], .red, "Key generation failed.");
+            sp += cp(sbuf[sp..], "\n");
+            stderr.writeAll(sbuf[0..sp]) catch {};
+        }
         return false;
     }
 
-    stdout.writeAll("  \x1b[32mKey created!\x1b[0m\n") catch {};
+    {
+        var sbuf: [64]u8 = undefined;
+        var sp: usize = 0;
+        sp += cp(sbuf[0..], "  ");
+        sp += style.colored(sbuf[sp..], .green, "Key created!");
+        sp += cp(sbuf[sp..], "\n");
+        stdout.writeAll(sbuf[0..sp]) catch {};
+    }
     return true;
 }
 

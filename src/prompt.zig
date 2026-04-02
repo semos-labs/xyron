@@ -7,6 +7,7 @@
 const std = @import("std");
 const lua_api = @import("lua_api.zig");
 const git_info_mod = @import("git_info.zig");
+const style = @import("style.zig");
 
 pub const MAX_PROMPT: usize = 2048;
 pub const MAX_SEGMENTS: usize = 16;
@@ -342,7 +343,7 @@ fn renderSegment(dest: []u8, seg: *const Segment, ctx: *const PromptContext, lua
 
 fn renderNewline(dest: []u8) SegResult {
     // Use \r\n in raw mode (OPOST disabled)
-    const n = cp(dest, "\r\n");
+    const n = style.crlf(dest);
     return .{ .bytes = n, .visible = 0 };
 }
 
@@ -362,7 +363,7 @@ fn renderCwd(dest: []u8, seg: *const Segment, ctx: *const PromptContext) SegResu
     }
 
     const vis_end = pos;
-    if (seg.color.len > 0) pos += cp(dest[pos..], "\x1b[0m");
+    if (seg.color.len > 0) pos += style.reset(dest[pos..]);
     return .{ .bytes = pos, .visible = vis_end - vis_start };
 }
 
@@ -370,36 +371,37 @@ fn renderSymbol(dest: []u8, ctx: *const PromptContext) SegResult {
     var pos: usize = 0;
     const symbol: []const u8 = if (ctx.vim_normal) "<" else ">";
     if (ctx.last_exit_code != 0) {
-        pos += cp(dest[pos..], "\x1b[1;31m");
+        pos += style.boldFg(dest[pos..], .red);
     } else {
-        pos += cp(dest[pos..], if (ctx.vim_normal) "\x1b[1;33m" else "\x1b[1;32m");
+        pos += if (ctx.vim_normal) style.boldFg(dest[pos..], .yellow) else style.boldFg(dest[pos..], .green);
     }
     pos += cp(dest[pos..], symbol);
-    pos += cp(dest[pos..], "\x1b[0m");
+    pos += style.reset(dest[pos..]);
     return .{ .bytes = pos, .visible = 1 };
 }
 
 fn renderStatus(dest: []u8, ctx: *const PromptContext) SegResult {
     if (ctx.last_exit_code == 0) return .{ .bytes = 0, .visible = 0 };
     var pos: usize = 0;
-    pos += cp(dest[pos..], "\x1b[31m");
+    pos += style.fg(dest[pos..], .red);
     const n = std.fmt.bufPrint(dest[pos..], "✘{d}", .{ctx.last_exit_code}) catch return .{ .bytes = 0, .visible = 0 };
     pos += n.len;
     const vis = n.len;
-    pos += cp(dest[pos..], "\x1b[0m ");
+    pos += style.reset(dest[pos..]);
+    pos += cp(dest[pos..], " ");
     return .{ .bytes = pos, .visible = vis + 1 };
 }
 
 fn renderDuration(dest: []u8, ctx: *const PromptContext) SegResult {
     if (ctx.last_duration_ms < 500) return .{ .bytes = 0, .visible = 0 };
     var pos: usize = 0;
-    pos += cp(dest[pos..], "\x1b[2;33m"); // dim yellow
+    pos += style.dimFg(dest[pos..], .yellow); // dim yellow
     var fmt_buf: [32]u8 = undefined;
     const dur = formatDuration(&fmt_buf, ctx.last_duration_ms);
     const n = std.fmt.bufPrint(dest[pos..], "{s} ", .{dur}) catch return .{ .bytes = 0, .visible = 0 };
     pos += n.len;
     const vis = n.len;
-    pos += cp(dest[pos..], "\x1b[0m");
+    pos += style.reset(dest[pos..]);
     return .{ .bytes = pos, .visible = vis };
 }
 
@@ -436,7 +438,7 @@ fn renderJobs(dest: []u8, seg: *const Segment, ctx: *const PromptContext) SegRes
     const n = std.fmt.bufPrint(dest[pos..], " ⚙{d}", .{ctx.job_count}) catch return .{ .bytes = 0, .visible = 0 };
     pos += n.len;
     const vis = n.len;
-    if (seg.color.len > 0) pos += cp(dest[pos..], "\x1b[0m");
+    if (seg.color.len > 0) pos += style.reset(dest[pos..]);
     return .{ .bytes = pos, .visible = vis };
 }
 
@@ -465,12 +467,14 @@ fn renderGitBranch(dest: []u8, seg: *const Segment, ctx: *const PromptContext) S
     vis += g.branch.len;
     // Worktree: show as branch:worktree-name
     if (g.is_worktree and g.worktree_name.len > 0) {
-        pos += cp(dest[pos..], "\x1b[2m:\x1b[22m");
+        pos += style.dim(dest[pos..]);
+        pos += cp(dest[pos..], ":");
+        pos += style.undim(dest[pos..]);
         vis += 1;
         pos += cp(dest[pos..], g.worktree_name);
         vis += g.worktree_name.len;
     }
-    if (seg.color.len > 0) pos += cp(dest[pos..], "\x1b[0m");
+    if (seg.color.len > 0) pos += style.reset(dest[pos..]);
 
     // State indicators (rebase/merge/cherry-pick)
     if (wcfg.show_state) {
@@ -484,13 +488,13 @@ fn renderGitBranch(dest: []u8, seg: *const Segment, ctx: *const PromptContext) S
         if (g.ahead > 0) {
             pos += cp(dest[pos..], " "); vis += 1;
             const icon = wcfg.getIcon(&wcfg.icon_ahead, wcfg.icon_ahead_len, "\xe2\x87\xa1");
-            const r = appendIndicator(dest[pos..], "\x1b[32m", icon, g.ahead);
+            const r = appendIndicator(dest[pos..], .green, icon, g.ahead);
             pos += r.bytes; vis += r.visible;
         }
         if (g.behind > 0) {
             pos += cp(dest[pos..], " "); vis += 1;
             const icon = wcfg.getIcon(&wcfg.icon_behind, wcfg.icon_behind_len, "\xe2\x87\xa3");
-            const r = appendIndicator(dest[pos..], "\x1b[31m", icon, g.behind);
+            const r = appendIndicator(dest[pos..], .red, icon, g.behind);
             pos += r.bytes; vis += r.visible;
         }
     }
@@ -501,35 +505,35 @@ fn renderGitBranch(dest: []u8, seg: *const Segment, ctx: *const PromptContext) S
         pos += cp(dest[pos..], " "); vis += 1;
         has_visible_status = true;
         const icon = wcfg.getIcon(&wcfg.icon_conflicts, wcfg.icon_conflicts_len, "\xe2\x9c\x96");
-        const r = appendIndicator(dest[pos..], "\x1b[1;31m", icon, g.conflicts);
+        const r = appendIndicatorBold(dest[pos..], .red, icon, g.conflicts);
         pos += r.bytes; vis += r.visible;
     }
     if (wcfg.show_staged and g.staged > 0) {
         pos += cp(dest[pos..], " "); vis += 1;
         has_visible_status = true;
         const icon = wcfg.getIcon(&wcfg.icon_staged, wcfg.icon_staged_len, "+");
-        const r = appendIndicator(dest[pos..], "\x1b[32m", icon, g.staged);
+        const r = appendIndicator(dest[pos..], .green, icon, g.staged);
         pos += r.bytes; vis += r.visible;
     }
     if (wcfg.show_modified and g.modified > 0) {
         pos += cp(dest[pos..], " "); vis += 1;
         has_visible_status = true;
         const icon = wcfg.getIcon(&wcfg.icon_modified, wcfg.icon_modified_len, "~");
-        const r = appendIndicator(dest[pos..], "\x1b[33m", icon, g.modified);
+        const r = appendIndicator(dest[pos..], .yellow, icon, g.modified);
         pos += r.bytes; vis += r.visible;
     }
     if (wcfg.show_deleted and g.deleted > 0) {
         pos += cp(dest[pos..], " "); vis += 1;
         has_visible_status = true;
         const icon = wcfg.getIcon(&wcfg.icon_deleted, wcfg.icon_deleted_len, "-");
-        const r = appendIndicator(dest[pos..], "\x1b[31m", icon, g.deleted);
+        const r = appendIndicator(dest[pos..], .red, icon, g.deleted);
         pos += r.bytes; vis += r.visible;
     }
     if (wcfg.show_untracked and g.untracked > 0) {
         pos += cp(dest[pos..], " "); vis += 1;
         has_visible_status = true;
         const icon = wcfg.getIcon(&wcfg.icon_untracked, wcfg.icon_untracked_len, "?");
-        const r = appendIndicator(dest[pos..], "\x1b[2m", icon, g.untracked);
+        const r = appendIndicatorDim(dest[pos..], icon, g.untracked);
         pos += r.bytes; vis += r.visible;
     }
 
@@ -538,10 +542,10 @@ fn renderGitBranch(dest: []u8, seg: *const Segment, ctx: *const PromptContext) S
         const clean_icon = wcfg.getIcon(&wcfg.icon_clean, wcfg.icon_clean_len, "");
         if (clean_icon.len > 0) {
             pos += cp(dest[pos..], " "); vis += 1;
-            pos += cp(dest[pos..], "\x1b[32m");
+            pos += style.fg(dest[pos..], .green);
             pos += cp(dest[pos..], clean_icon);
             vis += visLen(clean_icon);
-            pos += cp(dest[pos..], "\x1b[0m");
+            pos += style.reset(dest[pos..]);
         }
     }
 
@@ -550,13 +554,13 @@ fn renderGitBranch(dest: []u8, seg: *const Segment, ctx: *const PromptContext) S
         if (g.lines_added > 0) {
             pos += cp(dest[pos..], " "); vis += 1;
             const icon = wcfg.getIcon(&wcfg.icon_lines_added, wcfg.icon_lines_added_len, "+");
-            const r = appendIndicator(dest[pos..], "\x1b[32m", icon, g.lines_added);
+            const r = appendIndicator(dest[pos..], .green, icon, g.lines_added);
             pos += r.bytes; vis += r.visible;
         }
         if (g.lines_removed > 0) {
             pos += cp(dest[pos..], " "); vis += 1;
             const icon = wcfg.getIcon(&wcfg.icon_lines_removed, wcfg.icon_lines_removed_len, "-");
-            const r = appendIndicator(dest[pos..], "\x1b[31m", icon, g.lines_removed);
+            const r = appendIndicator(dest[pos..], .red, icon, g.lines_removed);
             pos += r.bytes; vis += r.visible;
         }
     }
@@ -566,20 +570,42 @@ fn renderGitBranch(dest: []u8, seg: *const Segment, ctx: *const PromptContext) S
 
 fn appendState(dest: []u8, label: []const u8) SegResult {
     var pos: usize = 0;
-    pos += cp(dest[pos..], "\x1b[33m");
+    pos += style.fg(dest[pos..], .yellow);
     pos += cp(dest[pos..], label);
-    pos += cp(dest[pos..], "\x1b[0m");
+    pos += style.reset(dest[pos..]);
     return .{ .bytes = pos, .visible = label.len };
 }
 
-fn appendIndicator(dest: []u8, color: []const u8, icon: []const u8, count: usize) SegResult {
+fn appendIndicator(dest: []u8, color: style.Color, icon: []const u8, count: usize) SegResult {
     var pos: usize = 0;
-    pos += cp(dest[pos..], color);
+    pos += style.fg(dest[pos..], color);
     pos += cp(dest[pos..], icon);
     pos += cp(dest[pos..], " ");
     const num = std.fmt.bufPrint(dest[pos..], "{d}", .{count}) catch "";
     pos += num.len;
-    pos += cp(dest[pos..], "\x1b[0m");
+    pos += style.reset(dest[pos..]);
+    return .{ .bytes = pos, .visible = visLen(icon) + 1 + num.len };
+}
+
+fn appendIndicatorBold(dest: []u8, color: style.Color, icon: []const u8, count: usize) SegResult {
+    var pos: usize = 0;
+    pos += style.boldFg(dest[pos..], color);
+    pos += cp(dest[pos..], icon);
+    pos += cp(dest[pos..], " ");
+    const num = std.fmt.bufPrint(dest[pos..], "{d}", .{count}) catch "";
+    pos += num.len;
+    pos += style.reset(dest[pos..]);
+    return .{ .bytes = pos, .visible = visLen(icon) + 1 + num.len };
+}
+
+fn appendIndicatorDim(dest: []u8, icon: []const u8, count: usize) SegResult {
+    var pos: usize = 0;
+    pos += style.dim(dest[pos..]);
+    pos += cp(dest[pos..], icon);
+    pos += cp(dest[pos..], " ");
+    const num = std.fmt.bufPrint(dest[pos..], "{d}", .{count}) catch "";
+    pos += num.len;
+    pos += style.reset(dest[pos..]);
     return .{ .bytes = pos, .visible = visLen(icon) + 1 + num.len };
 }
 
@@ -621,7 +647,7 @@ fn renderText(dest: []u8, seg: *const Segment) SegResult {
     const text = seg.text[0..seg.text_len];
     pos += cp(dest[pos..], text);
     const vis = text.len;
-    if (seg.color.len > 0) pos += cp(dest[pos..], "\x1b[0m");
+    if (seg.color.len > 0) pos += style.reset(dest[pos..]);
     return .{ .bytes = pos, .visible = vis };
 }
 

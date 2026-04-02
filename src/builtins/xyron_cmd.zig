@@ -11,6 +11,7 @@ const std = @import("std");
 const posix = std.posix;
 const c = std.c;
 const secrets_mod = @import("../secrets.zig");
+const style = @import("../style.zig");
 const Result = @import("mod.zig").BuiltinResult;
 
 pub fn run(args: []const []const u8, stdout: std.fs.File, stderr: std.fs.File) Result {
@@ -131,13 +132,15 @@ fn runSecretsList(args: []const []const u8, stdout: std.fs.File, stderr: std.fs.
         if (local_only and (s.kind != .local or !std.mem.eql(u8, s.dirSlice(), cwd))) continue;
         var buf: [1024]u8 = undefined;
         var pos: usize = 0;
-        const badge: []const u8 = switch (s.kind) { .env => "\x1b[32menv\x1b[0m", .local => "\x1b[34mlocal\x1b[0m", .password => "\x1b[33mpass\x1b[0m" };
         pos += cp(buf[pos..], "  ");
-        pos += cp(buf[pos..], badge);
-        pos += cp(buf[pos..], "  \x1b[1m");
-        pos += cp(buf[pos..], s.nameSlice());
-        pos += cp(buf[pos..], "\x1b[0m");
-        if (s.desc_len > 0) { pos += cp(buf[pos..], "  \x1b[2m"); pos += cp(buf[pos..], s.descSlice()); pos += cp(buf[pos..], "\x1b[0m"); }
+        switch (s.kind) {
+            .env => pos += style.colored(buf[pos..], .green, "env"),
+            .local => pos += style.colored(buf[pos..], .blue, "local"),
+            .password => pos += style.colored(buf[pos..], .yellow, "pass"),
+        }
+        pos += cp(buf[pos..], "  ");
+        pos += style.boldText(buf[pos..], s.nameSlice());
+        if (s.desc_len > 0) { pos += cp(buf[pos..], "  "); pos += style.dimText(buf[pos..], s.descSlice()); }
         pos += cp(buf[pos..], "\n");
         stdout.writeAll(buf[0..pos]) catch {};
         count += 1;
@@ -174,8 +177,20 @@ fn runSecretsOpen(args: []const []const u8, stdout: std.fs.File, stderr: std.fs.
     _ = c.tcsetattr(tty_fd, .NOW, &raw);
     defer _ = c.tcsetattr(tty_fd, .NOW, &orig);
 
-    tty.writeAll("\x1b[?1049h\x1b[?25h") catch {};
-    defer tty.writeAll("\x1b[?25h\x1b[?1049l") catch {};
+    {
+        var enter_buf: [64]u8 = undefined;
+        var ep: usize = 0;
+        ep += style.altScreenOn(enter_buf[ep..]);
+        ep += style.showCursor(enter_buf[ep..]);
+        tty.writeAll(enter_buf[0..ep]) catch {};
+    }
+    defer {
+        var exit_buf: [64]u8 = undefined;
+        var xp: usize = 0;
+        xp += style.showCursor(exit_buf[xp..]);
+        xp += style.altScreenOff(exit_buf[xp..]);
+        tty.writeAll(exit_buf[0..xp]) catch {};
+    }
 
     var cursor: usize = 0;
     var scroll: usize = 0;
@@ -371,72 +386,87 @@ fn renderModal(tty: std.fs.File, title: []const u8, labels: *const [3][]const u8
     const start_col = if (ts.cols > modal_w + 2) (ts.cols - modal_w) / 2 else 1;
 
     // Top border
-    const goto_top = std.fmt.bufPrint(buf[pos..], "\x1b[{d};{d}H", .{ start_row, start_col }) catch "";
-    pos += goto_top.len;
-    pos += cp(buf[pos..], "\x1b[2m\xe2\x94\x8c"); // ┌
-    { var w: usize = 0; while (w < modal_w - 2 and pos < buf.len - 3) : (w += 1) { buf[pos] = 0xe2; buf[pos + 1] = 0x94; buf[pos + 2] = 0x80; pos += 3; } }
-    pos += cp(buf[pos..], "\xe2\x94\x90\x1b[0m"); // ┐
+    pos += style.moveTo(buf[pos..], start_row, start_col);
+    pos += style.dim(buf[pos..]);
+    pos += cp(buf[pos..], style.box.top_left);
+    pos += style.hline(buf[pos..], modal_w - 2);
+    pos += cp(buf[pos..], style.box.top_right);
+    pos += style.reset(buf[pos..]);
 
     // Title row
-    const goto_title = std.fmt.bufPrint(buf[pos..], "\x1b[{d};{d}H", .{ start_row + 1, start_col }) catch "";
-    pos += goto_title.len;
-    pos += cp(buf[pos..], "\x1b[2m\xe2\x94\x82\x1b[0m \x1b[1m"); // │ bold
-    pos += cp(buf[pos..], title);
-    pos += cp(buf[pos..], "\x1b[0m");
+    pos += style.moveTo(buf[pos..], start_row + 1, start_col);
+    pos += style.dim(buf[pos..]);
+    pos += cp(buf[pos..], style.box.vertical);
+    pos += style.reset(buf[pos..]);
+    pos += cp(buf[pos..], " ");
+    pos += style.boldText(buf[pos..], title);
     { var pad: usize = title.len + 1; while (pad < modal_w - 2 and pos < buf.len) : (pad += 1) { buf[pos] = ' '; pos += 1; } }
-    pos += cp(buf[pos..], "\x1b[2m\xe2\x94\x82\x1b[0m"); // │
+    pos += style.dim(buf[pos..]);
+    pos += cp(buf[pos..], style.box.vertical);
+    pos += style.reset(buf[pos..]);
 
     // Separator
-    const goto_sep = std.fmt.bufPrint(buf[pos..], "\x1b[{d};{d}H", .{ start_row + 2, start_col }) catch "";
-    pos += goto_sep.len;
-    pos += cp(buf[pos..], "\x1b[2m\xe2\x94\x9c"); // ├
-    { var w: usize = 0; while (w < modal_w - 2 and pos < buf.len - 3) : (w += 1) { buf[pos] = 0xe2; buf[pos + 1] = 0x94; buf[pos + 2] = 0x80; pos += 3; } }
-    pos += cp(buf[pos..], "\xe2\x94\xa4\x1b[0m"); // ┤
+    pos += style.moveTo(buf[pos..], start_row + 2, start_col);
+    pos += style.dim(buf[pos..]);
+    pos += cp(buf[pos..], style.box.t_left);
+    pos += style.hline(buf[pos..], modal_w - 2);
+    pos += cp(buf[pos..], style.box.t_right);
+    pos += style.reset(buf[pos..]);
 
     // Fields
     for (0..3) |fi| {
         const row = start_row + 3 + fi;
-        const goto_f = std.fmt.bufPrint(buf[pos..], "\x1b[{d};{d}H", .{ row, start_col }) catch "";
-        pos += goto_f.len;
+        pos += style.moveTo(buf[pos..], row, start_col);
         const is_active = @intFromEnum(active) == fi;
 
-        pos += cp(buf[pos..], "\x1b[2m\xe2\x94\x82\x1b[0m "); // │
-        if (is_active) pos += cp(buf[pos..], "\x1b[36m"); // cyan
+        pos += style.dim(buf[pos..]);
+        pos += cp(buf[pos..], style.box.vertical);
+        pos += style.reset(buf[pos..]);
+        pos += cp(buf[pos..], " ");
+        if (is_active) pos += style.fg(buf[pos..], .cyan);
         pos += cp(buf[pos..], labels[fi]);
         pos += cp(buf[pos..], ": ");
-        if (is_active) pos += cp(buf[pos..], "\x1b[0m\x1b[1m"); // bold
+        if (is_active) { pos += style.reset(buf[pos..]); pos += style.bold(buf[pos..]); }
         const val = fields[fi][0..lens[fi]];
         const max_val = modal_w - labels[fi].len - 6;
         const disp = @min(val.len, max_val);
         pos += cp(buf[pos..], val[0..disp]);
-        if (is_active and val.len == 0) { pos += cp(buf[pos..], "\x1b[2m_\x1b[22m"); }
-        pos += cp(buf[pos..], "\x1b[0m");
+        if (is_active and val.len == 0) { pos += style.dim(buf[pos..]); pos += cp(buf[pos..], "_"); pos += style.unbold(buf[pos..]); }
+        pos += style.reset(buf[pos..]);
         // Pad
         { var pad: usize = labels[fi].len + 2 + disp + @as(usize, if (is_active and val.len == 0) 1 else 0);
           while (pad < modal_w - 2 and pos < buf.len) : (pad += 1) { buf[pos] = ' '; pos += 1; } }
-        pos += cp(buf[pos..], "\x1b[2m\xe2\x94\x82\x1b[0m"); // │
+        pos += style.dim(buf[pos..]);
+        pos += cp(buf[pos..], style.box.vertical);
+        pos += style.reset(buf[pos..]);
     }
 
     // Empty row
-    const goto_empty = std.fmt.bufPrint(buf[pos..], "\x1b[{d};{d}H", .{ start_row + 6, start_col }) catch "";
-    pos += goto_empty.len;
-    pos += cp(buf[pos..], "\x1b[2m\xe2\x94\x82\x1b[0m"); // │
+    pos += style.moveTo(buf[pos..], start_row + 6, start_col);
+    pos += style.dim(buf[pos..]);
+    pos += cp(buf[pos..], style.box.vertical);
+    pos += style.reset(buf[pos..]);
     { var pad: usize = 0; while (pad < modal_w - 2 and pos < buf.len) : (pad += 1) { buf[pos] = ' '; pos += 1; } }
-    pos += cp(buf[pos..], "\x1b[2m\xe2\x94\x82\x1b[0m"); // │
+    pos += style.dim(buf[pos..]);
+    pos += cp(buf[pos..], style.box.vertical);
+    pos += style.reset(buf[pos..]);
 
     // Help row
-    const goto_help = std.fmt.bufPrint(buf[pos..], "\x1b[{d};{d}H", .{ start_row + 7, start_col }) catch "";
-    pos += goto_help.len;
-    pos += cp(buf[pos..], "\x1b[2m\xe2\x94\x82 Tab next  Enter save  Esc cancel"); // │
+    pos += style.moveTo(buf[pos..], start_row + 7, start_col);
+    pos += style.dim(buf[pos..]);
+    pos += cp(buf[pos..], style.box.vertical);
+    pos += cp(buf[pos..], " Tab next  Enter save  Esc cancel");
     { var pad: usize = 38; while (pad < modal_w - 2 and pos < buf.len) : (pad += 1) { buf[pos] = ' '; pos += 1; } }
-    pos += cp(buf[pos..], "\xe2\x94\x82\x1b[0m"); // │
+    pos += cp(buf[pos..], style.box.vertical);
+    pos += style.reset(buf[pos..]);
 
     // Bottom border
-    const goto_bot = std.fmt.bufPrint(buf[pos..], "\x1b[{d};{d}H", .{ start_row + 8, start_col }) catch "";
-    pos += goto_bot.len;
-    pos += cp(buf[pos..], "\x1b[2m\xe2\x94\x94"); // └
-    { var w: usize = 0; while (w < modal_w - 2 and pos < buf.len - 3) : (w += 1) { buf[pos] = 0xe2; buf[pos + 1] = 0x94; buf[pos + 2] = 0x80; pos += 3; } }
-    pos += cp(buf[pos..], "\xe2\x94\x98\x1b[0m"); // ┘
+    pos += style.moveTo(buf[pos..], start_row + 8, start_col);
+    pos += style.dim(buf[pos..]);
+    pos += cp(buf[pos..], style.box.bottom_left);
+    pos += style.hline(buf[pos..], modal_w - 2);
+    pos += cp(buf[pos..], style.box.bottom_right);
+    pos += style.reset(buf[pos..]);
 
     tty.writeAll(buf[0..pos]) catch {};
 }
@@ -471,10 +501,11 @@ fn renderTui(tty: std.fs.File, store: *const secrets_mod.SecretsStore, cursor: u
     const cols = ts.cols;
     const rows = ts.rows;
 
-    pos += cp(buf[pos..], "\x1b[H");
+    pos += style.home(buf[pos..]);
 
     // Title
-    pos += cp(buf[pos..], "\x1b[2m  Secrets");
+    pos += style.dim(buf[pos..]);
+    pos += cp(buf[pos..], "  Secrets");
     if (local_only) pos += cp(buf[pos..], " (local)");
     const total = filteredCount(store, local_only, cwd);
     var cnt_buf: [32]u8 = undefined;
@@ -483,19 +514,25 @@ fn renderTui(tty: std.fs.File, store: *const secrets_mod.SecretsStore, cursor: u
     const cnt_pad = if (cols > tw + cnt_str.len + 4) cols - tw - cnt_str.len - 4 else 1;
     { var p: usize = 0; while (p < cnt_pad and pos < buf.len) : (p += 1) { buf[pos] = ' '; pos += 1; } }
     pos += cp(buf[pos..], cnt_str);
-    pos += cp(buf[pos..], "  \x1b[0m\x1b[K\r\n");
+    pos += cp(buf[pos..], "  ");
+    pos += style.reset(buf[pos..]);
+    pos += style.clearLine(buf[pos..]);
+    pos += style.crlf(buf[pos..]);
 
     // Column header
-    pos += cp(buf[pos..], "\x1b[2m  KIND   NAME                 ");
+    pos += style.dim(buf[pos..]);
+    pos += cp(buf[pos..], "  KIND   NAME                 ");
     if (show_values) pos += cp(buf[pos..], "VALUE                    ");
-    pos += cp(buf[pos..], "DESCRIPTION\x1b[0m\x1b[K\r\n");
+    pos += cp(buf[pos..], "DESCRIPTION");
+    pos += style.reset(buf[pos..]);
+    pos += style.clearLine(buf[pos..]);
+    pos += style.crlf(buf[pos..]);
 
     // Separator
-    pos += cp(buf[pos..], "\x1b[2m");
-    { var w: usize = 0; while (w < cols and pos < buf.len - 3) : (w += 1) {
-        buf[pos] = 0xe2; buf[pos + 1] = 0x94; buf[pos + 2] = 0x80; pos += 3;
-    }}
-    pos += cp(buf[pos..], "\x1b[0m\r\n");
+    pos += style.dim(buf[pos..]);
+    pos += style.hline(buf[pos..], cols);
+    pos += style.reset(buf[pos..]);
+    pos += style.crlf(buf[pos..]);
 
     // Entries
     const max_vis = visibleRows(ts);
@@ -508,40 +545,65 @@ fn renderTui(tty: std.fs.File, store: *const secrets_mod.SecretsStore, cursor: u
         if (vi >= vis_end) break;
         const is_sel = vi == cursor;
 
-        if (is_sel) pos += cp(buf[pos..], "\x1b[36m > \x1b[0m") else pos += cp(buf[pos..], "   ");
+        if (is_sel) { pos += style.colored(buf[pos..], .cyan, " > "); } else pos += cp(buf[pos..], "   ");
         switch (s.kind) {
-            .env => pos += cp(buf[pos..], "\x1b[32menv \x1b[0m  "),
-            .local => pos += cp(buf[pos..], "\x1b[34mlocal\x1b[0m  "),
-            .password => pos += cp(buf[pos..], "\x1b[33mpass \x1b[0m  "),
+            .env => { pos += style.colored(buf[pos..], .green, "env "); pos += cp(buf[pos..], "  "); },
+            .local => { pos += style.colored(buf[pos..], .blue, "local"); pos += cp(buf[pos..], "  "); },
+            .password => { pos += style.colored(buf[pos..], .yellow, "pass "); pos += cp(buf[pos..], "  "); },
         }
-        if (is_sel) pos += cp(buf[pos..], "\x1b[1m");
+        if (is_sel) pos += style.bold(buf[pos..]);
         const name = s.nameSlice();
         const nd = @min(name.len, 20);
         pos += cp(buf[pos..], name[0..nd]);
         { var pad: usize = nd; while (pad < 21 and pos < buf.len) : (pad += 1) { buf[pos] = ' '; pos += 1; } }
-        if (is_sel) pos += cp(buf[pos..], "\x1b[0m");
+        if (is_sel) pos += style.reset(buf[pos..]);
         if (show_values) {
             const val = s.valueSlice();
             const vd = @min(val.len, 24);
             pos += cp(buf[pos..], val[0..vd]);
             { var pad: usize = vd; while (pad < 25 and pos < buf.len) : (pad += 1) { buf[pos] = ' '; pos += 1; } }
         }
-        pos += cp(buf[pos..], "\x1b[2m");
+        pos += style.dim(buf[pos..]);
         pos += cp(buf[pos..], s.descSlice());
-        pos += cp(buf[pos..], "\x1b[0m\x1b[K\r\n");
+        pos += style.reset(buf[pos..]);
+        pos += style.clearLine(buf[pos..]);
+        pos += style.crlf(buf[pos..]);
         vi += 1;
     }
 
     // Pad
     const used = 3 + (vis_end - scroll);
-    { var r: usize = used; while (r + 2 < rows and pos < buf.len - 10) : (r += 1) { pos += cp(buf[pos..], "\x1b[K\r\n"); } }
+    { var r: usize = used; while (r + 2 < rows and pos < buf.len - 10) : (r += 1) { pos += style.clearLine(buf[pos..]); pos += style.crlf(buf[pos..]); } }
 
     // Status bar
-    const sg = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H", .{rows}) catch "";
-    pos += sg.len;
-    pos += cp(buf[pos..], "\x1b[2m  \x1b[22;1mq\x1b[22m quit  \x1b[1ma\x1b[22m add  \x1b[1me\x1b[22m edit  \x1b[1mv\x1b[22m ");
+    pos += style.moveTo(buf[pos..], rows, 1);
+    pos += style.dim(buf[pos..]);
+    pos += cp(buf[pos..], "  ");
+    pos += style.unbold(buf[pos..]);
+    pos += style.bold(buf[pos..]);
+    pos += cp(buf[pos..], "q");
+    pos += style.unbold(buf[pos..]);
+    pos += cp(buf[pos..], " quit  ");
+    pos += style.bold(buf[pos..]);
+    pos += cp(buf[pos..], "a");
+    pos += style.unbold(buf[pos..]);
+    pos += cp(buf[pos..], " add  ");
+    pos += style.bold(buf[pos..]);
+    pos += cp(buf[pos..], "e");
+    pos += style.unbold(buf[pos..]);
+    pos += cp(buf[pos..], " edit  ");
+    pos += style.bold(buf[pos..]);
+    pos += cp(buf[pos..], "v");
+    pos += style.unbold(buf[pos..]);
+    pos += cp(buf[pos..], " ");
     pos += cp(buf[pos..], if (show_values) "hide" else "show");
-    pos += cp(buf[pos..], "  \x1b[1mx\x1b[22m delete\x1b[0m\x1b[K");
+    pos += cp(buf[pos..], "  ");
+    pos += style.bold(buf[pos..]);
+    pos += cp(buf[pos..], "x");
+    pos += style.unbold(buf[pos..]);
+    pos += cp(buf[pos..], " delete");
+    pos += style.reset(buf[pos..]);
+    pos += style.clearLine(buf[pos..]);
 
     tty.writeAll(buf[0..pos]) catch {};
 }

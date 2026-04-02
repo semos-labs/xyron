@@ -9,6 +9,7 @@ const c = std.c;
 const history_db_mod = @import("../history_db.zig");
 const fuzzy = @import("../fuzzy.zig");
 const prompt_mod = @import("../prompt.zig");
+const style = @import("../style.zig");
 const Result = @import("mod.zig").BuiltinResult;
 
 const MAX_ENTRIES = 500;
@@ -205,10 +206,10 @@ const State = struct {
         const cols = self.ts.cols;
         const rows = self.ts.rows;
 
-        pos += cp(buf[pos..], "\x1b[H"); // home
+        pos += style.home(buf[pos..]);
 
         // ── Title bar (dim, subtle) ──
-        pos += cp(buf[pos..], "\x1b[2m");
+        pos += style.dim(buf[pos..]);
         pos += cp(buf[pos..], "  History Explorer");
         const tw: usize = 18;
 
@@ -219,35 +220,44 @@ const State = struct {
         { var p: usize = 0; while (p < count_pad and pos < buf.len) : (p += 1) { buf[pos] = ' '; pos += 1; } }
         pos += cp(buf[pos..], count_str);
         pos += cp(buf[pos..], "  ");
-        pos += cp(buf[pos..], "\x1b[0m\x1b[K\r\n");
+        pos += style.reset(buf[pos..]);
+        pos += style.clearLine(buf[pos..]);
+        pos += style.crlf(buf[pos..]);
 
         // ── Filter bar ──
-        pos += cp(buf[pos..], "  \x1b[33m> \x1b[0m"); // yellow >
+        pos += cp(buf[pos..], "  ");
+        pos += style.colored(buf[pos..], .yellow, "> ");
         if (self.filter_len > 0) {
-            pos += cp(buf[pos..], "\x1b[1m"); // bold
+            pos += style.bold(buf[pos..]);
             pos += cp(buf[pos..], self.filter[0..self.filter_len]);
-            pos += cp(buf[pos..], "\x1b[0m");
+            pos += style.reset(buf[pos..]);
         } else {
-            pos += cp(buf[pos..], "\x1b[2m"); // dim placeholder
-            pos += cp(buf[pos..], "search commands...");
-            pos += cp(buf[pos..], "\x1b[0m");
+            pos += style.dimText(buf[pos..], "search commands...");
         }
 
         // Filter pills
         if (self.show_failed_only) {
-            pos += cp(buf[pos..], "  \x1b[31;7m \xe2\x9c\x97 failed \x1b[0m"); // red inverse
+            pos += cp(buf[pos..], "  ");
+            pos += style.inverseFg(buf[pos..], .red);
+            pos += cp(buf[pos..], " ");
+            pos += cp(buf[pos..], style.box.cross);
+            pos += cp(buf[pos..], " failed ");
+            pos += style.reset(buf[pos..]);
         }
         if (self.show_cwd_only) {
-            pos += cp(buf[pos..], "  \x1b[34;7m cwd \x1b[0m"); // blue inverse
+            pos += cp(buf[pos..], "  ");
+            pos += style.inverseFg(buf[pos..], .blue);
+            pos += cp(buf[pos..], " cwd ");
+            pos += style.reset(buf[pos..]);
         }
-        pos += cp(buf[pos..], "\x1b[K\r\n");
+        pos += style.clearLine(buf[pos..]);
+        pos += style.crlf(buf[pos..]);
 
         // ── Separator ──
-        pos += cp(buf[pos..], "\x1b[2m");
-        { var w: usize = 0; while (w < cols and pos < buf.len - 3) : (w += 1) {
-            buf[pos] = 0xe2; buf[pos + 1] = 0x94; buf[pos + 2] = 0x80; pos += 3; // ─
-        }}
-        pos += cp(buf[pos..], "\x1b[0m\r\n");
+        pos += style.dim(buf[pos..]);
+        pos += style.hline(buf[pos..], cols);
+        pos += style.reset(buf[pos..]);
+        pos += style.crlf(buf[pos..]);
 
         // ── Entries ──
         const max_vis = self.visibleRows();
@@ -256,14 +266,15 @@ const State = struct {
         if (self.scored_count == 0) {
             const empty_row = rows / 2;
             { var er: usize = 3; while (er < empty_row and pos < buf.len - 20) : (er += 1) {
-                pos += cp(buf[pos..], "\x1b[K\r\n");
+                pos += style.clearLine(buf[pos..]);
+                pos += style.crlf(buf[pos..]);
             }}
             const msg = if (self.filter_len > 0) "No matching commands" else "No history yet";
             const pad_l = if (cols > msg.len) (cols - msg.len) / 2 else 0;
             { var pl: usize = 0; while (pl < pad_l and pos < buf.len) : (pl += 1) { buf[pos] = ' '; pos += 1; } }
-            pos += cp(buf[pos..], "\x1b[2m");
-            pos += cp(buf[pos..], msg);
-            pos += cp(buf[pos..], "\x1b[0m\x1b[K\r\n");
+            pos += style.dimText(buf[pos..], msg);
+            pos += style.clearLine(buf[pos..]);
+            pos += style.crlf(buf[pos..]);
         } else {
             for (self.scroll..vis_end) |vi| {
                 const ei = self.scored_idx[vi];
@@ -272,16 +283,18 @@ const State = struct {
 
                 // Arrow / padding
                 if (is_sel) {
-                    pos += cp(buf[pos..], "\x1b[36m > \x1b[0m"); // cyan arrow
+                    pos += style.colored(buf[pos..], .cyan, " > ");
                 } else {
                     pos += cp(buf[pos..], "   ");
                 }
 
                 // Status icon
                 if (e.exit_code == 0) {
-                    pos += cp(buf[pos..], "\x1b[32m\xe2\x97\x8f\x1b[0m "); // ● green
+                    pos += style.colored(buf[pos..], .green, style.box.bullet);
+                    pos += cp(buf[pos..], " ");
                 } else {
-                    pos += cp(buf[pos..], "\x1b[31m\xe2\x9c\x97\x1b[0m "); // ✗ red
+                    pos += style.colored(buf[pos..], .red, style.box.cross);
+                    pos += cp(buf[pos..], " ");
                 }
 
                 // Command text
@@ -290,9 +303,9 @@ const State = struct {
                 const max_cmd = if (cols > right_info_w + 6) cols - right_info_w - 6 else 20;
                 const disp_len = @min(cmd.len, max_cmd);
 
-                if (is_sel) pos += cp(buf[pos..], "\x1b[1m"); // bold
+                if (is_sel) pos += style.bold(buf[pos..]);
                 pos += cp(buf[pos..], cmd[0..disp_len]);
-                if (cmd.len > max_cmd) pos += cp(buf[pos..], "\xe2\x80\xa6"); // …
+                if (cmd.len > max_cmd) pos += cp(buf[pos..], style.box.ellipsis);
 
                 // Right-align: duration + relative time
                 const age = relativeTime(e.started_at);
@@ -314,22 +327,24 @@ const State = struct {
                 }
 
                 if (has_dur) {
-                    pos += cp(buf[pos..], "\x1b[33m"); // yellow
-                    pos += cp(buf[pos..], dur_str);
-                    pos += cp(buf[pos..], "\x1b[0m  ");
+                    pos += style.colored(buf[pos..], .yellow, dur_str);
+                    pos += cp(buf[pos..], "  ");
                 }
-                pos += cp(buf[pos..], "\x1b[2m"); // dim timestamp
-                pos += cp(buf[pos..], age);
+                pos += style.dimText(buf[pos..], age);
 
-                pos += cp(buf[pos..], "\x1b[0m\x1b[K\r\n");
+                pos += style.clearLine(buf[pos..]);
+                pos += style.crlf(buf[pos..]);
 
                 // Detail row (cwd)
                 if (is_sel and self.show_detail and e.cwd.len > 0) {
-                    pos += cp(buf[pos..], "     \x1b[2;36m"); // dim cyan
+                    pos += cp(buf[pos..], "     ");
+                    pos += style.dimFg(buf[pos..], .cyan);
                     const max_cwd = if (cols > 10) cols - 10 else cols;
                     const cwd_len = @min(e.cwd.len, max_cwd);
                     pos += cp(buf[pos..], e.cwd[0..cwd_len]);
-                    pos += cp(buf[pos..], "\x1b[0m\x1b[K\r\n");
+                    pos += style.reset(buf[pos..]);
+                    pos += style.clearLine(buf[pos..]);
+                    pos += style.crlf(buf[pos..]);
                 }
             }
         }
@@ -338,7 +353,8 @@ const State = struct {
         const detail_extra: usize = if (self.show_detail and self.scored_count > 0) 1 else 0;
         const used_rows = 3 + (vis_end - self.scroll) + detail_extra;
         { var r: usize = used_rows; while (r + 2 < rows and pos < buf.len - 10) : (r += 1) {
-            pos += cp(buf[pos..], "\x1b[K\r\n");
+            pos += style.clearLine(buf[pos..]);
+            pos += style.crlf(buf[pos..]);
         }}
 
         // ── Scrollbar ──
@@ -350,17 +366,15 @@ const State = struct {
             for (0..max_vis) |ri| {
                 const row = 4 + ri;
                 const in_bar = ri >= bar_pos and ri < bar_pos + bar_h;
-                const ch: []const u8 = if (in_bar) "\x1b[2m\xe2\x96\x90\x1b[0m" else "\x1b[2m\xe2\x96\x91\x1b[0m";
-                const goto = std.fmt.bufPrint(buf[pos..], "\x1b[{d};{d}H", .{ row, cols }) catch "";
-                pos += goto.len;
-                pos += cp(buf[pos..], ch);
+                const glyph: []const u8 = if (in_bar) style.box.scrollbar_thumb else style.box.scrollbar_track;
+                pos += style.moveTo(buf[pos..], row, cols);
+                pos += style.dimText(buf[pos..], glyph);
             }
         }
 
         // ── Status bar (dim) ──
-        const status_row = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H", .{rows}) catch "";
-        pos += status_row.len;
-        pos += cp(buf[pos..], "\x1b[2m");
+        pos += style.moveTo(buf[pos..], rows, 1);
+        pos += style.dim(buf[pos..]);
         pos += cp(buf[pos..], "  ");
         pos += renderPill(buf[pos..], "Enter", "rerun");
         pos += cp(buf[pos..], " ");
@@ -371,12 +385,12 @@ const State = struct {
         pos += renderPill(buf[pos..], "^F", if (self.show_failed_only) "all" else "failed");
         pos += cp(buf[pos..], " ");
         pos += renderPill(buf[pos..], "^D", if (self.show_cwd_only) "all dirs" else "this dir");
-        pos += cp(buf[pos..], "\x1b[0m\x1b[K");
+        pos += style.reset(buf[pos..]);
+        pos += style.clearLine(buf[pos..]);
 
         // Cursor in filter bar
         const cursor_col = 5 + self.filter_len;
-        const goto_filter = std.fmt.bufPrint(buf[pos..], "\x1b[2;{d}H", .{cursor_col}) catch "";
-        pos += goto_filter.len;
+        pos += style.moveTo(buf[pos..], 2, cursor_col);
 
         tty.writeAll(buf[0..pos]) catch {};
     }
@@ -388,9 +402,10 @@ const State = struct {
 
 fn renderPill(dest: []u8, key: []const u8, label: []const u8) usize {
     var pos: usize = 0;
-    pos += cp(dest[pos..], "\x1b[1m"); // bold key
+    pos += style.bold(dest[pos..]);
     pos += cp(dest[pos..], key);
-    pos += cp(dest[pos..], "\x1b[22m "); // unbold, space
+    pos += style.unbold(dest[pos..]);
+    pos += cp(dest[pos..], " ");
     pos += cp(dest[pos..], label);
     pos += cp(dest[pos..], "  ");
     return pos;

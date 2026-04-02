@@ -12,6 +12,7 @@ const std = @import("std");
 const lua_api = @import("lua_api.zig");
 const environ_mod = @import("environ.zig");
 const sqlite = @import("sqlite.zig");
+const style = @import("style.zig");
 
 const MAX_TRACKED_VARS = 32;
 
@@ -103,7 +104,13 @@ fn loadLuaConfig(path: []const u8, lua: lua_api.LuaState, dir: []const u8, stdou
         const err = c_api.lua_tolstring(state, -1, null);
         if (err) |e| {
             var buf: [512]u8 = undefined;
-            stdout.writeAll(std.fmt.bufPrint(&buf, "\x1b[33mdir-env: error loading {s}: {s}\x1b[0m\n", .{ path, std.mem.span(e) }) catch "") catch {};
+            var pos: usize = 0;
+            pos += style.fg(buf[pos..], .yellow);
+            pos += (std.fmt.bufPrint(buf[pos..], "dir-env: error loading {s}: {s}", .{ path, std.mem.span(e) }) catch "").len;
+            pos += style.reset(buf[pos..]);
+            buf[pos] = '\n';
+            pos += 1;
+            stdout.writeAll(buf[0..pos]) catch {};
         }
         c_api.lua_settop(state, -(1) - 1);
         return;
@@ -113,7 +120,13 @@ fn loadLuaConfig(path: []const u8, lua: lua_api.LuaState, dir: []const u8, stdou
         const err = c_api.lua_tolstring(state, -1, null);
         if (err) |e| {
             var buf: [512]u8 = undefined;
-            stdout.writeAll(std.fmt.bufPrint(&buf, "\x1b[33mdir-env: {s}\x1b[0m\n", .{std.mem.span(e)}) catch "") catch {};
+            var pos: usize = 0;
+            pos += style.fg(buf[pos..], .yellow);
+            pos += (std.fmt.bufPrint(buf[pos..], "dir-env: {s}", .{std.mem.span(e)}) catch "").len;
+            pos += style.reset(buf[pos..]);
+            buf[pos] = '\n';
+            pos += 1;
+            stdout.writeAll(buf[0..pos]) catch {};
         }
         c_api.lua_settop(state, -(1) - 1);
         return;
@@ -126,8 +139,12 @@ fn loadLuaConfig(path: []const u8, lua: lua_api.LuaState, dir: []const u8, stdou
     state_val.path_len = len;
     current = state_val;
 
-    var buf: [512]u8 = undefined;
-    stdout.writeAll(std.fmt.bufPrint(&buf, "\x1b[2mdir-env: loaded .xyron.lua\x1b[0m\n", .{}) catch "") catch {};
+    var buf: [128]u8 = undefined;
+    var pos: usize = 0;
+    pos += style.dimText(buf[pos..], "dir-env: loaded .xyron.lua");
+    buf[pos] = '\n';
+    pos += 1;
+    stdout.writeAll(buf[0..pos]) catch {};
 }
 
 fn loadDotEnv(path: []const u8, dir: []const u8, env: *environ_mod.Environ, stdout: std.fs.File) void {
@@ -183,7 +200,13 @@ fn loadDotEnv(path: []const u8, dir: []const u8, env: *environ_mod.Environ, stdo
     if (state_val.count > 0) {
         current = state_val;
         var buf: [128]u8 = undefined;
-        stdout.writeAll(std.fmt.bufPrint(&buf, "\x1b[2mdir-env: loaded .env ({d} vars)\x1b[0m\n", .{state_val.count}) catch "") catch {};
+        var pos: usize = 0;
+        pos += style.dim(buf[pos..]);
+        pos += (std.fmt.bufPrint(buf[pos..], "dir-env: loaded .env ({d} vars)", .{state_val.count}) catch "").len;
+        pos += style.reset(buf[pos..]);
+        buf[pos] = '\n';
+        pos += 1;
+        stdout.writeAll(buf[0..pos]) catch {};
     }
 }
 
@@ -200,7 +223,13 @@ fn unloadDirEnv(state: *const DirState, env: *environ_mod.Environ, stdout: std.f
     }
     if (state.count > 0) {
         var buf: [128]u8 = undefined;
-        stdout.writeAll(std.fmt.bufPrint(&buf, "\x1b[2mdir-env: unloaded {d} vars\x1b[0m\n", .{state.count}) catch "") catch {};
+        var pos: usize = 0;
+        pos += style.dim(buf[pos..]);
+        pos += (std.fmt.bufPrint(buf[pos..], "dir-env: unloaded {d} vars", .{state.count}) catch "").len;
+        pos += style.reset(buf[pos..]);
+        buf[pos] = '\n';
+        pos += 1;
+        stdout.writeAll(buf[0..pos]) catch {};
     }
 }
 
@@ -228,7 +257,11 @@ fn markTrusted(dir: []const u8) void {
 fn trustPrompt(dir: []const u8, filename: []const u8, stdout: std.fs.File) bool {
     // Show prompt asking user to trust this directory
     var buf: [512]u8 = undefined;
-    stdout.writeAll(std.fmt.bufPrint(&buf, "\x1b[33mdir-env: {s} found {s}. Trust this directory? [y/N] \x1b[0m", .{ dir, filename }) catch "") catch {};
+    var pos: usize = 0;
+    pos += style.fg(buf[pos..], .yellow);
+    pos += (std.fmt.bufPrint(buf[pos..], "dir-env: {s} found {s}. Trust this directory? [y/N] ", .{ dir, filename }) catch "").len;
+    pos += style.reset(buf[pos..]);
+    stdout.writeAll(buf[0..pos]) catch {};
 
     // Read single char from /dev/tty
     const tty = std.fs.openFileAbsolute("/dev/tty", .{ .mode = .read_only }) catch return false;
