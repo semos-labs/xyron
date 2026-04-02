@@ -340,6 +340,7 @@ pub fn runCaptureAndPrintRaw(
     steps: []const @import("planner.zig").PlanStep,
     stdout: std.fs.File,
 ) u8 {
+    _ = stdout;
     // Build shell command from pipeline steps
     var sh_cmd: [4096]u8 = undefined;
     var sh_len: usize = 0;
@@ -358,57 +359,20 @@ pub fn runCaptureAndPrintRaw(
         }
     }
 
+    // Inherit stdout/stderr so output streams in real-time
     var child = std.process.Child.init(
         &.{ "/bin/sh", "-c", sh_cmd[0..sh_len] },
         std.heap.page_allocator,
     );
     child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
 
-    child.spawn() catch {
-        stdout.writeAll("xyron: failed to run command\n") catch {};
-        return 127;
-    };
-
-    var out_buf: [65536]u8 = undefined;
-    var total: usize = 0;
-    if (child.stdout) |f| {
-        while (total < out_buf.len) {
-            const n = f.read(out_buf[total..]) catch break;
-            if (n == 0) break;
-            total += n;
-        }
-        var drain: [4096]u8 = undefined;
-        while (true) { const n = f.read(&drain) catch break; if (n == 0) break; }
-    }
-    if (child.stderr) |f| {
-        while (total < out_buf.len) {
-            const n = f.read(out_buf[total..]) catch break;
-            if (n == 0) break;
-            total += n;
-        }
-        var drain: [4096]u8 = undefined;
-        while (true) { const n = f.read(&drain) catch break; if (n == 0) break; }
-    }
-
+    child.spawn() catch return 127;
     const term = child.wait() catch return 127;
     const code: u8 = switch (term) { .Exited => |c| c, else => 1 };
 
-    const output = out_buf[0..total];
-
-    // Print raw output (no borders)
-    if (output.len > 0) {
-        stdout.writeAll(output) catch {};
-        // Ensure trailing newline
-        if (output[output.len - 1] != '\n') stdout.writeAll("\n") catch {};
-    }
-
-    // Store for overlay restoration (trimmed)
-    var trimmed = output;
-    while (trimmed.len > 0 and trimmed[trimmed.len - 1] == '\n') trimmed = trimmed[0 .. trimmed.len - 1];
-    storeBlock(display, trimmed, code);
-
+    storeBlock(display, "", code);
     return code;
 }
 
