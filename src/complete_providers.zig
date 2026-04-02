@@ -81,6 +81,7 @@ fn provideBuiltins(out: *complete.CandidateBuffer, prefix: []const u8) void {
         .{ .name = "popup", .desc = "Show content in popup" },
         .{ .name = "inspect", .desc = "Inspect runtime objects" },
         .{ .name = "jump", .desc = "Smart directory jumper" },
+        .{ .name = "xyron", .desc = "Shell utilities" },
         .{ .name = "j", .desc = "Jump to directory (shorthand)" },
     };
     for (entries) |e| {

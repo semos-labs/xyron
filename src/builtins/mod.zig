@@ -41,11 +41,12 @@ const sort_cmd = @import("sort_cmd.zig");
 const csv_cmd = @import("csv.zig");
 const fz_cmd = @import("fz.zig");
 const jump_cmd = @import("jump.zig");
+const xyron_cmd = @import("xyron_cmd.zig");
 
 const builtin_names = [_][]const u8{
     "cd", "pwd", "exit", "export", "unset", "env", "which", "type",
     "history", "jobs", "fg", "bg", "alias", "exec", "popup", "inspect",
-    "ls", "ps", "json", "query", "select", "where", "sort", "csv", "fz", "migrate", "jump", "j",
+    "ls", "ps", "json", "query", "select", "where", "sort", "csv", "fz", "migrate", "jump", "j", "xyron",
 };
 
 const process_only_names = [_][]const u8{
@@ -99,6 +100,7 @@ pub fn execute(
     if (std.mem.eql(u8, name, "fz")) return fz_cmd.run(args, stdout);
     if (std.mem.eql(u8, name, "jump")) return jump_cmd.run(args, stdout, stderr);
     if (std.mem.eql(u8, name, "j")) return jump_cmd.runJ(args, stderr);
+    if (std.mem.eql(u8, name, "xyron")) return xyron_cmd.run(args, stdout, stderr);
     if (std.mem.eql(u8, name, "migrate")) return migrate.run(args, stdout, stderr);
     if (std.mem.eql(u8, name, "popup")) return popup.run(args, stdout);
     if (std.mem.eql(u8, name, "inspect")) return inspect.run(args, stdout, hdb);

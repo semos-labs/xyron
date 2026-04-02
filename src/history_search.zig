@@ -1,18 +1,16 @@
 // history_search.zig — Full-screen history search (Ctrl+R).
 //
-// Atuin-style interactive search: shows recent history entries with
-// duration and relative timestamps, supports fuzzy filtering,
-// navigating with arrows, and inserting the selected command.
+// Alternate-screen TUI matching the history explorer design language.
+// Fuzzy search, deduped entries, duration + relative time display.
 
 const std = @import("std");
 const posix = std.posix;
-const keys = @import("keys.zig");
+const c = std.c;
 const fuzzy = @import("fuzzy.zig");
 const history_db_mod = @import("history_db.zig");
-const types = @import("types.zig");
+const prompt_mod = @import("prompt.zig");
 
 const MAX_ENTRIES: usize = 200;
-const MAX_VISIBLE: usize = 20;
 
 const Entry = struct {
     id: i64,
@@ -32,19 +30,40 @@ pub const SearchResult = union(enum) {
     cancelled,
 };
 
-/// Run the interactive history search. Returns the selected command or cancelled.
 pub fn run(
     hdb: ?*history_db_mod.HistoryDb,
     stdout: std.fs.File,
 ) SearchResult {
+    _ = stdout;
     const db = hdb orelse return .cancelled;
 
-    // Load entries from DB
     var entries: [MAX_ENTRIES]Entry = undefined;
     const total = loadEntries(db, &entries);
     if (total == 0) return .cancelled;
 
-    // Filter/score state
+    // Open tty for interactive I/O
+    const tty_fd = posix.openZ("/dev/tty", .{ .ACCMODE = .RDWR }, 0) catch return .cancelled;
+    defer posix.close(tty_fd);
+    const tty = std.fs.File{ .handle = tty_fd };
+
+    // Raw mode on tty
+    var orig: c.termios = undefined;
+    _ = c.tcgetattr(tty_fd, &orig);
+    var raw = orig;
+    raw.lflag.ECHO = false;
+    raw.lflag.ICANON = false;
+    raw.lflag.ISIG = false;
+    raw.cc[@intFromEnum(posix.V.MIN)] = 1;
+    raw.cc[@intFromEnum(posix.V.TIME)] = 0;
+    _ = c.tcsetattr(tty_fd, .NOW, &raw);
+    defer _ = c.tcsetattr(tty_fd, .NOW, &orig);
+
+    // Alternate screen
+    tty.writeAll("\x1b[?1049h\x1b[?25h") catch {};
+    var alt_active = true;
+    defer if (alt_active) tty.writeAll("\x1b[?25h\x1b[?1049l") catch {};
+
+    // State
     var filter: [128]u8 = undefined;
     var filter_len: usize = 0;
     var scored_idx: [MAX_ENTRIES]usize = undefined;
@@ -52,71 +71,99 @@ pub fn run(
     var scored_count: usize = 0;
     var selected: usize = 0;
     var scroll: usize = 0;
+    var ts = getTermSize(tty_fd);
 
-    // Initial: all entries, newest first
     scoreEntries(&entries, total, filter[0..0], &scored_idx, &scored_vals, &scored_count);
-
-    const term_h = getTermHeight();
-    const max_vis = @min(MAX_VISIBLE, if (term_h > 4) term_h - 3 else 5);
-
-    renderSearch(stdout, &entries, &scored_idx, scored_count, selected, scroll, max_vis, filter[0..filter_len]);
+    render(tty, &entries, &scored_idx, scored_count, selected, scroll, filter[0..filter_len], ts);
 
     while (true) {
-        const key = keys.readKey() catch break;
+        var key_buf: [1]u8 = undefined;
+        const rc = c.read(tty_fd, &key_buf, 1);
+        if (rc == -1) {
+            // EINTR from SIGWINCH — resize
+            ts = getTermSize(tty_fd);
+            render(tty, &entries, &scored_idx, scored_count, selected, scroll, filter[0..filter_len], ts);
+            continue;
+        }
+        if (rc <= 0) break;
 
-        switch (key) {
-            .enter => {
-                clearArea(stdout, max_vis + 2);
+        const max_vis = visibleRows(ts);
+
+        switch (key_buf[0]) {
+            10, 13 => { // Enter — select
+                if (alt_active) { tty.writeAll("\x1b[?25h\x1b[?1049l") catch {}; alt_active = false; }
                 if (scored_count > 0) {
                     const idx = scored_idx[selected];
                     return .{ .selected = entries[idx].rawSlice() };
                 }
                 return .cancelled;
             },
-            .escape, .ctrl_c, .ctrl_r => {
-                clearArea(stdout, max_vis + 2);
-                return .cancelled;
+            27 => { // Escape / arrows
+                var seq: [2]u8 = undefined;
+                const rc2 = c.read(tty_fd, &seq, 2);
+                if (rc2 == 2 and seq[0] == '[') {
+                    switch (seq[1]) {
+                        'C' => { // Right arrow — select
+                            if (alt_active) { tty.writeAll("\x1b[?25h\x1b[?1049l") catch {}; alt_active = false; }
+                            if (scored_count > 0) {
+                                const idx2 = scored_idx[selected];
+                                return .{ .selected = entries[idx2].rawSlice() };
+                            }
+                            return .cancelled;
+                        },
+                        'A' => { // Up
+                            if (selected > 0) selected -= 1;
+                            if (selected < scroll) scroll = selected;
+                        },
+                        'B' => { // Down
+                            if (scored_count > 0 and selected + 1 < scored_count) selected += 1;
+                            if (selected >= scroll + max_vis) scroll = selected - max_vis + 1;
+                        },
+                        else => {},
+                    }
+                } else if (rc2 <= 0) break; // plain Escape
             },
-            .up => {
+            3, 18 => break, // Ctrl+C, Ctrl+R again = cancel
+            16 => { // Ctrl+P — up
                 if (selected > 0) selected -= 1;
                 if (selected < scroll) scroll = selected;
             },
-            .down => {
+            14 => { // Ctrl+N — down
                 if (scored_count > 0 and selected + 1 < scored_count) selected += 1;
                 if (selected >= scroll + max_vis) scroll = selected - max_vis + 1;
             },
-            .tab => {
-                if (scored_count > 0) {
-                    selected = if (selected + 1 >= scored_count) 0 else selected + 1;
-                    if (selected >= scroll + max_vis) scroll = selected - max_vis + 1;
-                    if (selected < scroll) scroll = selected;
-                }
+            21 => { // Ctrl+U — clear
+                filter_len = 0;
+                rescore(&entries, total, filter[0..filter_len], &scored_idx, &scored_vals, &scored_count, &selected, &scroll);
             },
-            .backspace => {
+            23 => { // Ctrl+W — delete word
+                while (filter_len > 0 and filter[filter_len - 1] == ' ') filter_len -= 1;
+                while (filter_len > 0 and filter[filter_len - 1] != ' ') filter_len -= 1;
+                rescore(&entries, total, filter[0..filter_len], &scored_idx, &scored_vals, &scored_count, &selected, &scroll);
+            },
+            127, 8 => { // Backspace
                 if (filter_len > 0) {
                     filter_len -= 1;
                     rescore(&entries, total, filter[0..filter_len], &scored_idx, &scored_vals, &scored_count, &selected, &scroll);
                 }
             },
-            .char => |ch| {
-                if (ch >= 32 and filter_len < 128) {
+            else => |ch| {
+                if (ch >= 32 and ch < 127 and filter_len < 128) {
                     filter[filter_len] = ch;
                     filter_len += 1;
                     rescore(&entries, total, filter[0..filter_len], &scored_idx, &scored_vals, &scored_count, &selected, &scroll);
                 }
             },
-            else => {},
         }
 
-        renderSearch(stdout, &entries, &scored_idx, scored_count, selected, scroll, max_vis, filter[0..filter_len]);
+        render(tty, &entries, &scored_idx, scored_count, selected, scroll, filter[0..filter_len], ts);
     }
 
-    clearArea(stdout, max_vis + 2);
     return .cancelled;
 }
 
 // ---------------------------------------------------------------------------
-// Loading and scoring
+// Loading / scoring
 // ---------------------------------------------------------------------------
 
 fn loadEntries(db: *history_db_mod.HistoryDb, entries: *[MAX_ENTRIES]Entry) usize {
@@ -124,14 +171,10 @@ fn loadEntries(db: *history_db_mod.HistoryDb, entries: *[MAX_ENTRIES]Entry) usiz
     var str_buf: [MAX_ENTRIES * 256]u8 = undefined;
     const count = db.recentEntries(&raw_entries, &str_buf);
 
-    // Dedupe: keep only the most recent occurrence of each command.
-    // Entries come newest-first, so first occurrence wins.
     var deduped: usize = 0;
     for (0..count) |i| {
         const e = &raw_entries[i];
         const rl = @min(e.raw_input.len, 256);
-
-        // Check if this command already exists in deduped entries
         var dupe = false;
         for (0..deduped) |j| {
             if (entries[j].raw_len == rl and std.mem.eql(u8, entries[j].raw[0..rl], e.raw_input[0..rl])) {
@@ -140,7 +183,6 @@ fn loadEntries(db: *history_db_mod.HistoryDb, entries: *[MAX_ENTRIES]Entry) usiz
             }
         }
         if (dupe) continue;
-
         entries[deduped].id = e.id;
         @memcpy(entries[deduped].raw[0..rl], e.raw_input[0..rl]);
         entries[deduped].raw_len = rl;
@@ -195,150 +237,206 @@ fn rescore(
     scroll: *usize,
 ) void {
     scoreEntries(entries, total, filter, idx, vals, count);
-    if (selected.* >= count.*) selected.* = if (count.* > 0) count.* - 1 else 0;
-    if (scroll.* > selected.*) scroll.* = selected.*;
+    selected.* = 0;
+    scroll.* = 0;
 }
 
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 
-fn renderSearch(
-    stdout: std.fs.File,
+const TermSize = struct { rows: usize, cols: usize };
+
+fn visibleRows(ts: TermSize) usize {
+    const header = 3; // title + filter + separator
+    const footer = 2; // empty + status bar
+    return if (ts.rows > header + footer) ts.rows - header - footer else 1;
+}
+
+fn render(
+    tty: std.fs.File,
     entries: *const [MAX_ENTRIES]Entry,
     scored_idx: *const [MAX_ENTRIES]usize,
     count: usize,
     selected: usize,
     scroll: usize,
-    max_vis: usize,
     filter: []const u8,
+    ts: TermSize,
 ) void {
-    var buf: [16384]u8 = undefined;
+    var buf: [65536]u8 = undefined;
     var pos: usize = 0;
+    const cols = ts.cols;
+    const rows = ts.rows;
 
-    // Search prompt line
-    pos += cp(buf[pos..], "\r\x1b[J"); // clear from cursor down
-    pos += cp(buf[pos..], "\x1b[1;36m  history\x1b[0m \x1b[2m[\x1b[0m");
+    pos += cp(buf[pos..], "\x1b[H");
+
+    // ── Title bar ──
+    pos += cp(buf[pos..], "\x1b[2m");
+    pos += cp(buf[pos..], "  History Search");
+    const tw: usize = 16;
+    var count_buf: [32]u8 = undefined;
+    const count_str = std.fmt.bufPrint(&count_buf, "{d} matches", .{count}) catch "";
+    const count_pad = if (cols > tw + count_str.len + 4) cols - tw - count_str.len - 4 else 1;
+    { var p: usize = 0; while (p < count_pad and pos < buf.len) : (p += 1) { buf[pos] = ' '; pos += 1; } }
+    pos += cp(buf[pos..], count_str);
+    pos += cp(buf[pos..], "  \x1b[0m\x1b[K\r\n");
+
+    // ── Filter bar ──
+    pos += cp(buf[pos..], "  \x1b[33m> \x1b[0m");
     if (filter.len > 0) {
+        pos += cp(buf[pos..], "\x1b[1m");
         pos += cp(buf[pos..], filter);
-    }
-    pos += cp(buf[pos..], "\x1b[2m]\x1b[0m\r\n");
-
-    const now = types.timestampMs();
-    const visible_end = @min(scroll + max_vis, count);
-
-    for (scroll..visible_end) |i| {
-        const idx = scored_idx[i];
-        const e = &entries[idx];
-        const is_sel = (i == selected);
-
-        pos += cp(buf[pos..], "\x1b[K"); // clear line
-
-        // Selection indicator
-        if (is_sel) {
-            pos += cp(buf[pos..], "\x1b[48;5;236m\x1b[1;32m > \x1b[0m\x1b[48;5;236m");
-        } else {
-            pos += cp(buf[pos..], "   ");
-        }
-
-        // Duration
-        var dur_buf: [12]u8 = undefined;
-        const dur_str = formatDuration(&dur_buf, e.duration_ms);
-        if (is_sel) pos += cp(buf[pos..], "\x1b[48;5;236m");
-        pos += cp(buf[pos..], "\x1b[33m");
-        // Right-align duration in 6 chars
-        const dur_pad = if (6 > dur_str.len) 6 - dur_str.len else 0;
-        for (0..dur_pad) |_| { if (pos < buf.len) { buf[pos] = ' '; pos += 1; } }
-        pos += cp(buf[pos..], dur_str);
         pos += cp(buf[pos..], "\x1b[0m");
+    } else {
+        pos += cp(buf[pos..], "\x1b[2msearch...\x1b[0m");
+    }
+    pos += cp(buf[pos..], "\x1b[K\r\n");
 
-        // Time ago
-        if (is_sel) pos += cp(buf[pos..], "\x1b[48;5;236m");
+    // ── Separator ──
+    pos += cp(buf[pos..], "\x1b[2m");
+    { var w: usize = 0; while (w < cols and pos < buf.len - 3) : (w += 1) {
+        buf[pos] = 0xe2; buf[pos + 1] = 0x94; buf[pos + 2] = 0x80; pos += 3;
+    }}
+    pos += cp(buf[pos..], "\x1b[0m\r\n");
+
+    // ── Entries ──
+    const max_vis = visibleRows(ts);
+    const vis_end = @min(scroll + max_vis, count);
+
+    if (count == 0) {
+        const empty_row = rows / 2;
+        { var er: usize = 3; while (er < empty_row and pos < buf.len - 20) : (er += 1) {
+            pos += cp(buf[pos..], "\x1b[K\r\n");
+        }}
+        const msg = if (filter.len > 0) "No matches" else "No history";
+        const pad_l = if (cols > msg.len) (cols - msg.len) / 2 else 0;
+        { var pl: usize = 0; while (pl < pad_l and pos < buf.len) : (pl += 1) { buf[pos] = ' '; pos += 1; } }
         pos += cp(buf[pos..], "\x1b[2m");
-        var ago_buf: [16]u8 = undefined;
-        const ago_str = formatTimeAgo(&ago_buf, e.started_at, now);
-        // Right-align in 8 chars
-        const ago_pad = if (8 > ago_str.len) 8 - ago_str.len else 0;
-        for (0..ago_pad) |_| { if (pos < buf.len) { buf[pos] = ' '; pos += 1; } }
-        pos += cp(buf[pos..], ago_str);
-        pos += cp(buf[pos..], "\x1b[0m ");
+        pos += cp(buf[pos..], msg);
+        pos += cp(buf[pos..], "\x1b[0m\x1b[K\r\n");
+    } else {
+        for (scroll..vis_end) |vi| {
+            const idx = scored_idx[vi];
+            const e = &entries[idx];
+            const is_sel = vi == selected;
 
-        // Command text
-        if (is_sel) pos += cp(buf[pos..], "\x1b[48;5;236m\x1b[1;37m") else pos += cp(buf[pos..], "\x1b[37m");
-        pos += cp(buf[pos..], e.rawSlice());
-        pos += cp(buf[pos..], "\x1b[0m");
+            // Arrow
+            if (is_sel) {
+                pos += cp(buf[pos..], "\x1b[36m > \x1b[0m");
+            } else {
+                pos += cp(buf[pos..], "   ");
+            }
 
-        // Exit code indicator
-        if (e.exit_code != 0) {
-            pos += cp(buf[pos..], " \x1b[31m✘\x1b[0m");
-        }
+            // Status icon
+            if (e.exit_code == 0) {
+                pos += cp(buf[pos..], "\x1b[32m\xe2\x97\x8f\x1b[0m ");
+            } else {
+                pos += cp(buf[pos..], "\x1b[31m\xe2\x9c\x97\x1b[0m ");
+            }
 
-        pos += cp(buf[pos..], "\r\n");
+            // Command text
+            const cmd = e.rawSlice();
+            const right_w: usize = 20;
+            const max_cmd = if (cols > right_w + 6) cols - right_w - 6 else 20;
+            const disp_len = @min(cmd.len, max_cmd);
 
-        if (pos > buf.len - 512) {
-            stdout.writeAll(buf[0..pos]) catch {};
-            pos = 0;
+            if (is_sel) pos += cp(buf[pos..], "\x1b[1m");
+            pos += cp(buf[pos..], cmd[0..disp_len]);
+            if (cmd.len > max_cmd) pos += cp(buf[pos..], "\xe2\x80\xa6");
+            pos += cp(buf[pos..], "\x1b[0m");
+
+            // Right-align: duration + time
+            const age = relativeTime(e.started_at);
+            var rw: usize = age.len;
+            var has_dur = false;
+            var dur_str: []const u8 = "";
+            if (e.duration_ms >= 100) {
+                var dur_buf: [16]u8 = undefined;
+                dur_str = prompt_mod.formatDuration(&dur_buf, e.duration_ms);
+                rw += dur_str.len + 2;
+                has_dur = true;
+            }
+
+            const cmd_vis = disp_len + @as(usize, if (cmd.len > max_cmd) 1 else 0);
+            const used = 5 + cmd_vis;
+            if (cols > used + rw + 2) {
+                const gap = cols - used - rw - 2;
+                { var g: usize = 0; while (g < gap and pos < buf.len) : (g += 1) { buf[pos] = ' '; pos += 1; } }
+            }
+
+            if (has_dur) {
+                pos += cp(buf[pos..], "\x1b[33m");
+                pos += cp(buf[pos..], dur_str);
+                pos += cp(buf[pos..], "\x1b[0m  ");
+            }
+            pos += cp(buf[pos..], "\x1b[2m");
+            pos += cp(buf[pos..], age);
+            pos += cp(buf[pos..], "\x1b[0m\x1b[K\r\n");
         }
     }
 
-    // Clear remaining lines
-    for (0..max_vis -| (visible_end - scroll)) |_| {
+    // Pad remaining
+    const used_rows = 3 + (vis_end - scroll);
+    { var r: usize = used_rows; while (r + 2 < rows and pos < buf.len - 10) : (r += 1) {
         pos += cp(buf[pos..], "\x1b[K\r\n");
+    }}
+
+    // ── Scrollbar ──
+    if (count > max_vis and max_vis > 2) {
+        const bar_h = @max(1, max_vis * max_vis / count);
+        const bar_pos = if (count > max_vis) scroll * (max_vis - bar_h) / (count - max_vis) else 0;
+        for (0..max_vis) |ri| {
+            const row = 4 + ri;
+            const in_bar = ri >= bar_pos and ri < bar_pos + bar_h;
+            const goto = std.fmt.bufPrint(buf[pos..], "\x1b[{d};{d}H", .{ row, cols }) catch "";
+            pos += goto.len;
+            pos += cp(buf[pos..], if (in_bar) "\x1b[2m\xe2\x96\x90\x1b[0m" else "\x1b[2m\xe2\x96\x91\x1b[0m");
+        }
     }
 
-    // Move cursor back to search line
-    const total_lines = max_vis + 1;
-    const n = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{total_lines}) catch "";
-    pos += n.len;
-    // Position cursor in search field
-    const cursor_col = 12 + filter.len; // "  history [" = 12 chars
-    const cn = std.fmt.bufPrint(buf[pos..], "\r\x1b[{d}C", .{cursor_col}) catch "";
-    pos += cn.len;
+    // ── Status bar ──
+    const status_goto = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H", .{rows}) catch "";
+    pos += status_goto.len;
+    pos += cp(buf[pos..], "\x1b[2m  ");
+    pos += cp(buf[pos..], "\x1b[22;1mEnter\x1b[22m select  ");
+    pos += cp(buf[pos..], "\x1b[1mEsc\x1b[22m cancel  ");
+    pos += cp(buf[pos..], "\x1b[1m^W\x1b[22m del word");
+    pos += cp(buf[pos..], "\x1b[0m\x1b[K");
 
-    stdout.writeAll(buf[0..pos]) catch {};
-}
+    // Cursor in filter
+    const cursor_col = 5 + filter.len;
+    const goto_filter = std.fmt.bufPrint(buf[pos..], "\x1b[2;{d}H", .{cursor_col}) catch "";
+    pos += goto_filter.len;
 
-fn clearArea(stdout: std.fs.File, lines: usize) void {
-    var buf: [512]u8 = undefined;
-    var pos: usize = 0;
-    pos += cp(buf[pos..], "\r\x1b[J"); // clear from cursor down
-    // Move up if needed
-    _ = lines;
-    stdout.writeAll(buf[0..pos]) catch {};
+    tty.writeAll(buf[0..pos]) catch {};
 }
 
 // ---------------------------------------------------------------------------
-// Formatting helpers
+// Helpers
 // ---------------------------------------------------------------------------
 
-fn formatDuration(buf: []u8, ms: i64) []const u8 {
-    if (ms < 0) return "0s";
-    if (ms < 1000) return std.fmt.bufPrint(buf, "{d}ms", .{ms}) catch "?";
-    if (ms < 60000) return std.fmt.bufPrint(buf, "{d}s", .{@divTrunc(ms, 1000)}) catch "?";
-    if (ms < 3600000) return std.fmt.bufPrint(buf, "{d}m", .{@divTrunc(ms, 60000)}) catch "?";
-    return std.fmt.bufPrint(buf, "{d}h", .{@divTrunc(ms, 3600000)}) catch "?";
+var relative_buf: [32]u8 = undefined;
+
+fn relativeTime(started_ms: i64) []const u8 {
+    const now_ms = std.time.milliTimestamp();
+    const age_s = @divTrunc(now_ms - started_ms, 1000);
+    if (age_s < 60) return "just now";
+    if (age_s < 3600) return std.fmt.bufPrint(&relative_buf, "{d}m ago", .{@divTrunc(age_s, 60)}) catch "?";
+    if (age_s < 86400) return std.fmt.bufPrint(&relative_buf, "{d}h ago", .{@divTrunc(age_s, 3600)}) catch "?";
+    if (age_s < 604800) return std.fmt.bufPrint(&relative_buf, "{d}d ago", .{@divTrunc(age_s, 86400)}) catch "?";
+    return std.fmt.bufPrint(&relative_buf, "{d}w ago", .{@divTrunc(age_s, 604800)}) catch "?";
 }
 
-fn formatTimeAgo(buf: []u8, started_at: i64, now: i64) []const u8 {
-    const diff = if (now > started_at) now - started_at else 0;
-    const secs = @divTrunc(diff, 1000);
-    if (secs < 60) return std.fmt.bufPrint(buf, "{d}s ago", .{secs}) catch "?";
-    const mins = @divTrunc(secs, 60);
-    if (mins < 60) return std.fmt.bufPrint(buf, "{d}m ago", .{mins}) catch "?";
-    const hours = @divTrunc(mins, 60);
-    if (hours < 24) return std.fmt.bufPrint(buf, "{d}h ago", .{hours}) catch "?";
-    const days = @divTrunc(hours, 24);
-    return std.fmt.bufPrint(buf, "{d}d ago", .{days}) catch "?";
-}
-
-fn getTermHeight() usize {
-    const c_e = struct {
+fn getTermSize(fd: posix.fd_t) TermSize {
+    const ext = struct {
         const winsize = extern struct { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 };
         extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
     };
-    var ws: c_e.winsize = undefined;
-    if (c_e.ioctl(posix.STDOUT_FILENO, 0x40087468, &ws) == 0 and ws.ws_row > 0) return ws.ws_row;
-    return 24;
+    var ws: ext.winsize = undefined;
+    if (ext.ioctl(fd, 0x40087468, &ws) == 0) {
+        return .{ .rows = if (ws.ws_row > 0) ws.ws_row else 24, .cols = if (ws.ws_col > 0) ws.ws_col else 80 };
+    }
+    return .{ .rows = 24, .cols = 80 };
 }
 
 fn cp(dest: []u8, src: []const u8) usize {

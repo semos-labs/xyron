@@ -61,8 +61,10 @@ pub fn executeGroup(
             return .{ .exit_code = 0, .duration_ms = types.timestampMs() - start };
         }
 
-        // In-process builtin (not background) — always capture output
-        if (step.argv.len > 0 and builtins.isBuiltin(step.argv[0]) and !exec_plan.background) {
+        // In-process builtin (not background) — capture output unless interactive
+        if (step.argv.len > 0 and builtins.isBuiltin(step.argv[0]) and !exec_plan.background
+            and !isInteractiveBuiltin(step.argv))
+        {
             ax.stepStarted(exec_plan, step);
 
             const pipe_fds = posix.pipe2(.{}) catch [2]posix.fd_t{ -1, -1 };
@@ -119,6 +121,16 @@ pub fn executeGroup(
                 return .{ .exit_code = result.exit_code, .duration_ms = dur, .should_exit = result.should_exit };
             }
             // Fall through to external execution
+        }
+
+        // Interactive builtins: run with direct stdout (no capture)
+        if (step.argv.len > 0 and isInteractiveBuiltin(step.argv)) {
+            ax.stepStarted(exec_plan, step);
+            const result = builtins.execute(step.argv, stdout, stderr, env, hdb, job_table);
+            const dur = types.timestampMs() - start;
+            ax.stepFinished(exec_plan, step, result.exit_code, dur);
+            ax.groupFinished(exec_plan, result.exit_code, dur);
+            return .{ .exit_code = result.exit_code, .duration_ms = dur, .should_exit = result.should_exit };
         }
     }
 
@@ -343,6 +355,16 @@ fn waitForForeground(
 // ---------------------------------------------------------------------------
 // Child process setup
 // ---------------------------------------------------------------------------
+
+/// Pipe builtins that render their own tables — skip block UI capture.
+/// Builtins that need direct stdout (interactive I/O, TUI, prompts).
+fn isInteractiveBuiltin(argv: []const []const u8) bool {
+    if (argv.len == 0) return false;
+    const name = argv[0];
+    return std.mem.eql(u8, name, "xyron") or
+        std.mem.eql(u8, name, "fz") or
+        std.mem.eql(u8, name, "jump");
+}
 
 /// Pipe builtins that render their own tables — skip block UI capture.
 fn isPipeBuiltin(name: []const u8) bool {
