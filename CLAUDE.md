@@ -64,6 +64,27 @@ attyx send-keys "exit{Enter}"
 - Prefer explicit over clever
 - **Stack size awareness** — large arrays (>10KB) should be heap-allocated or kept small. The Shell struct lives on the stack.
 
+## TUI design language
+
+All built-in TUI tools (history explorer, fz, Ctrl+R, future tools) must share a consistent look.
+
+**Use standard terminal colors only** (the base 16 + attributes). Never hardcode 256-color or RGB values — the user's terminal theme must be respected.
+
+- **Title bar**: `7m` (inverse), icon + title left, metadata right-aligned `2m` (dim)
+- **Filter/search bar**: `33m` (yellow) `>` prompt, `1m` bold input, `2m` dim placeholder
+- **Active filter pills**: `7m` inverse with color (e.g. `31;7m` red inverse for failed, `34;7m` blue for cwd)
+- **Separator**: `2m` dim `─` line
+- **Selected row**: `7m` inverse, `1m` bold text
+- **Normal row**: default styling
+- **Status indicators**: `32m` green `●` success, `31m` red `✗` failure
+- **Right-aligned metadata**: `33m` yellow for duration, `2m` dim for timestamps
+- **Scrollbar**: right edge, `2m` dim `▐` thumb, `2m` dim `░` track
+- **Status bar**: `7m` inverse, key pills `1m` bold key + normal label
+- **Empty state**: centered `2m` dim message
+- **Cursor**: visible in search input, positioned at end of filter text
+- **Resize**: handle SIGWINCH (EINTR from `c.read`), re-query size, re-render
+- **Alternate screen**: `\x1b[?1049h` on entry, `\x1b[?1049l` on exit (before writing result)
+
 ## What NOT to do
 
 - No POSIX compatibility layer — this is intentional
