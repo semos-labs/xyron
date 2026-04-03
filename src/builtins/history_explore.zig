@@ -427,18 +427,8 @@ fn relativeTime(started_ms: i64) []const u8 {
 const TermSize = struct { rows: usize, cols: usize };
 
 fn getTermSize(fd: posix.fd_t) TermSize {
-    const ext = struct {
-        const winsize = extern struct { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 };
-        extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
-    };
-    var ws: ext.winsize = undefined;
-    if (ext.ioctl(fd, 0x40087468, &ws) == 0) {
-        return .{
-            .rows = if (ws.ws_row > 0) ws.ws_row else 24,
-            .cols = if (ws.ws_col > 0) ws.ws_col else 80,
-        };
-    }
-    return .{ .rows = 24, .cols = 80 };
+    const ts = style.getTermSize(fd);
+    return .{ .rows = ts.rows, .cols = ts.cols };
 }
 
 fn cp(dest: []u8, src: []const u8) usize {

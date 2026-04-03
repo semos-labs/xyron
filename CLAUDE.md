@@ -68,7 +68,7 @@ attyx send-keys "exit{Enter}"
 
 All built-in TUI tools (history explorer, fz, Ctrl+R, future tools) must share a consistent look.
 
-**Use standard terminal colors only** (the base 16 + attributes). Never hardcode 256-color or RGB values — the user's terminal theme must be respected.
+**Use the base 16 terminal colors** (0-15) which are defined by the user's theme. Attyx themes define all 16 palette colors — using these ensures the UI respects the user's chosen aesthetic. Use `38;5;0-15` / `48;5;0-15` or the standard `30-37`/`90-97` codes. Color 8 (`bright_black`) works well as a subtle modal/overlay background. Avoid 256-color indices 16-255 and RGB/truecolor — those bypass the theme.
 
 - **Title bar**: `7m` (inverse), icon + title left, metadata right-aligned `2m` (dim)
 - **Filter/search bar**: `33m` (yellow) `>` prompt, `1m` bold input, `2m` dim placeholder

@@ -296,15 +296,7 @@ pub fn render(buf: *[MAX_PROMPT]u8, ctx: *const PromptContext, lua: lua_api.LuaS
 }
 
 fn getTermWidth() usize {
-    const c_ext = struct {
-        const winsize = extern struct { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 };
-        extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
-    };
-    var ws: c_ext.winsize = undefined;
-    if (c_ext.ioctl(std.posix.STDOUT_FILENO, 0x40087468, &ws) == 0 and ws.ws_col > 0) {
-        return ws.ws_col;
-    }
-    return 80;
+    return style.getTermSize(std.posix.STDOUT_FILENO).cols;
 }
 
 pub const PromptResult = struct {

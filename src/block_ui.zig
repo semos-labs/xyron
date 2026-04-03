@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const posix = std.posix;
+const style = @import("style.zig");
 
 pub var enabled: bool = false;
 
@@ -120,13 +121,7 @@ pub fn reRenderVisible(stdout: std.fs.File) void {
 }
 
 fn getTermHeight() usize {
-    const c_ext = struct {
-        const winsize = extern struct { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 };
-        extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
-    };
-    var ws: c_ext.winsize = undefined;
-    if (c_ext.ioctl(posix.STDOUT_FILENO, 0x40087468, &ws) == 0 and ws.ws_row > 0) return ws.ws_row;
-    return 24;
+    return style.getTermSize(posix.STDOUT_FILENO).rows;
 }
 
 /// Render a block at specific screen rows using absolute positioning.
@@ -724,11 +719,5 @@ pub fn isPassthrough(argv: []const []const u8) bool {
 }
 
 fn getTermWidth() usize {
-    const c_ext = struct {
-        const winsize = extern struct { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 };
-        extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
-    };
-    var ws: c_ext.winsize = undefined;
-    if (c_ext.ioctl(posix.STDOUT_FILENO, 0x40087468, &ws) == 0 and ws.ws_col > 0) return ws.ws_col;
-    return 80;
+    return style.getTermSize(posix.STDOUT_FILENO).cols;
 }

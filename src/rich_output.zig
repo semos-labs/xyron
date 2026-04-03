@@ -5,6 +5,7 @@
 // automatic width calculation.
 
 const std = @import("std");
+const style = @import("style.zig");
 
 pub const MAX_COLS: usize = 12;
 pub const MAX_ROWS: usize = 512;
@@ -180,16 +181,11 @@ fn visibleLen(text: []const u8) usize {
 }
 
 fn getTermWidth() usize {
-    const c_ext = struct {
-        const winsize = extern struct { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 };
-        extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
-    };
-    var ws: c_ext.winsize = undefined;
-    // Try stdout first, then stderr, then /dev/tty.
+    // Try stdout first, then stderr.
     // When stdout is a pipe (block UI capture), stdout ioctl fails.
-    if (c_ext.ioctl(std.posix.STDOUT_FILENO, 0x40087468, &ws) == 0 and ws.ws_col > 0) return ws.ws_col;
-    if (c_ext.ioctl(std.posix.STDERR_FILENO, 0x40087468, &ws) == 0 and ws.ws_col > 0) return ws.ws_col;
-    return 80;
+    const stdout_cols = style.getTermSize(std.posix.STDOUT_FILENO).cols;
+    if (stdout_cols > 0) return stdout_cols;
+    return style.getTermSize(std.posix.STDERR_FILENO).cols;
 }
 
 fn renderPadded(dest: []u8, text: []const u8, width: usize, align_: Align) usize {

@@ -75,6 +75,20 @@ pub fn bg(dest: []u8, color: Color) usize {
 pub fn bgDefault(dest: []u8) usize { return cp(dest, "\x1b[49m"); }
 
 // ---------------------------------------------------------------------------
+// 256-color palette (xterm-256color)
+// ---------------------------------------------------------------------------
+
+/// Set foreground to a 256-color palette index.
+pub fn fg256(dest: []u8, idx: u8) usize {
+    return (std.fmt.bufPrint(dest, "\x1b[38;5;{d}m", .{idx}) catch return 0).len;
+}
+
+/// Set background to a 256-color palette index.
+pub fn bg256(dest: []u8, idx: u8) usize {
+    return (std.fmt.bufPrint(dest, "\x1b[48;5;{d}m", .{idx}) catch return 0).len;
+}
+
+// ---------------------------------------------------------------------------
 // Compound styles — multiple attributes in one sequence
 // ---------------------------------------------------------------------------
 
@@ -230,6 +244,45 @@ fn cp(dest: []u8, src: []const u8) usize {
     const n = @min(src.len, dest.len);
     @memcpy(dest[0..n], src[0..n]);
     return n;
+}
+
+// ---------------------------------------------------------------------------
+// Platform-specific ioctl constants
+// ---------------------------------------------------------------------------
+
+const builtin = @import("builtin");
+const is_macos = builtin.os.tag == .macos;
+
+/// TIOCGWINSZ — get terminal window size
+pub const TIOCGWINSZ: c_ulong = if (is_macos) 0x40087468 else 0x5413;
+
+/// TIOCSWINSZ — set terminal window size
+pub const TIOCSWINSZ: c_ulong = if (is_macos) 0x80087467 else 0x5414;
+
+/// TIOCSCTTY — set controlling terminal
+pub const TIOCSCTTY: c_ulong = if (is_macos) 0x20007461 else 0x540E;
+
+/// Standard winsize struct for ioctl
+pub const Winsize = extern struct {
+    ws_row: u16,
+    ws_col: u16,
+    ws_xpixel: u16,
+    ws_ypixel: u16,
+};
+
+/// Get terminal size from an fd.
+pub fn getTermSize(fd: std.posix.fd_t) struct { rows: usize, cols: usize } {
+    const ioctl_fn = struct {
+        extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
+    }.ioctl;
+    var ws: Winsize = undefined;
+    if (ioctl_fn(fd, TIOCGWINSZ, &ws) == 0) {
+        return .{
+            .rows = if (ws.ws_row > 0) ws.ws_row else 24,
+            .cols = if (ws.ws_col > 0) ws.ws_col else 80,
+        };
+    }
+    return .{ .rows = 24, .cols = 80 };
 }
 
 // ---------------------------------------------------------------------------

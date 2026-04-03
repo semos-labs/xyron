@@ -20,9 +20,15 @@ pub fn build(b: *std.Build) void {
     });
     exe_mod.linkSystemLibrary("sqlite3", .{});
     exe_mod.linkSystemLibrary("lua", .{});
-    exe_mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
-    exe_mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
     exe_mod.link_libc = true;
+
+    // Platform-specific include/lib paths
+    const resolved = target.result;
+    if (resolved.os.tag == .macos) {
+        exe_mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+        exe_mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+    }
+    // Linux: sqlite3-dev and liblua5.4-dev are in standard system paths
 
     const exe = b.addExecutable(.{ .name = "xyron", .root_module = exe_mod });
     b.installArtifact(exe);
@@ -85,9 +91,11 @@ pub fn build(b: *std.Build) void {
         });
         mod.linkSystemLibrary("sqlite3", .{});
         mod.linkSystemLibrary("lua", .{});
-        mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
-        mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
         mod.link_libc = true;
+        if (resolved.os.tag == .macos) {
+            mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+            mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+        }
 
         const t = b.addTest(.{ .root_module = mod });
         const run_t = b.addRunArtifact(t);

@@ -42,9 +42,7 @@ const prompt_mod = @import("prompt.zig");
 const STDIN = posix.STDIN_FILENO;
 const STDOUT = posix.STDOUT_FILENO;
 
-const is_macos = @import("builtin").os.tag == .macos;
-const TIOCSCTTY: c_ulong = if (is_macos) 0x20007461 else 0x540E;
-const TIOCSWINSZ: c_ulong = if (is_macos) 0x80087467 else 0x5414;
+const style_mod = @import("style.zig");
 
 pub const HeadlessRuntime = struct {
     allocator: std.mem.Allocator,
@@ -579,7 +577,7 @@ pub const HeadlessRuntime = struct {
             // --- Child ---
             posix.close(master);
             _ = c_ext.setsid();
-            _ = c_ext.ioctl(slave, TIOCSCTTY, @as(?*anyopaque, null));
+            _ = c_ext.ioctl(slave, style_mod.TIOCSCTTY, @as(?*anyopaque, null));
 
             for ([_]posix.fd_t{ posix.STDIN_FILENO, posix.STDOUT_FILENO, posix.STDERR_FILENO }) |fd| {
                 _ = posix.dup2(slave, fd) catch {};
@@ -715,9 +713,8 @@ pub const HeadlessRuntime = struct {
 };
 
 fn setPtySize(fd: posix.fd_t, rows: u16, cols: u16) void {
-    const Winsize = extern struct { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 };
-    var ws = Winsize{ .ws_row = rows, .ws_col = cols, .ws_xpixel = 0, .ws_ypixel = 0 };
-    _ = c_ext.ioctl(fd, TIOCSWINSZ, &ws);
+    var ws = style_mod.Winsize{ .ws_row = rows, .ws_col = cols, .ws_xpixel = 0, .ws_ypixel = 0 };
+    _ = c_ext.ioctl(fd, style_mod.TIOCSWINSZ, &ws);
 }
 
 fn loadConfig(lua: lua_api.LuaState) void {

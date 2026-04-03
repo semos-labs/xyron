@@ -414,6 +414,19 @@ pub const Shell = struct {
 
         if (result.should_exit) { self.running = false; return; }
 
+        // Command correction: suggest close matches on exit 127
+        if (result.exit_code == 127 and exec_plan.steps.len > 0 and exec_plan.steps[0].argv.len > 0) {
+            const correction = @import("correction.zig");
+            if (correction.suggest(exec_plan.steps[0].argv[0], &self.env)) |suggestion| {
+                var cbuf: [256]u8 = undefined;
+                var cpos: usize = 0;
+                cpos += scopy(cbuf[cpos..], "\x1b[33mDid you mean \x1b[1m");
+                cpos += scopy(cbuf[cpos..], suggestion);
+                cpos += scopy(cbuf[cpos..], "\x1b[22m?\x1b[0m\n");
+                stdout.writeAll(cbuf[0..cpos]) catch {};
+            }
+        }
+
         // Detect cwd changes
         var cwd_after_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd_after = posix.getcwd(&cwd_after_buf) catch "";
@@ -633,4 +646,10 @@ fn noop(_: i32) callconv(.c) void {}
 
 fn handleWinch(_: i32) callconv(.c) void {
     winch_pending = true;
+}
+
+fn scopy(dest: []u8, src: []const u8) usize {
+    const n = @min(src.len, dest.len);
+    @memcpy(dest[0..n], src[0..n]);
+    return n;
 }

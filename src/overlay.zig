@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const posix = std.posix;
+const style = @import("style.zig");
 
 pub var enabled: bool = true;
 pub var on_demand: bool = false;
@@ -67,18 +68,8 @@ fn parseDSR(response: []const u8) Pos {
 
 /// Get terminal dimensions.
 pub fn getTermSize() struct { rows: usize, cols: usize } {
-    const c_ext = struct {
-        const winsize = extern struct { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 };
-        extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
-    };
-    var ws: c_ext.winsize = undefined;
-    if (c_ext.ioctl(posix.STDOUT_FILENO, 0x40087468, &ws) == 0) {
-        return .{
-            .rows = if (ws.ws_row > 0) ws.ws_row else 24,
-            .cols = if (ws.ws_col > 0) ws.ws_col else 80,
-        };
-    }
-    return .{ .rows = 24, .cols = 80 };
+    const ts = style.getTermSize(posix.STDOUT_FILENO);
+    return .{ .rows = ts.rows, .cols = ts.cols };
 }
 
 /// Decide whether to render above or below the cursor.

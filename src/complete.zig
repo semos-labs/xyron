@@ -1004,15 +1004,7 @@ fn kindColor(kind: CandidateKind, selected: bool) []const u8 {
 }
 
 fn getTermHeight() usize {
-    const c_ext = struct {
-        const winsize = extern struct { ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16 };
-        extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
-    };
-    var ws: c_ext.winsize = undefined;
-    if (c_ext.ioctl(posix.STDOUT_FILENO, 0x40087468, &ws) == 0 and ws.ws_row > 0) {
-        return ws.ws_row;
-    }
-    return 24;
+    return overlay.getTermSize().rows;
 }
 
 /// Compute visible width of prompt string's last line, skipping ANSI escapes.
