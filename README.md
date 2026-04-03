@@ -52,6 +52,59 @@ Works standalone in any terminal. Works best inside [✨ Attyx](https://github.c
 
 ---
 
+## 📊 Structured data pipeline
+
+Xyron builtins output structured tables. Chain them with `json`, `csv`, `query`, and `sort` to filter, transform, and render data — no `awk`/`sed`/`jq` needed.
+
+```bash
+# Structured ls
+> ls -la
+permissions  name         type  size
+────────────────────────────────────
+drwxr-xr-x   .git/        dir      -
+-rw-r--r--   build.zig    file  2.8K
+drwxr-xr-x   src/         dir      -
+
+# Query history like a database
+> history failed
+  #  command       exit  duration
+────────────────────────────────────
+193  cargo build      1      12s
+213  curl -S ...    127      49ms
+
+> history slow 5000
+> history cwd ~/Projects/xyron
+> history search "docker"
+
+# Parse JSON APIs with SQL-like queries
+> curl -s api/users | json .data.[] | query select name,age where .age > 25 sort .age desc
+name     age
+────────────
+Charlie   42
+Alice     30
+
+# CSV to table
+> cat report.csv | csv --sep ";"
+> cat data.tsv | csv --sep "\t" | query where .status == "active" limit 10
+```
+
+---
+
+## 📂 Directory jumping
+
+Built-in `j` command — a zoxide-style smart jumper. Learns from every `cd` and ranks by frecency (frequency + recency).
+
+```bash
+> j proj           # jumps to ~/Projects (or fuzzy picks if ambiguous)
+> j xy             # jumps to ~/Projects/xyron
+> j ~/Documents    # literal path — acts as cd
+> jump list        # see all tracked directories with scores
+> jump clean       # remove stale entries
+> jump migrate     # import your zoxide database
+```
+
+---
+
 ## 📦 Install
 
 Requires **Zig 0.15.2+**, **SQLite3**, and **Lua 5.4**.
