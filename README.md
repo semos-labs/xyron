@@ -34,31 +34,21 @@ Works standalone in any terminal. Works best inside [✨ Attyx](https://github.c
 
 ## 🚀 Features
 
-🌙 **Lua scripting** — Config, hooks, custom commands, automation. `~/.config/xyron/config.lua` is your entire shell setup. No more `.bashrc` spaghetti, no cryptic syntax.
-
-📊 **Structured output** — Builtins like `ls`, `ps`, `env`, `jobs`, and `history` return colored, aligned tables. Pipe JSON through `json` for typed rendering. Query CSV with `csv`. Sort anything with `sort`.
-
-🗄️ **SQLite history** — Every command recorded with exit code, duration, working directory, and timestamp. Search, filter by status, filter by directory, rerun. Full-text fuzzy search with Ctrl+R or the interactive history explorer.
-
-🔍 **Smart completions** — Fuzzy picker with descriptions. Xyron parses `--help` output and caches flag info in SQLite. Path, environment variable, and command completions built in.
-
-👻 **Ghost text** — History-based suggestions appear inline as you type. Right arrow to accept.
-
-⌨️ **Vim mode** — Optional modal editing with `xyron.vim_mode(true)`. Cursor shape and prompt symbol change with mode. Supports `h l w b 0 $ x D dw db dd i a I A` in normal mode.
-
-🎨 **Prompt engine** — Composable segments: cwd, git branch, jobs count, last command duration, custom Lua functions, right-alignment via spacer. Multiline support.
-
-⚙️ **Job control** — Background processes with `&`, Ctrl+Z suspend, `fg`/`bg` resume, process group management.
-
-📂 **Directory jumping** — `j` command for frecency-based directory jumping. Learns from your `cd` usage.
-
-🔐 **Secrets manager** — Built-in encrypted secrets store. Set once, reference in commands and scripts without exposing values in history or environment.
-
-🔎 **Fuzzy finder** — Built-in `fz` command for fuzzy file and directory search. No external dependencies.
-
-🔄 **Migration assistant** — `migrate analyze` scans your existing shell config. `migrate convert` translates bash/zsh aliases, exports, and paths to Lua.
-
-🖥️ **Attyx integration** — When running inside [Attyx](https://github.com/semos-labs/attyx): structured lifecycle events, native popup/picker overlays, IPC socket for external tooling, and a headless binary protocol for block-based terminal UI.
+| | Feature | Description |
+|---|---------|-------------|
+| 🌙 | **Lua scripting** | Config, hooks, custom commands, automation — all in `config.lua`. No more `.bashrc` spaghetti. |
+| 📊 | **Structured output** | `ls`, `ps`, `env`, `jobs`, `history` return colored tables. Pipe through `json`, `csv`, `sort`. |
+| 🗄️ | **SQLite history** | Every command recorded with exit code, duration, cwd. Search, filter, rerun. Ctrl+R fuzzy search. |
+| 🔍 | **Smart completions** | Fuzzy picker with descriptions. Parses `--help` and caches flags. Path, env, command providers. |
+| 👻 | **Ghost text** | History-based inline suggestions as you type. Right arrow to accept. |
+| ⌨️ | **Vim mode** | Optional modal editing. Cursor shape and prompt change with mode. |
+| 🎨 | **Prompt engine** | Composable segments: cwd, git branch, jobs, duration, Lua functions. Multiline + right-align. |
+| ⚙️ | **Job control** | Background `&`, Ctrl+Z suspend, `fg`/`bg` resume, process groups. |
+| 📂 | **Directory jumping** | Frecency-based `j` command. Learns from your `cd` usage. |
+| 🔐 | **Secrets manager** | Encrypted store. Reference secrets in commands without exposing in history or env. |
+| 🔎 | **Fuzzy finder** | Built-in `fz` for fuzzy file and directory search. Zero dependencies. |
+| 🔄 | **Migration assistant** | `migrate analyze` + `migrate convert` — translates bash/zsh config to Lua. |
+| 🖥️ | **Attyx integration** | Native popups, IPC socket, headless binary protocol. Structured lifecycle events. |
 
 ---
 
