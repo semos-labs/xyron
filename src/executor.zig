@@ -373,6 +373,7 @@ fn isPipeBuiltin(name: []const u8) bool {
         std.mem.eql(u8, name, "sort") or
         std.mem.eql(u8, name, "csv") or
         std.mem.eql(u8, name, "json") or
+        std.mem.eql(u8, name, "to_json") or
         std.mem.eql(u8, name, "query");
 }
 
@@ -431,6 +432,10 @@ fn childExec(
     }
     if (argv.len > 0 and std.mem.eql(u8, argv[0], "csv")) {
         @import("builtins/csv.zig").runFromPipe(if (argv.len > 1) argv[1..] else &.{});
+        std.process.exit(0);
+    }
+    if (argv.len > 0 and std.mem.eql(u8, argv[0], "to_json")) {
+        @import("builtins/to_json.zig").runFromPipe(if (argv.len > 1) argv[1..] else &.{});
         std.process.exit(0);
     }
     if (argv.len > 0 and std.mem.eql(u8, argv[0], "fz")) {

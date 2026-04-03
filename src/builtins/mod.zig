@@ -41,12 +41,13 @@ const sort_cmd = @import("sort_cmd.zig");
 const csv_cmd = @import("csv.zig");
 const fz_cmd = @import("fz.zig");
 const jump_cmd = @import("jump.zig");
+const to_json = @import("to_json.zig");
 const xyron_cmd = @import("xyron_cmd.zig");
 
 const builtin_names = [_][]const u8{
     "cd", "pwd", "exit", "export", "unset", "env", "which", "type",
     "history", "jobs", "fg", "bg", "alias", "exec", "popup", "inspect",
-    "ls", "ps", "json", "query", "select", "where", "sort", "csv", "fz", "migrate", "jump", "j", "xyron",
+    "ls", "ps", "json", "to_json", "query", "select", "where", "sort", "csv", "fz", "migrate", "jump", "j", "xyron",
 };
 
 const process_only_names = [_][]const u8{
@@ -92,6 +93,7 @@ pub fn execute(
     if (std.mem.eql(u8, name, "ls")) return ls.run(args, stdout);
     if (std.mem.eql(u8, name, "ps")) return ps.run(args, stdout);
     if (std.mem.eql(u8, name, "json")) return json.run(args, stdout);
+    if (std.mem.eql(u8, name, "to_json")) return .{ .exit_code = to_json.run(args, stdout, stderr) };
     if (std.mem.eql(u8, name, "query")) return .{ .exit_code = query.run(args, stdout, stderr) };
     if (std.mem.eql(u8, name, "select")) return .{ .exit_code = select_cmd.run(args, stdout, stderr) };
     if (std.mem.eql(u8, name, "where")) return .{ .exit_code = where_cmd.run(args, stdout, stderr) };

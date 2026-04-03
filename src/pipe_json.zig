@@ -162,7 +162,7 @@ pub fn writeValue(buf: []u8, pos: *usize, val: *const jp.Value) void {
     switch (val.*) {
         .string => |s| {
             appendChar(buf, pos, '"');
-            appendSlice(buf, pos, s);
+            writeEscapedString(buf, pos, s);
             appendChar(buf, pos, '"');
         },
         .number => |n| {
@@ -573,6 +573,32 @@ fn isNumericColumn(name: []const u8) bool {
         std.mem.eql(u8, name, "exit_code") or std.mem.eql(u8, name, "userId") or
         std.mem.eql(u8, name, "count") or std.mem.eql(u8, name, "duration") or
         std.mem.eql(u8, name, "port");
+}
+
+/// Write a string with JSON escaping (newlines, tabs, backslashes, quotes, control chars).
+fn writeEscapedString(buf: []u8, pos: *usize, s: []const u8) void {
+    for (s) |ch| {
+        switch (ch) {
+            '"' => { appendChar(buf, pos, '\\'); appendChar(buf, pos, '"'); },
+            '\\' => { appendChar(buf, pos, '\\'); appendChar(buf, pos, '\\'); },
+            '\n' => { appendChar(buf, pos, '\\'); appendChar(buf, pos, 'n'); },
+            '\r' => { appendChar(buf, pos, '\\'); appendChar(buf, pos, 'r'); },
+            '\t' => { appendChar(buf, pos, '\\'); appendChar(buf, pos, 't'); },
+            0x08 => { appendChar(buf, pos, '\\'); appendChar(buf, pos, 'b'); },
+            0x0C => { appendChar(buf, pos, '\\'); appendChar(buf, pos, 'f'); },
+            else => |c| {
+                if (c < 0x20) {
+                    // Control characters → \u00XX
+                    const hex = "0123456789abcdef";
+                    appendSlice(buf, pos, "\\u00");
+                    appendChar(buf, pos, hex[c >> 4]);
+                    appendChar(buf, pos, hex[c & 0x0f]);
+                } else {
+                    appendChar(buf, pos, c);
+                }
+            },
+        }
+    }
 }
 
 fn appendChar(buf: []u8, pos: *usize, ch: u8) void {

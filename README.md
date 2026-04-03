@@ -37,7 +37,7 @@ Works standalone in any terminal. Works best inside [✨ Attyx](https://github.c
 | | Feature | Description |
 |---|---------|-------------|
 | 🌙 | **Lua scripting** | Config, hooks, custom commands, automation — all in `config.lua`. No more `.bashrc` spaghetti. |
-| 📊 | **Structured output** | `ls`, `ps`, `env`, `jobs`, `history` return colored tables. Pipe through `json`, `csv`, `sort`. |
+| 📊 | **Structured output** | `ls`, `ps`, `env`, `jobs`, `history` return colored tables. Pipe through `select`, `where`, `sort`, `to_json`. |
 | 🗄️ | **SQLite history** | Every command recorded with exit code, duration, cwd. Search, filter, rerun. Ctrl+R fuzzy search. |
 | 🔍 | **Smart completions** | Fuzzy picker with descriptions. Parses `--help` and caches flags. Path, env, command providers. |
 | 👻 | **Ghost text** | History-based inline suggestions as you type. Right arrow to accept. |
@@ -88,6 +88,10 @@ Bob       25  user
 # CSV/TSV to structured table
 > cat report.csv | csv
 > cat data.tsv | csv --sep "\t"
+
+# Output raw JSON for external tools
+> ls | to_json                              # plain JSON array
+> ps | where %cpu > 5 | select pid,command | to_json | jq .
 ```
 
 ---

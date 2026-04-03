@@ -15,6 +15,7 @@
 const std = @import("std");
 const jp = @import("../json_parser.zig");
 const rich = @import("../rich_output.zig");
+const pj = @import("../pipe_json.zig");
 const posix = std.posix;
 
 const MAX_FIELDS: usize = 12;
@@ -148,60 +149,38 @@ fn execute(plan: *const QueryPlan, items: []const jp.Value, stdout: std.fs.File)
 
     // Phase 3: limit
     const result_count = @min(filtered_count, plan.limit);
+    if (result_count == 0) return;
 
-    // Phase 4: determine columns
-    var col_names: [MAX_FIELDS][]const u8 = undefined;
-    var col_count: usize = 0;
+    // Phase 4: build result array (with optional select)
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    var results: [MAX_ROWS]jp.Value = undefined;
 
     if (plan.select_count > 0) {
-        // Explicit select
-        col_count = plan.select_count;
-        for (0..col_count) |i| col_names[i] = plan.select_fields[i];
-    } else {
-        // Auto-detect from first matching item
-        if (result_count > 0) {
-            const first = items[filtered_indices[0]];
-            switch (first) {
-                .object => |fields| {
-                    for (fields) |f| {
-                        if (col_count >= MAX_FIELDS) break;
-                        col_names[col_count] = f.key;
-                        col_count += 1;
-                    }
-                },
-                else => {
-                    col_names[0] = "value";
-                    col_count = 1;
-                },
-            }
-        }
-    }
-
-    if (col_count == 0 or result_count == 0) return;
-
-    // Phase 5: render table
-    var table = rich.Table{};
-    for (0..col_count) |i| {
-        table.addColumn(.{ .header = col_names[i], .header_color = "\x1b[1;37m" });
-    }
-
-    for (0..result_count) |ri| {
-        const item = items[filtered_indices[ri]];
-        const row = table.addRow();
-
-        for (0..col_count) |ci| {
-            const val = getFieldValue(&item, col_names[ci]);
-            if (val) |v| {
-                var fmt_buf: [128]u8 = undefined;
-                const text = v.format(&fmt_buf);
-                table.setCellColor(row, ci, text, v.typeColor());
+        // Select specific fields
+        for (0..result_count) |ri| {
+            const item = items[filtered_indices[ri]];
+            if (pj.selectFields(alloc, &item, plan.select_fields[0..plan.select_count])) |v| {
+                results[ri] = v;
             } else {
-                table.setCellColor(row, ci, "null", "\x1b[2m");
+                results[ri] = item;
             }
+        }
+    } else {
+        // Pass through full objects
+        for (0..result_count) |ri| {
+            results[ri] = items[filtered_indices[ri]];
         }
     }
 
-    table.render(stdout);
+    // Phase 5: output — table for terminal, JSON for pipe
+    if (pj.isTerminal(posix.STDOUT_FILENO)) {
+        pj.renderTable(stdout, results[0..result_count]);
+    } else {
+        pj.writeJsonArray(stdout, results[0..result_count]);
+    }
 }
 
 // ---------------------------------------------------------------------------
