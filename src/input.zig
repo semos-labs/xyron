@@ -192,6 +192,11 @@ pub fn readLine(
         }
 
         // Mode-specific handling
+        if (ed.vim_enabled and ed.mode == .visual) {
+            handleVisualMode(ed, key);
+            refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
+            continue;
+        }
         if (ed.vim_enabled and ed.mode == .normal) {
             handleNormalMode(ed, key, &pending_op);
             refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
@@ -463,6 +468,9 @@ fn handleNormalMode(ed: *editor_types.Editor, key: keys.Key, pending_op: *u8) vo
                     }
                 },
 
+                // Visual mode
+                'v' => { ed.enterVisual(); },
+
                 // Mode transitions
                 'i' => { ed.mode = .insert; },
                 'a' => {
@@ -528,6 +536,99 @@ fn resolveTextObject(ed: *const editor_types.Editor, modifier: u8, object: u8) ?
     };
 }
 
+// ---------------------------------------------------------------------------
+// Visual mode handler
+// ---------------------------------------------------------------------------
+
+/// Pending text-object modifier in visual mode ('i'/'a').
+var visual_pending_modifier: u8 = 0;
+
+fn handleVisualMode(ed: *editor_types.Editor, key: keys.Key) void {
+    switch (key) {
+        .char => |ch| {
+            // Text object modifier pending (e.g. 'a' waiting for 'w')
+            if (visual_pending_modifier != 0) {
+                const range = resolveTextObject(ed, visual_pending_modifier, ch);
+                visual_pending_modifier = 0;
+                if (range) |r| ed.visualExpandTo(r);
+                return;
+            }
+
+            switch (ch) {
+                // Movement — extends selection
+                'h' => ed.moveLeft(),
+                'l' => {
+                    if (ed.cursor + 1 < ed.len) ed.cursor += 1;
+                },
+                'w' => ed.moveWordForward(),
+                'b' => ed.moveWordBackward(),
+                'e' => {
+                    var i = ed.cursor;
+                    if (i < ed.len) i += 1;
+                    while (i < ed.len and (ed.buf[i] == ' ' or ed.buf[i] == '\t')) : (i += 1) {}
+                    while (i < ed.len and ed.buf[i] != ' ' and ed.buf[i] != '\t') : (i += 1) {}
+                    if (i > 0) i -= 1;
+                    ed.cursor = i;
+                },
+                '0' => ed.moveHome(),
+                '$' => {
+                    ed.moveEnd();
+                    if (ed.len > 0) ed.cursor = ed.len - 1;
+                },
+
+                // Text object modifiers
+                'i', 'a' => { visual_pending_modifier = ch; },
+
+                // Operators — act on visual selection
+                'd' => {
+                    const range = ed.visualRange();
+                    ed.applyOperator('d', range);
+                    // applyOperator sets mode via 'd' which stays normal
+                    ed.mode = .normal;
+                },
+                'c' => {
+                    const range = ed.visualRange();
+                    ed.applyOperator('c', range);
+                    // applyOperator('c') already sets insert mode
+                },
+                'y' => {
+                    const range = ed.visualRange();
+                    ed.applyOperator('y', range);
+                    ed.mode = .normal;
+                },
+                'x' => {
+                    const range = ed.visualRange();
+                    ed.applyOperator('d', range);
+                    ed.mode = .normal;
+                },
+
+                // Cancel
+                'v' => { ed.mode = .normal; visual_pending_modifier = 0; },
+
+                else => {},
+            }
+        },
+        .escape => {
+            ed.mode = .normal;
+            visual_pending_modifier = 0;
+        },
+        .left => ed.moveLeft(),
+        .right => {
+            if (ed.cursor + 1 < ed.len) ed.cursor += 1;
+        },
+        .home => ed.moveHome(),
+        .end_key => {
+            ed.moveEnd();
+            if (ed.len > 0) ed.cursor = ed.len - 1;
+        },
+        else => {},
+    }
+
+    if (ed.mode == .visual and ed.len > 0 and ed.cursor >= ed.len) {
+        ed.cursor = ed.len - 1;
+    }
+}
+
 /// Redraw the current line with optional syntax highlighting and ghost text.
 pub fn refreshLine(
     stdout: std.fs.File,
@@ -570,7 +671,7 @@ pub fn refreshLineWithHistory(
     const prompt_mod = @import("prompt.zig");
     if (ed.vim_enabled) {
         var pctx = prompt_mod.buildContext(prompt_last_exit, prompt_last_duration, prompt_job_count);
-        pctx.vim_normal = (ed.mode == .normal);
+        pctx.vim_normal = (ed.mode == .normal or ed.mode == .visual);
         var pbuf_local: [prompt_mod.MAX_PROMPT]u8 = undefined;
         const pr = prompt_mod.render(&pbuf_local, &pctx, prompt_lua);
         pos += cp(buf[pos..], pr.text);
@@ -579,15 +680,34 @@ pub fn refreshLineWithHistory(
         pos += cp(buf[pos..], prompt_str_default);
     }
 
-    // Cursor shape: beam (line) by default, block in vim normal mode
-    if (ed.vim_enabled and ed.mode == .normal) {
+    // Cursor shape: beam in insert, block in normal/visual
+    if (ed.vim_enabled and (ed.mode == .normal or ed.mode == .visual)) {
         pos += cp(buf[pos..], "\x1b[2 q"); // block
     } else {
         pos += cp(buf[pos..], "\x1b[6 q"); // beam (line)
     }
 
     const content = ed.content();
-    if (hl) |ctx| {
+    if (ed.vim_enabled and ed.mode == .visual and content.len > 0) {
+        // Render with visual selection highlight (inverse video)
+        const vr = ed.visualRange();
+        // Before selection
+        if (vr.start > 0) {
+            if (hl) |ctx| {
+                pos += highlight.renderHighlighted(buf[pos..], content[0..vr.start], ctx.cache, ctx.env);
+            } else {
+                pos += cp(buf[pos..], content[0..vr.start]);
+            }
+        }
+        // Selected region — inverse video
+        pos += cp(buf[pos..], "\x1b[7m");
+        pos += cp(buf[pos..], content[vr.start..vr.end]);
+        pos += cp(buf[pos..], "\x1b[27m");
+        // After selection
+        if (vr.end < content.len) {
+            pos += cp(buf[pos..], content[vr.end..]);
+        }
+    } else if (hl) |ctx| {
         pos += highlight.renderHighlighted(buf[pos..], content, ctx.cache, ctx.env);
     } else {
         pos += cp(buf[pos..], content);
@@ -649,7 +769,7 @@ pub fn renderPromptIntoBuf(
     const prompt_mod = @import("prompt.zig");
     if (ed.vim_enabled) {
         var pctx = prompt_mod.buildContext(prompt_last_exit, prompt_last_duration, prompt_job_count);
-        pctx.vim_normal = (ed.mode == .normal);
+        pctx.vim_normal = (ed.mode == .normal or ed.mode == .visual);
         var pbuf: [prompt_mod.MAX_PROMPT]u8 = undefined;
         const pr = prompt_mod.render(&pbuf, &pctx, prompt_lua);
         pos += cp(out[pos..], pr.text);

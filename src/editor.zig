@@ -10,7 +10,7 @@ const std = @import("std");
 /// Maximum line length supported by the editor.
 pub const MAX_LINE: usize = 4096;
 
-pub const VimMode = enum { insert, normal };
+pub const VimMode = enum { insert, normal, visual };
 
 /// Line editor state.
 pub const Editor = struct {
@@ -24,6 +24,8 @@ pub const Editor = struct {
     mode: VimMode = .insert,
     /// Whether vim mode is enabled globally.
     vim_enabled: bool = false,
+    /// Visual mode selection anchor (start of selection).
+    visual_anchor: usize = 0,
     /// Kill buffer for Ctrl+K/U/W/Y (yank/paste).
     kill_buf: [MAX_LINE]u8 = undefined,
     kill_len: usize = 0,
@@ -292,6 +294,33 @@ pub const Editor = struct {
         while (start > 0 and isWordSep(self.buf[start - 1])) : (start -= 1) {}
         while (start > 0 and !isWordSep(self.buf[start - 1])) : (start -= 1) {}
         self.replaceRange(start, self.cursor, "");
+    }
+
+    /// Enter visual mode, anchoring at the current cursor.
+    pub fn enterVisual(self: *Editor) void {
+        self.visual_anchor = self.cursor;
+        self.mode = .visual;
+    }
+
+    /// Get the visual selection range (ordered start..end).
+    pub fn visualRange(self: *const Editor) TextRange {
+        const a = self.visual_anchor;
+        const c = self.cursor;
+        if (a <= c) {
+            // Cursor is at or after anchor — include the char under cursor
+            const end = if (c < self.len) c + charLenAt(self.buf[0..self.len], c) else c;
+            return .{ .start = a, .end = end };
+        } else {
+            // Cursor is before anchor — include the char under anchor
+            const end = if (a < self.len) a + charLenAt(self.buf[0..self.len], a) else a;
+            return .{ .start = c, .end = end };
+        }
+    }
+
+    /// Expand visual selection to cover a text object range.
+    pub fn visualExpandTo(self: *Editor, range: TextRange) void {
+        self.visual_anchor = range.start;
+        self.cursor = if (range.end > 0) range.end - 1 else 0;
     }
 
     /// Clamp cursor for normal mode (must stay on a character, not past end).
