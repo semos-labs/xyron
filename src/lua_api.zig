@@ -49,6 +49,13 @@ pub fn init(env: *environ_mod.Environ, attyx_enabled: bool) LuaState {
     registerFn(L, "configure", apiPromptConfigure);
     registerFn(L, "init", apiPromptInit);
     c.lua_setfield(L, -2, "prompt");
+    // xyron.config = { vim_mode = fn, block_ui = fn, completion = fn }
+    c.lua_createtable(L, 0, 3);
+    registerFn(L, "vim_mode", apiVimMode);
+    registerFn(L, "block_ui", apiBlockUi);
+    registerFn(L, "completion", apiCompletion);
+    c.lua_setfield(L, -2, "config");
+    // Keep old top-level names working for backward compat
     registerFn(L, "vim_mode", apiVimMode);
     registerFn(L, "block_ui", apiBlockUi);
     registerFn(L, "completion", apiCompletion);
@@ -59,6 +66,7 @@ pub fn init(env: *environ_mod.Environ, attyx_enabled: bool) LuaState {
     registerFn(L, "popup", apiPopup);
     registerFn(L, "pick", apiPick);
     registerFn(L, "has_attyx_ui", apiHasAttyxUi);
+    registerFn(L, "project_info", apiProjectInfo);
 
     // Set as global "xyron"
     c.lua_setglobal(L, "xyron");
@@ -384,6 +392,78 @@ fn apiLastBlock(L: ?*c.lua_State) callconv(.c) c_int {
     return 1;
 }
 
+// ---------------------------------------------------------------------------
+// Project info — exposes active project state to Lua
+// ---------------------------------------------------------------------------
+
+/// Cached project info for Lua access. Updated by shell on context changes.
+pub const ProjectInfoCache = struct {
+    name: [128]u8 = undefined,
+    name_len: usize = 0,
+    root: [std.fs.max_path_bytes]u8 = undefined,
+    root_len: usize = 0,
+    status: enum { none, valid, invalid } = .none,
+    commands_count: usize = 0,
+    services_count: usize = 0,
+    env_loaded: usize = 0,
+    missing_secrets: usize = 0,
+};
+
+var global_project_info: ProjectInfoCache = .{};
+
+pub fn setProjectInfo(info: ProjectInfoCache) void {
+    global_project_info = info;
+}
+
+pub fn getProjectInfo() *const ProjectInfoCache {
+    return &global_project_info;
+}
+
+/// xyron.project_info() -> table { name, root, status, commands, services, env_loaded, missing_secrets } or nil
+fn apiProjectInfo(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    const info = &global_project_info;
+
+    if (info.status == .none) {
+        c.lua_pushnil(state);
+        return 1;
+    }
+
+    c.lua_createtable(state, 0, 7);
+
+    if (info.name_len > 0) {
+        _ = c.lua_pushlstring(state, &info.name, info.name_len);
+        c.lua_setfield(state, -2, "name");
+    }
+
+    if (info.root_len > 0) {
+        _ = c.lua_pushlstring(state, &info.root, info.root_len);
+        c.lua_setfield(state, -2, "root");
+    }
+
+    const status_str: []const u8 = switch (info.status) {
+        .valid => "valid",
+        .invalid => "invalid",
+        .none => "none",
+    };
+    _ = c.lua_pushlstring(state, status_str.ptr, status_str.len);
+    c.lua_setfield(state, -2, "status");
+
+    c.lua_pushinteger(state, @intCast(info.commands_count));
+    c.lua_setfield(state, -2, "commands");
+
+    c.lua_pushinteger(state, @intCast(info.services_count));
+    c.lua_setfield(state, -2, "services");
+
+    c.lua_pushinteger(state, @intCast(info.env_loaded));
+    c.lua_setfield(state, -2, "env_loaded");
+
+    c.lua_pushinteger(state, @intCast(info.missing_secrets));
+    c.lua_setfield(state, -2, "missing_secrets");
+
+    return 1;
+}
+
 /// xyron.history_query({text="...", failed=true, limit=N}) -> array of entries
 fn apiHistoryQuery(L: ?*c.lua_State) callconv(.c) c_int {
     const state = L orelse return 0;
@@ -501,6 +581,7 @@ fn apiPromptInit(L: ?*c.lua_State) callconv(.c) c_int {
                 else if (std.mem.eql(u8, n, "jobs")) { cfg.addBuiltin(.jobs, "\x1b[33m"); }
                 else if (std.mem.eql(u8, n, "git")) { cfg.addBuiltin(.git_branch, "\x1b[35m"); }
                 else if (std.mem.eql(u8, n, "git_branch")) { cfg.addBuiltin(.git_branch, "\x1b[35m"); }
+                else if (std.mem.eql(u8, n, "xyron_project")) { cfg.addBuiltin(.xyron_project, ""); }
                 else if (std.mem.eql(u8, n, "\n")) { cfg.addNewline(); }
                 else if (std.mem.eql(u8, n, "spacer")) { cfg.addBuiltin(.spacer, ""); }
                 else {

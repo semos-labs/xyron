@@ -42,6 +42,7 @@ pub const SegmentKind = enum {
     duration,
     jobs,
     git_branch,
+    xyron_project, // active xyron project name + status
     newline, // line break for multiline prompts
     spacer, // fills remaining space to push next segments to the right
     text, // literal text
@@ -326,6 +327,7 @@ fn renderSegment(dest: []u8, seg: *const Segment, ctx: *const PromptContext, lua
         .duration => renderDuration(dest, ctx),
         .jobs => renderJobs(dest, seg, ctx),
         .git_branch => renderGitBranch(dest, seg, ctx),
+        .xyron_project => renderXyronProject(dest),
         .newline => renderNewline(dest),
         .spacer => .{ .bytes = 0, .visible = 0 }, // handled by render()
         .text => renderText(dest, seg),
@@ -631,6 +633,48 @@ fn visLen(s: []const u8) usize {
         n += 1;
     }
     return n;
+}
+
+fn renderXyronProject(dest: []u8) SegResult {
+    const info = lua_api.getProjectInfo();
+    if (info.status == .none) return .{ .bytes = 0, .visible = 0 };
+
+    var pos: usize = 0;
+    var vis: usize = 0;
+
+    if (info.status == .invalid) {
+        // Red indicator for invalid project
+        pos += style.fg(dest[pos..], .red);
+        pos += cp(dest[pos..], "\xe2\x9c\x97 "); // ✗
+        vis += 2;
+        const name = info.name[0..info.name_len];
+        pos += cp(dest[pos..], name);
+        vis += visLen(name);
+        pos += style.reset(dest[pos..]);
+        return .{ .bytes = pos, .visible = vis };
+    }
+
+    // Valid project: icon + name
+    pos += style.fg(dest[pos..], .cyan);
+    pos += cp(dest[pos..], "\xe2\x97\x86 "); // ◆
+    vis += 2;
+    const name = info.name[0..info.name_len];
+    pos += cp(dest[pos..], name);
+    vis += visLen(name);
+    pos += style.reset(dest[pos..]);
+
+    // Missing secrets indicator
+    if (info.missing_secrets > 0) {
+        pos += cp(dest[pos..], " ");
+        vis += 1;
+        pos += style.fg(dest[pos..], .red);
+        const n = std.fmt.bufPrint(dest[pos..], "\xe2\x9c\x97{d}", .{info.missing_secrets}) catch "";
+        pos += n.len;
+        vis += visLen(n);
+        pos += style.reset(dest[pos..]);
+    }
+
+    return .{ .bytes = pos, .visible = vis };
 }
 
 fn renderText(dest: []u8, seg: *const Segment) SegResult {

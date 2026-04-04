@@ -1,0 +1,13 @@
+[project]
+name = "xyron"
+
+[commands]
+build = "zig build"
+test = "zig build test"
+dev = "zig build run"
+
+[env]
+sources = [".env"]
+
+[secrets]
+required = []

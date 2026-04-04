@@ -301,6 +301,234 @@ pub const Editor = struct {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Text objects — return (start, end) ranges
+    // ------------------------------------------------------------------
+
+    pub const TextRange = struct { start: usize, end: usize };
+
+    /// Inner word: the word under the cursor (no surrounding whitespace).
+    pub fn innerWord(self: *const Editor) ?TextRange {
+        if (self.len == 0) return null;
+        const pos = @min(self.cursor, self.len - 1);
+        var start = pos;
+        var end = pos;
+
+        if (isWordChar(self.buf[pos])) {
+            while (start > 0 and isWordChar(self.buf[start - 1])) : (start -= 1) {}
+            while (end < self.len and isWordChar(self.buf[end])) : (end += 1) {}
+        } else if (self.buf[pos] == ' ' or self.buf[pos] == '\t') {
+            // Cursor on whitespace — select the whitespace run
+            while (start > 0 and isWhitespace(self.buf[start - 1])) : (start -= 1) {}
+            while (end < self.len and isWhitespace(self.buf[end])) : (end += 1) {}
+        } else {
+            // Cursor on punctuation — select punctuation run
+            while (start > 0 and !isWordChar(self.buf[start - 1]) and !isWhitespace(self.buf[start - 1])) : (start -= 1) {}
+            while (end < self.len and !isWordChar(self.buf[end]) and !isWhitespace(self.buf[end])) : (end += 1) {}
+        }
+
+        return .{ .start = start, .end = end };
+    }
+
+    /// A word: the word under the cursor plus trailing (or leading) whitespace.
+    pub fn aWord(self: *const Editor) ?TextRange {
+        const iw = self.innerWord() orelse return null;
+        var start = iw.start;
+        var end = iw.end;
+
+        // Include trailing whitespace first
+        if (end < self.len and isWhitespace(self.buf[end])) {
+            while (end < self.len and isWhitespace(self.buf[end])) : (end += 1) {}
+        } else if (start > 0 and isWhitespace(self.buf[start - 1])) {
+            // No trailing whitespace — include leading whitespace
+            while (start > 0 and isWhitespace(self.buf[start - 1])) : (start -= 1) {}
+        }
+
+        return .{ .start = start, .end = end };
+    }
+
+    /// Inner quoted: content between matching quotes (not including quotes).
+    pub fn innerQuoted(self: *const Editor, quote: u8) ?TextRange {
+        return self.findQuotedRange(quote, false);
+    }
+
+    /// A quoted: content between matching quotes (including the quotes).
+    pub fn aQuoted(self: *const Editor, quote: u8) ?TextRange {
+        return self.findQuotedRange(quote, true);
+    }
+
+    fn findQuotedRange(self: *const Editor, quote: u8, include_quotes: bool) ?TextRange {
+        if (self.len == 0) return null;
+        const buf = self.buf[0..self.len];
+        const pos = @min(self.cursor, self.len - 1);
+
+        // Strategy: find the quote pair surrounding the cursor.
+        // Search backward for opening quote, forward for closing quote.
+        var open: ?usize = null;
+        var close: ?usize = null;
+
+        // If cursor is on a quote, decide if it's opening or closing
+        if (buf[pos] == quote) {
+            // Count quotes before cursor to determine parity
+            var count: usize = 0;
+            for (buf[0..pos]) |c| {
+                if (c == quote) count += 1;
+            }
+            if (count % 2 == 0) {
+                // Even count before = this is an opening quote
+                open = pos;
+            } else {
+                // Odd count before = this is a closing quote
+                close = pos;
+            }
+        }
+
+        // Search backward for opening quote if not found
+        if (open == null) {
+            var i = if (close != null and close.? > 0) close.? - 1 else if (pos > 0) pos - 1 else return null;
+            while (true) {
+                if (buf[i] == quote) { open = i; break; }
+                if (i == 0) break;
+                i -= 1;
+            }
+        }
+        if (open == null) return null;
+
+        // Search forward for closing quote if not found
+        if (close == null) {
+            var i = open.? + 1;
+            while (i < buf.len) : (i += 1) {
+                if (buf[i] == quote) { close = i; break; }
+            }
+        }
+        if (close == null) return null;
+
+        if (include_quotes) {
+            return .{ .start = open.?, .end = close.? + 1 };
+        } else {
+            return .{ .start = open.? + 1, .end = close.? };
+        }
+    }
+
+    /// Inner parentheses/brackets: content between matching pair.
+    pub fn innerPair(self: *const Editor, open_ch: u8, close_ch: u8) ?TextRange {
+        return self.findPairRange(open_ch, close_ch, false);
+    }
+
+    /// A parentheses/brackets: content including the delimiters.
+    pub fn aPair(self: *const Editor, open_ch: u8, close_ch: u8) ?TextRange {
+        return self.findPairRange(open_ch, close_ch, true);
+    }
+
+    fn findPairRange(self: *const Editor, open_ch: u8, close_ch: u8, include_delims: bool) ?TextRange {
+        if (self.len == 0) return null;
+        const buf = self.buf[0..self.len];
+        const pos = @min(self.cursor, self.len - 1);
+
+        // Search backward for opening delimiter (tracking nesting)
+        var open_pos: ?usize = null;
+        {
+            var depth: i32 = 0;
+            var i = pos;
+            while (true) {
+                if (buf[i] == close_ch) depth += 1;
+                if (buf[i] == open_ch) {
+                    if (depth == 0) { open_pos = i; break; }
+                    depth -= 1;
+                }
+                if (i == 0) break;
+                i -= 1;
+            }
+        }
+        if (open_pos == null) return null;
+
+        // Search forward for closing delimiter
+        var close_pos: ?usize = null;
+        {
+            var depth: i32 = 0;
+            var i = open_pos.? + 1;
+            while (i < buf.len) : (i += 1) {
+                if (buf[i] == open_ch) depth += 1;
+                if (buf[i] == close_ch) {
+                    if (depth == 0) { close_pos = i; break; }
+                    depth -= 1;
+                }
+            }
+        }
+        if (close_pos == null) return null;
+
+        if (include_delims) {
+            return .{ .start = open_pos.?, .end = close_pos.? + 1 };
+        } else {
+            return .{ .start = open_pos.? + 1, .end = close_pos.? };
+        }
+    }
+
+    /// Apply an operator (d, c, y) to a text range.
+    pub fn applyOperator(self: *Editor, op: u8, range: TextRange) void {
+        // Save to kill buffer
+        const killed = self.buf[range.start..range.end];
+        @memcpy(self.kill_buf[0..killed.len], killed);
+        self.kill_len = killed.len;
+
+        switch (op) {
+            'd' => {
+                self.replaceRange(range.start, range.end, "");
+                self.cursor = range.start;
+                self.clampNormal();
+            },
+            'c' => {
+                self.replaceRange(range.start, range.end, "");
+                self.cursor = range.start;
+                self.mode = .insert;
+            },
+            'y' => {
+                // Yank only — don't delete, move cursor to start
+                self.cursor = range.start;
+            },
+            else => {},
+        }
+    }
+
+    /// Find end position for a motion from current cursor.
+    pub fn motionEnd(self: *const Editor, motion: u8) ?usize {
+        var copy = self.*;
+        switch (motion) {
+            'w' => { copy.moveWordForward(); return copy.cursor; },
+            'b' => { return null; }, // backward handled specially
+            'e' => {
+                // Move to end of word
+                var i = copy.cursor;
+                if (i < copy.len) i += 1; // skip current char
+                while (i < copy.len and isWhitespace(copy.buf[i])) : (i += 1) {}
+                while (i < copy.len and isWordChar(copy.buf[i])) : (i += 1) {}
+                return i;
+            },
+            '$' => return copy.len,
+            '0' => return null, // handled as backward motion
+            else => return null,
+        }
+    }
+
+    /// Find start position for a backward motion.
+    pub fn motionStart(self: *const Editor, motion: u8) ?usize {
+        var copy = self.*;
+        switch (motion) {
+            'b' => { copy.moveWordBackward(); return copy.cursor; },
+            '0' => return 0,
+            else => return null,
+        }
+    }
+
+    fn isWordChar(ch: u8) bool {
+        return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or
+            (ch >= '0' and ch <= '9') or ch == '_';
+    }
+
+    fn isWhitespace(ch: u8) bool {
+        return ch == ' ' or ch == '\t';
+    }
+
     fn isWordSep(ch: u8) bool {
         return ch == ' ' or ch == '\t' or ch == '/' or ch == '.' or ch == '-' or ch == '_';
     }
@@ -457,4 +685,108 @@ test "backspace in middle" {
 
     try std.testing.expectEqualStrings("ac", ed.content());
     try std.testing.expectEqual(@as(usize, 1), ed.cursor);
+}
+
+// ------------------------------------------------------------------
+// Text object tests
+// ------------------------------------------------------------------
+
+test "innerWord on word" {
+    var ed = Editor{};
+    ed.setContent("hello world");
+    ed.cursor = 2; // on 'l' in "hello"
+    const range = ed.innerWord().?;
+    try std.testing.expectEqual(@as(usize, 0), range.start);
+    try std.testing.expectEqual(@as(usize, 5), range.end);
+}
+
+test "innerWord on whitespace" {
+    var ed = Editor{};
+    ed.setContent("hello   world");
+    ed.cursor = 6; // on space between words
+    const range = ed.innerWord().?;
+    try std.testing.expectEqual(@as(usize, 5), range.start);
+    try std.testing.expectEqual(@as(usize, 8), range.end);
+}
+
+test "aWord includes trailing whitespace" {
+    var ed = Editor{};
+    ed.setContent("hello world");
+    ed.cursor = 2; // on 'l' in "hello"
+    const range = ed.aWord().?;
+    try std.testing.expectEqual(@as(usize, 0), range.start);
+    try std.testing.expectEqual(@as(usize, 6), range.end);
+}
+
+test "innerQuoted double" {
+    var ed = Editor{};
+    ed.setContent("say \"hello world\" ok");
+    ed.cursor = 8; // on 'l' inside quotes
+    const range = ed.innerQuoted('"').?;
+    try std.testing.expectEqual(@as(usize, 5), range.start);
+    try std.testing.expectEqual(@as(usize, 16), range.end);
+    try std.testing.expectEqualStrings("hello world", ed.buf[range.start..range.end]);
+}
+
+test "aQuoted includes quotes" {
+    var ed = Editor{};
+    ed.setContent("say \"hello\" ok");
+    ed.cursor = 6; // inside quotes
+    const range = ed.aQuoted('"').?;
+    try std.testing.expectEqual(@as(usize, 4), range.start);
+    try std.testing.expectEqual(@as(usize, 11), range.end);
+    try std.testing.expectEqualStrings("\"hello\"", ed.buf[range.start..range.end]);
+}
+
+test "innerPair parentheses" {
+    var ed = Editor{};
+    ed.setContent("foo(bar, baz)");
+    ed.cursor = 5; // on 'a' in "bar"
+    const range = ed.innerPair('(', ')').?;
+    try std.testing.expectEqual(@as(usize, 4), range.start);
+    try std.testing.expectEqual(@as(usize, 12), range.end);
+    try std.testing.expectEqualStrings("bar, baz", ed.buf[range.start..range.end]);
+}
+
+test "innerPair nested" {
+    var ed = Editor{};
+    ed.setContent("a(b(c)d)e");
+    ed.cursor = 4; // on 'c'
+    const range = ed.innerPair('(', ')').?;
+    try std.testing.expectEqual(@as(usize, 4), range.start);
+    try std.testing.expectEqual(@as(usize, 5), range.end);
+    try std.testing.expectEqualStrings("c", ed.buf[range.start..range.end]);
+}
+
+test "applyOperator delete" {
+    var ed = Editor{};
+    ed.setContent("hello world");
+    ed.cursor = 0;
+    const range = ed.innerWord().?;
+    ed.applyOperator('d', range);
+    try std.testing.expectEqualStrings(" world", ed.content());
+}
+
+test "applyOperator change" {
+    var ed = Editor{};
+    ed.vim_enabled = true;
+    ed.mode = .normal;
+    ed.setContent("hello world");
+    ed.cursor = 0;
+    const range = ed.innerWord().?;
+    ed.applyOperator('c', range);
+    try std.testing.expectEqualStrings(" world", ed.content());
+    try std.testing.expectEqual(VimMode.insert, ed.mode);
+}
+
+test "applyOperator yank" {
+    var ed = Editor{};
+    ed.setContent("hello world");
+    ed.cursor = 0;
+    const range = ed.innerWord().?;
+    ed.applyOperator('y', range);
+    // Content unchanged
+    try std.testing.expectEqualStrings("hello world", ed.content());
+    // Kill buffer has yanked text
+    try std.testing.expectEqualStrings("hello", ed.kill_buf[0..ed.kill_len]);
 }

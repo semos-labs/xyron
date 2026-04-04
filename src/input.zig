@@ -327,21 +327,76 @@ pub fn readLine(
 
 const editor_types = @import("editor.zig");
 
+/// Pending state for vim operator-pending mode.
+/// Tracks: operator ('d', 'c', 'y'), then waits for motion/text-object.
+/// Text objects use two chars: modifier ('i'/'a') + object ('w', '"', etc.)
+var vim_pending_modifier: u8 = 0; // 'i' or 'a' for text objects
+
 fn handleNormalMode(ed: *editor_types.Editor, key: keys.Key, pending_op: *u8) void {
     switch (key) {
         .char => |ch| {
-            // Check for pending operator (d + motion)
-            if (pending_op.* == 'd') {
+            // --- Pending operator + text-object modifier (e.g. 'di' waiting for 'w') ---
+            if (pending_op.* != 0 and vim_pending_modifier != 0) {
+                const range = resolveTextObject(ed, vim_pending_modifier, ch);
+                const op = pending_op.*;
                 pending_op.* = 0;
+                vim_pending_modifier = 0;
+                if (range) |r| ed.applyOperator(op, r);
+                return;
+            }
+
+            // --- Pending operator waiting for motion or text-object start ---
+            if (pending_op.* != 0) {
+                const op = pending_op.*;
                 switch (ch) {
-                    'w' => ed.deleteWord(),
-                    'b' => ed.deleteWordBackward(),
-                    'd' => ed.clear(), // dd = clear line
-                    else => {},
+                    // Motions
+                    'w' => {
+                        if (ed.motionEnd('w')) |end| {
+                            pending_op.* = 0;
+                            ed.applyOperator(op, .{ .start = ed.cursor, .end = end });
+                        }
+                    },
+                    'e' => {
+                        if (ed.motionEnd('e')) |end| {
+                            pending_op.* = 0;
+                            ed.applyOperator(op, .{ .start = ed.cursor, .end = end });
+                        }
+                    },
+                    'b' => {
+                        if (ed.motionStart('b')) |start| {
+                            pending_op.* = 0;
+                            ed.applyOperator(op, .{ .start = start, .end = ed.cursor });
+                        }
+                    },
+                    '$' => {
+                        pending_op.* = 0;
+                        ed.applyOperator(op, .{ .start = ed.cursor, .end = ed.len });
+                    },
+                    '0' => {
+                        pending_op.* = 0;
+                        ed.applyOperator(op, .{ .start = 0, .end = ed.cursor });
+                    },
+                    // Text object modifiers
+                    'i', 'a' => { vim_pending_modifier = ch; },
+                    // Same key = line operation (dd, cc, yy)
+                    'd', 'c', 'y' => {
+                        if (ch == op) {
+                            pending_op.* = 0;
+                            if (op == 'y') {
+                                // yy = yank whole line
+                                @memcpy(ed.kill_buf[0..ed.len], ed.buf[0..ed.len]);
+                                ed.kill_len = ed.len;
+                            } else {
+                                ed.applyOperator(op, .{ .start = 0, .end = ed.len });
+                            }
+                        }
+                    },
+                    else => { pending_op.* = 0; vim_pending_modifier = 0; },
                 }
                 return;
             }
 
+            // --- Normal mode base keys ---
             switch (ch) {
                 // Movement
                 'h' => ed.moveLeft(),
@@ -355,11 +410,58 @@ fn handleNormalMode(ed: *editor_types.Editor, key: keys.Key, pending_op: *u8) vo
                 },
                 'w' => ed.moveWordForward(),
                 'b' => ed.moveWordBackward(),
+                'e' => {
+                    // Move to end of current/next word
+                    var i = ed.cursor;
+                    if (i < ed.len) i += 1;
+                    while (i < ed.len and (ed.buf[i] == ' ' or ed.buf[i] == '\t')) : (i += 1) {}
+                    while (i < ed.len and ed.buf[i] != ' ' and ed.buf[i] != '\t') : (i += 1) {}
+                    if (i > 0) i -= 1;
+                    ed.cursor = i;
+                },
 
-                // Editing
+                // Operators
+                'd' => { pending_op.* = 'd'; vim_pending_modifier = 0; },
+                'c' => { pending_op.* = 'c'; vim_pending_modifier = 0; },
+                'y' => { pending_op.* = 'y'; vim_pending_modifier = 0; },
+
+                // Single-key editing
                 'x' => ed.deleteAtCursor(),
+                'X' => { if (ed.cursor > 0) { ed.moveLeft(); ed.deleteAtCursor(); } },
                 'D' => ed.deleteToEnd(),
-                'd' => { pending_op.* = 'd'; },
+                'C' => {
+                    ed.deleteToEnd();
+                    ed.mode = .insert;
+                },
+                'S' => {
+                    // Clear line and enter insert
+                    ed.applyOperator('c', .{ .start = 0, .end = ed.len });
+                },
+                's' => {
+                    // Delete char and enter insert
+                    ed.deleteAtCursor();
+                    ed.mode = .insert;
+                },
+                'r' => { pending_op.* = 'r'; }, // replace single char
+                'p' => {
+                    // Paste after cursor
+                    if (ed.kill_len > 0) {
+                        if (ed.cursor < ed.len) ed.cursor += 1;
+                        ed.mode = .insert;
+                        ed.yank();
+                        ed.mode = .normal;
+                        ed.clampNormal();
+                    }
+                },
+                'P' => {
+                    // Paste before cursor
+                    if (ed.kill_len > 0) {
+                        ed.mode = .insert;
+                        ed.yank();
+                        ed.mode = .normal;
+                        ed.clampNormal();
+                    }
+                },
 
                 // Mode transitions
                 'i' => { ed.mode = .insert; },
@@ -376,7 +478,7 @@ fn handleNormalMode(ed: *editor_types.Editor, key: keys.Key, pending_op: *u8) vo
                     ed.mode = .insert;
                 },
 
-                else => { pending_op.* = 0; },
+                else => { pending_op.* = 0; vim_pending_modifier = 0; },
             }
         },
         .left => ed.moveLeft(),
@@ -389,11 +491,41 @@ fn handleNormalMode(ed: *editor_types.Editor, key: keys.Key, pending_op: *u8) vo
             ed.clampNormal();
         },
         .backspace => ed.moveLeft(),
-        else => { pending_op.* = 0; },
+        else => { pending_op.* = 0; vim_pending_modifier = 0; },
+    }
+
+    // Handle 'r' (replace) pending — next char replaces current
+    if (pending_op.* == 'r') {
+        switch (key) {
+            .char => |ch| {
+                if (ch != 'r') { // not the 'r' itself
+                    if (ed.cursor < ed.len) {
+                        ed.buf[ed.cursor] = ch;
+                    }
+                    pending_op.* = 0;
+                }
+            },
+            else => { pending_op.* = 0; },
+        }
     }
 
     // Keep cursor in bounds for normal mode
     if (ed.mode == .normal) ed.clampNormal();
+}
+
+/// Resolve a text object from modifier ('i'/'a') + object key.
+fn resolveTextObject(ed: *const editor_types.Editor, modifier: u8, object: u8) ?editor_types.Editor.TextRange {
+    const inner = modifier == 'i';
+    return switch (object) {
+        'w' => if (inner) ed.innerWord() else ed.aWord(),
+        '"' => if (inner) ed.innerQuoted('"') else ed.aQuoted('"'),
+        '\'' => if (inner) ed.innerQuoted('\'') else ed.aQuoted('\''),
+        '`' => if (inner) ed.innerQuoted('`') else ed.aQuoted('`'),
+        '(', ')' => if (inner) ed.innerPair('(', ')') else ed.aPair('(', ')'),
+        '[', ']' => if (inner) ed.innerPair('[', ']') else ed.aPair('[', ']'),
+        '{', '}' => if (inner) ed.innerPair('{', '}') else ed.aPair('{', '}'),
+        else => null,
+    };
 }
 
 /// Redraw the current line with optional syntax highlighting and ghost text.

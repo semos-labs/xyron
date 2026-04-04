@@ -37,6 +37,10 @@ src/
     which.zig type.zig
     popup.zig inspect.zig
     migrate.zig         Bash→Xyron migration assistant
+    service_cmd.zig     Service CLI (xyron up/down/restart/ps/logs)
+    doctor_cmd.zig      Doctor CLI renderer (xyron doctor)
+    explain_cmd.zig     Context explain CLI (xyron context explain [KEY])
+    bootstrap_cmd.zig   Init/new CLI (xyron init, xyron new)
   highlight.zig         Syntax highlighting (inline tokenizer, command cache)
   complete.zig          Interactive picker (fuzzy filter, tab/shift-tab cycle)
   complete_providers.zig  Builtins, lua, PATH, filesystem, env vars, help flags
@@ -64,4 +68,23 @@ src/
   rich_output.zig       Table renderer (columns, alignment, colors, truncation)
   json_parser.zig       Minimal JSON parser (objects, arrays, types)
   migrate.zig           Bash/sh analyzer + converter engine
+  toml.zig              Minimal TOML parser (tables, strings, arrays, dotted keys)
+  project/
+    mod.zig             Public API re-exports
+    model.zig           ProjectModel, Command, Service, resolution/load result types
+    discovery.zig       Nearest xyron.toml resolution (walk-up search)
+    manifest.zig        TOML loading + normalization into ProjectModel
+    loader.zig          Orchestrator: discovery → manifest → model
+    dotenv.zig          .env file parser (KEY=VALUE, quotes, comments)
+    context.zig         Context engine types (ResolvedContext, provenance, transitions)
+    resolver.zig        Context resolver (env merging, precedence, fingerprinting)
+    session.zig         Session context management, transition detection, diffing
+    context_manager.zig Lifecycle orchestrator: directory change → context activation
+    runner.zig          Project command runner (resolve, validate cwd, execute)
+    service_store.zig   Persisted service metadata (state, pid, fingerprint, logs)
+    service_manager.zig Service lifecycle (start/stop/restart, detached processes)
+    doctor.zig          Diagnostics engine (project, env, secrets, commands, services, git)
+    explain.zig         Context introspection (provenance, redaction, key explain)
+    bootstrap.zig       Project detection, inference, manifest generation
+  project_test.zig      Test shim for project module
 ```

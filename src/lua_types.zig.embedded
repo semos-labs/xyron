@@ -1,0 +1,240 @@
+---@meta xyron
+--- Xyron shell API — available globally as `xyron` in config.lua
+
+---@class xyron
+xyron = {}
+
+-- =============================================================================
+-- Environment
+-- =============================================================================
+
+--- Get an environment variable.
+---@param key string
+---@return string|nil
+function xyron.getenv(key) end
+
+--- Set an environment variable.
+---@param key string
+---@param value string
+function xyron.setenv(key, value) end
+
+--- Remove an environment variable.
+---@param key string
+function xyron.unsetenv(key) end
+
+--- Get the current working directory.
+---@return string
+function xyron.cwd() end
+
+-- =============================================================================
+-- Shell configuration
+-- =============================================================================
+
+--- Register a shell alias.
+---@param name string Alias name
+---@param expansion string Command to expand to
+function xyron.alias(name, expansion) end
+
+---@class xyron.config
+xyron.config = {}
+
+--- Enable or disable vim mode.
+---@param enabled boolean
+function xyron.config.vim_mode(enabled) end
+
+--- Enable or disable block UI (structured output rendering).
+---@param enabled boolean
+function xyron.config.block_ui(enabled) end
+
+--- Enable or disable tab completion.
+---@param enabled boolean
+function xyron.config.completion(enabled) end
+
+--- @deprecated Use xyron.config.vim_mode instead
+---@param enabled boolean
+function xyron.vim_mode(enabled) end
+
+--- @deprecated Use xyron.config.block_ui instead
+---@param enabled boolean
+function xyron.block_ui(enabled) end
+
+--- @deprecated Use xyron.config.completion instead
+---@param enabled boolean
+function xyron.completion(enabled) end
+
+-- =============================================================================
+-- Commands and execution
+-- =============================================================================
+
+--- Register a custom shell command.
+---@param name string Command name
+---@param callback fun(args: string[]): integer Callback receiving args, returning exit code
+function xyron.command(name, callback) end
+
+--- Execute a shell command string.
+---@param cmd string Shell command to execute
+---@return { exit_code: integer }
+function xyron.exec(cmd) end
+
+-- =============================================================================
+-- Hooks
+-- =============================================================================
+
+--- Register an event hook.
+---
+--- Events:
+--- - `"on_command_start"` — fires before command execution
+--- - `"on_command_finish"` — fires after command execution
+--- - `"on_cwd_change"` — fires when working directory changes
+--- - `"on_job_state_change"` — fires when a background job changes state
+---
+---@param event string Event name
+---@param callback fun(data: table) Callback receiving event data table
+function xyron.on(event, callback) end
+
+-- =============================================================================
+-- Attyx integration
+-- =============================================================================
+
+--- Check if running inside the Attyx terminal emulator.
+---@return boolean
+function xyron.is_attyx() end
+
+--- Check if Attyx native UI features (picker, popup) are available.
+---@return boolean
+function xyron.has_attyx_ui() end
+
+--- Show text in a popup overlay (requires Attyx).
+---@param text string Content to display
+---@param title? string Popup title
+function xyron.popup(text, title) end
+
+--- Show an interactive picker and return the selected item (requires Attyx).
+---@param items string[]|{ label: string, desc?: string }[] Items to pick from
+---@return string|nil Selected item label, or nil if cancelled
+function xyron.pick(items) end
+
+-- =============================================================================
+-- History
+-- =============================================================================
+
+---@class xyron.HistoryQuery
+---@field text? string Filter by command text
+---@field cwd? string Filter by working directory
+---@field failed? boolean Filter by exit code (true = non-zero only)
+---@field limit? integer Max results (default 100)
+
+---@class xyron.HistoryEntry
+---@field command string
+---@field cwd string
+---@field exit_code integer
+---@field duration_ms integer
+---@field timestamp_ms integer
+
+--- Query command history.
+---@param query? xyron.HistoryQuery
+---@return xyron.HistoryEntry[]
+function xyron.history_query(query) end
+
+--- Replay a command from history by index.
+---@param index integer 1-based history index
+---@return boolean success
+function xyron.history_replay(index) end
+
+-- =============================================================================
+-- Blocks
+-- =============================================================================
+
+---@class xyron.BlockInfo
+---@field id integer
+---@field input string
+---@field exit_code integer
+---@field duration_ms integer
+---@field status string
+---@field cwd string
+
+--- Get metadata about the last executed command block.
+---@return xyron.BlockInfo|nil
+function xyron.last_block() end
+
+-- =============================================================================
+-- Project system
+-- =============================================================================
+
+---@class xyron.ProjectInfo
+---@field name string Project name
+---@field root string Project root path
+---@field status "valid"|"invalid"|"none" Project state
+---@field commands integer Number of defined commands
+---@field services integer Number of defined services
+---@field env_loaded integer Number of loaded env file sources
+---@field missing_secrets integer Number of missing required secrets
+
+--- Get active project info. Returns nil if not in a project.
+---@return xyron.ProjectInfo|nil
+function xyron.project_info() end
+
+-- =============================================================================
+-- Prompt
+-- =============================================================================
+
+---@class xyron.prompt
+xyron.prompt = {}
+
+--- Register a custom prompt widget.
+---
+--- The callback should return a string (may include ANSI escape codes).
+--- Return empty string to hide the widget.
+---@param name string Widget name (used in prompt.init)
+---@param callback fun(): string Callback returning prompt segment text
+function xyron.prompt.register(name, callback) end
+
+--- Configure a built-in prompt widget.
+---
+--- Currently supports `"git"` with icon configuration:
+--- ```lua
+--- xyron.prompt.configure("git", {
+---     branch = "󰊢",
+---     staged = "",
+---     modified = "",
+---     deleted = "",
+---     untracked = "",
+---     conflicts = "",
+---     ahead = "",
+---     behind = "",
+---     clean = "",
+---     lines_added = "",
+---     lines_removed = "",
+--- })
+--- ```
+---@param name string Widget name
+---@param config table Configuration table
+function xyron.prompt.configure(name, config) end
+
+--- Initialize the prompt layout.
+---
+--- Accepts an array of segment names and literal strings.
+---
+--- Built-in segments:
+--- - `"cwd"` — current directory (with ~ contraction)
+--- - `"symbol"` — prompt symbol (> or < in vim mode)
+--- - `"status"` — exit code indicator (hidden on success)
+--- - `"duration"` — command duration (hidden under 500ms)
+--- - `"jobs"` — background job count
+--- - `"git"` — git branch + status indicators
+--- - `"xyron_project"` — active xyron project name + status
+--- - `"spacer"` — fills remaining width (pushes subsequent segments right)
+--- - `"\n"` — line break (for multiline prompts)
+---
+--- Custom widgets registered via `xyron.prompt.register()` are referenced by name.
+--- Literal strings (like `" "`) are rendered as-is.
+---
+--- Example:
+--- ```lua
+--- xyron.prompt.init({
+---     "cwd", " ", "git", "spacer", "xyron_project",
+---     "\n", "symbol", " ",
+--- })
+--- ```
+---@param segments (string|fun(): string)[]
+function xyron.prompt.init(segments) end

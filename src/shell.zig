@@ -28,6 +28,8 @@ const complete_help = @import("complete_help.zig");
 const block_mod = @import("block.zig");
 const overlay = @import("overlay.zig");
 const ipc = @import("ipc.zig");
+const context_manager = @import("project/context_manager.zig");
+const project_resolver = @import("project/resolver.zig");
 
 pub const Shell = struct {
     allocator: std.mem.Allocator,
@@ -41,6 +43,8 @@ pub const Shell = struct {
     cmd_cache: highlight.CommandCache,
     help_cache: complete_help.HelpCache,
     lua: lua_api.LuaState,
+    project_state: context_manager.SessionProjectState,
+    project_arena: std.heap.ArenaAllocator,
     last_exit_code: u8,
     last_duration_ms: i64,
     running: bool,
@@ -77,6 +81,10 @@ pub const Shell = struct {
         const lua = lua_api.init(&env_inst, attyx.enabled);
         loadLuaConfig(lua);
 
+        // Initialize project context with session ID derived from pid+timestamp
+        const session_num: u64 = @intCast(@as(i64, pid) * 1000000 + @rem(ts, 1000000));
+        var project_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+
         return .{
             .allocator = allocator,
             .ids = .{},
@@ -89,6 +97,8 @@ pub const Shell = struct {
             .cmd_cache = highlight.CommandCache.init(allocator),
             .help_cache = complete_help.HelpCache.init(hdb.db),
             .lua = lua,
+            .project_state = context_manager.SessionProjectState.init(project_arena.allocator(), session_num),
+            .project_arena = project_arena,
             .last_exit_code = 0,
             .last_duration_ms = 0,
             .running = true,
@@ -105,6 +115,7 @@ pub const Shell = struct {
     }
 
     pub fn deinit(self: *Shell) void {
+        self.project_arena.deinit();
         self.cmd_cache.deinit();
         lua_api.deinit(self.lua);
         self.history_db.deinit();
@@ -155,7 +166,16 @@ pub const Shell = struct {
         var ed = editor_mod.Editor{};
         ed.vim_enabled = lua_api.vim_mode_enabled;
 
+        // Write Lua type definitions for LSP (async, non-blocking)
+        installLuaTypes();
+
+        // Detect initial project context at startup
+        self.detectInitialProject(stdout);
+
         while (self.running) {
+            // Sync config toggles (may change via xyron reload)
+            ed.vim_enabled = lua_api.vim_mode_enabled;
+
             // Invalidate command cache if PATH changed
             if (self.env.path_dirty) {
                 self.cmd_cache.invalidate();
@@ -234,6 +254,13 @@ pub const Shell = struct {
                             input.cursor_row_estimate = @min(new_row, term_rows);
                         } else {
                             input.cursor_row_estimate = overlay.getTermSize().rows;
+                        }
+
+                        // Check for reload (config + project context)
+                        const xyron_cmd = @import("builtins/xyron_cmd.zig");
+                        if (xyron_cmd.reload_pending) {
+                            xyron_cmd.reload_pending = false;
+                            self.reloadConfig(stdout);
                         }
 
                         // Check for replay (history rerun)
@@ -433,7 +460,51 @@ pub const Shell = struct {
         if (!std.mem.eql(u8, cwd_before, cwd_after)) {
             self.attyx.cwdChanged(cwd_before, cwd_after);
             lua_hooks.fireCwdChange(self.lua, cwd_before, cwd_after, types.timestampMs());
+            self.handleProjectChange(cwd_after, stdout);
         }
+    }
+
+    /// Handle project context changes when cwd changes.
+    /// Resolves project, detects transition, applies env overlay, prints status.
+    fn handleProjectChange(self: *Shell, new_cwd: []const u8, stdout: std.fs.File) void {
+        // Reset the project arena for each resolution cycle
+        _ = self.project_arena.reset(.retain_capacity);
+        const arena = self.project_arena.allocator();
+
+        // Build system env source from current shell env
+        const sys_env = buildSystemEnvFromShell(arena, &self.env);
+
+        const result = self.project_state.handleDirectoryChange(arena, new_cwd, &sys_env);
+
+        // Apply env overlay to the shell session
+        self.project_state.applyOverlay(&self.env, &result);
+
+        // Update Lua-accessible project info cache
+        updateProjectInfoCache(&result.next);
+
+        // Print status message if there is one
+        if (result.status_message) |msg| {
+            stdout.writeAll(msg) catch {};
+            stdout.writeAll("\n") catch {};
+        }
+    }
+
+    /// Reload Lua config and re-resolve project context.
+    fn reloadConfig(self: *Shell, stdout: std.fs.File) void {
+        // Reload Lua config
+        loadLuaConfig(self.lua);
+
+        // Re-resolve project context
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = posix.getcwd(&cwd_buf) catch return;
+        self.handleProjectChange(cwd, stdout);
+    }
+
+    /// Do initial project detection on shell startup.
+    fn detectInitialProject(self: *Shell, stdout: std.fs.File) void {
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = posix.getcwd(&cwd_buf) catch return;
+        self.handleProjectChange(cwd, stdout);
     }
 
     fn reapAndNotify(self: *Shell, stdout: std.fs.File) void {
@@ -546,6 +617,139 @@ pub const Shell = struct {
         _ = self.history_db.recordCommand(raw, "", self.last_exit_code, self.last_duration_ms, types.timestampMs(), false, &.{});
     }
 };
+
+/// Update the Lua-accessible project info cache from an ActiveContext.
+const project_context = @import("project/context.zig");
+fn updateProjectInfoCache(active: *const project_context.ActiveContext) void {
+    var info = lua_api.ProjectInfoCache{};
+
+    switch (active.project_status) {
+        .no_project => {
+            info.status = .none;
+        },
+        .invalid_context => {
+            info.status = .invalid;
+            if (active.project_root) |root| {
+                const len = @min(root.len, info.root.len);
+                @memcpy(info.root[0..len], root[0..len]);
+                info.root_len = len;
+                // Use basename as name
+                const base = std.fs.path.basename(root);
+                const nlen = @min(base.len, info.name.len);
+                @memcpy(info.name[0..nlen], base[0..nlen]);
+                info.name_len = nlen;
+            }
+        },
+        .valid_context => {
+            info.status = .valid;
+            if (active.resolved) |resolved| {
+                if (resolved.project_name) |name| {
+                    const nlen = @min(name.len, info.name.len);
+                    @memcpy(info.name[0..nlen], name[0..nlen]);
+                    info.name_len = nlen;
+                } else {
+                    const base = std.fs.path.basename(resolved.project_root);
+                    const nlen = @min(base.len, info.name.len);
+                    @memcpy(info.name[0..nlen], base[0..nlen]);
+                    info.name_len = nlen;
+                }
+                const rlen = @min(resolved.project_root.len, info.root.len);
+                @memcpy(info.root[0..rlen], resolved.project_root[0..rlen]);
+                info.root_len = rlen;
+                info.missing_secrets = resolved.missing_required.len;
+                // Count loaded env file sources
+                for (resolved.env_sources) |src| {
+                    if (src.source_kind == .env_file and src.status == .loaded) info.env_loaded += 1;
+                }
+            }
+            // Get command/service counts from the model in the active context
+            // (These are available from resolved context provenance but we use
+            // the load result's model — not available here. Use 0 as fallback.)
+        },
+    }
+
+    lua_api.setProjectInfo(info);
+}
+
+/// Build an EnvSource from the shell's Environ for project context resolution.
+fn buildSystemEnvFromShell(allocator: std.mem.Allocator, env: *const environ_mod.Environ) project_resolver.EnvSource {
+    var keys: std.ArrayListUnmanaged([]const u8) = .{};
+    var vals: std.ArrayListUnmanaged([]const u8) = .{};
+
+    var iter = env.map.iterator();
+    while (iter.next()) |entry| {
+        keys.append(allocator, entry.key_ptr.*) catch {};
+        vals.append(allocator, entry.value_ptr.*) catch {};
+    }
+
+    return .{
+        .keys = keys.toOwnedSlice(allocator) catch &.{},
+        .values = vals.toOwnedSlice(allocator) catch &.{},
+    };
+}
+
+/// Write Lua type definitions and .luarc.json for LSP support.
+/// Called on each shell launch — keeps types in sync with the binary.
+fn installLuaTypes() void {
+    const types_content = @embedFile("lua_types.zig.embedded");
+
+    // Resolve paths
+    const data_home = std.posix.getenv("XDG_DATA_HOME");
+    const config_home = std.posix.getenv("XDG_CONFIG_HOME");
+    const home = std.posix.getenv("HOME") orelse return;
+
+    // Types path: XDG_DATA_HOME/xyron/types/xyron.lua
+    var types_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const types_dir = if (data_home) |xdg|
+        std.fmt.bufPrint(&types_dir_buf, "{s}/xyron/types", .{xdg}) catch return
+    else
+        std.fmt.bufPrint(&types_dir_buf, "{s}/.local/share/xyron/types", .{home}) catch return;
+
+    var types_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const types_path = std.fmt.bufPrint(&types_path_buf, "{s}/xyron.lua", .{types_dir}) catch return;
+
+    // Ensure types directory exists
+    mkdirRecursive(types_dir);
+
+    // Write types file
+    if (std.fs.createFileAbsolute(types_path, .{})) |f| {
+        f.writeAll(types_content) catch {};
+        f.close();
+    } else |_| {}
+
+    // .luarc.json path: config dir
+    var luarc_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const luarc_path = if (config_home) |xdg|
+        std.fmt.bufPrint(&luarc_buf, "{s}/xyron/.luarc.json", .{xdg}) catch return
+    else
+        std.fmt.bufPrint(&luarc_buf, "{s}/.config/xyron/.luarc.json", .{home}) catch return;
+
+    // Write .luarc.json pointing to types dir
+    var json_buf: [1024]u8 = undefined;
+    const json = std.fmt.bufPrint(&json_buf,
+        \\{{
+        \\  "workspace.library": ["{s}"],
+        \\  "diagnostics.globals": ["xyron"],
+        \\  "runtime.version": "Lua 5.4"
+        \\}}
+        \\
+    , .{types_dir}) catch return;
+
+    if (std.fs.createFileAbsolute(luarc_path, .{})) |f| {
+        f.writeAll(json) catch {};
+        f.close();
+    } else |_| {}
+}
+
+fn mkdirRecursive(path: []const u8) void {
+    var i: usize = 1;
+    while (i < path.len) : (i += 1) {
+        if (path[i] == '/') {
+            std.fs.makeDirAbsolute(path[0..i]) catch {};
+        }
+    }
+    std.fs.makeDirAbsolute(path) catch {};
+}
 
 fn loadLuaConfig(L: lua_api.LuaState) void {
     // XDG_CONFIG_HOME/xyron/config.lua, falling back to ~/.config/xyron/config.lua

@@ -56,6 +56,12 @@ attyx send-keys "exit{Enter}"
 - If a test fails, fix it before moving on.
 - Build links: `-lsqlite3 -llua -lc` with include/lib paths for homebrew.
 
+## Lua API types
+
+- When adding, changing, or removing any `xyron.*` Lua API function, **always update `src/lua_types.zig.embedded`** to match. This file is the LuaLS type definition source — it's embedded in the binary and written to `XDG_DATA_HOME/xyron/types/xyron.lua` on shell startup.
+- Keep annotations accurate: parameter types, return types, doc comments.
+- Config toggles live under `xyron.config.*` (e.g. `xyron.config.completion`). Old top-level names are kept for backward compat with `@deprecated`.
+
 ## Code style
 
 - Idiomatic Zig — follow stdlib conventions
@@ -107,4 +113,5 @@ All reference documentation lives in `docs/`. **Keep docs in sync with the code*
 - `docs/attyx-integration.md` — OSC events, native UI bridge
 - `docs/history-queries.md` — SQLite history queries
 - `docs/sqlite-schema.md` — database schema
+- `docs/project-system.md` — project system (xyron.toml, context, commands, services, doctor, explain, bootstrap)
 - `docs/migration-assistant.md` — bash/zsh conversion

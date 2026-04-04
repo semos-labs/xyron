@@ -47,7 +47,7 @@ const xyron_cmd = @import("xyron_cmd.zig");
 const builtin_names = [_][]const u8{
     "cd", "pwd", "exit", "export", "unset", "env", "which", "type",
     "history", "jobs", "fg", "bg", "alias", "exec", "popup", "inspect",
-    "ls", "ps", "json", "to_json", "query", "select", "where", "sort", "csv", "fz", "migrate", "jump", "j", "xyron",
+    "ls", "ps", "json", "to_json", "query", "select", "where", "sort", "csv", "fz", "migrate", "jump", "j", "xyron", "xy",
 };
 
 const process_only_names = [_][]const u8{
@@ -102,7 +102,7 @@ pub fn execute(
     if (std.mem.eql(u8, name, "fz")) return fz_cmd.run(args, stdout);
     if (std.mem.eql(u8, name, "jump")) return jump_cmd.run(args, stdout, stderr);
     if (std.mem.eql(u8, name, "j")) return jump_cmd.runJ(args, stderr);
-    if (std.mem.eql(u8, name, "xyron")) return xyron_cmd.run(args, stdout, stderr);
+    if (std.mem.eql(u8, name, "xyron") or std.mem.eql(u8, name, "xy")) return xyron_cmd.run(args, stdout, stderr, env_inst);
     if (std.mem.eql(u8, name, "migrate")) return migrate.run(args, stdout, stderr);
     if (std.mem.eql(u8, name, "popup")) return popup.run(args, stdout);
     if (std.mem.eql(u8, name, "inspect")) return inspect.run(args, stdout, hdb);

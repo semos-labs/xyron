@@ -12,13 +12,69 @@ const posix = std.posix;
 const c = std.c;
 const secrets_mod = @import("../secrets.zig");
 const style = @import("../style.zig");
+const project_cmd = @import("project_cmd.zig");
+const doctor_cmd = @import("doctor_cmd.zig");
+const explain_cmd = @import("explain_cmd.zig");
+const bootstrap_cmd = @import("bootstrap_cmd.zig");
 const Result = @import("mod.zig").BuiltinResult;
 
-pub fn run(args: []const []const u8, stdout: std.fs.File, stderr: std.fs.File) Result {
+const environ_mod = @import("../environ.zig");
+
+/// Set by `xyron reload` — shell checks this after executeLine.
+pub var reload_pending: bool = false;
+
+pub fn run(args: []const []const u8, stdout: std.fs.File, stderr: std.fs.File, env_inst: *environ_mod.Environ) Result {
     if (args.len == 0) return runHelp(stdout);
     if (std.mem.eql(u8, args[0], "secrets")) {
         const sub_args = if (args.len > 1) args[1..] else &[_][]const u8{};
         return runSecrets(sub_args, stdout, stderr);
+    }
+    if (std.mem.eql(u8, args[0], "project")) {
+        const sub_args = if (args.len > 1) args[1..] else &[_][]const u8{};
+        return project_cmd.run(sub_args, stdout, stderr);
+    }
+    if (std.mem.eql(u8, args[0], "run")) {
+        const sub_args = if (args.len > 1) args[1..] else &[_][]const u8{};
+        return project_cmd.runCommand(sub_args, stdout, stderr, env_inst);
+    }
+    if (std.mem.eql(u8, args[0], "up")) {
+        const sub_args = if (args.len > 1) args[1..] else &[_][]const u8{};
+        return project_cmd.serviceUp(sub_args, stdout, stderr, env_inst);
+    }
+    if (std.mem.eql(u8, args[0], "down")) return project_cmd.serviceDown(stdout, stderr);
+    if (std.mem.eql(u8, args[0], "restart")) {
+        const sub_args = if (args.len > 1) args[1..] else &[_][]const u8{};
+        return project_cmd.serviceRestart(sub_args, stdout, stderr, env_inst);
+    }
+    if (std.mem.eql(u8, args[0], "ps")) return project_cmd.servicePs(stdout, stderr);
+    if (std.mem.eql(u8, args[0], "logs")) {
+        const sub_args = if (args.len > 1) args[1..] else &[_][]const u8{};
+        return project_cmd.serviceLogs(sub_args, stdout, stderr);
+    }
+    if (std.mem.eql(u8, args[0], "init")) {
+        const sub_args = if (args.len > 1) args[1..] else &[_][]const u8{};
+        return bootstrap_cmd.runInit(sub_args, stdout, stderr);
+    }
+    if (std.mem.eql(u8, args[0], "new")) {
+        const sub_args = if (args.len > 1) args[1..] else &[_][]const u8{};
+        return bootstrap_cmd.runNew(sub_args, stdout, stderr);
+    }
+    if (std.mem.eql(u8, args[0], "reload")) {
+        reload_pending = true;
+        stdout.writeAll("\x1b[2mreloading config...\x1b[0m\n") catch {};
+        return .{};
+    }
+    if (std.mem.eql(u8, args[0], "doctor")) return doctor_cmd.run(stdout);
+    if (std.mem.eql(u8, args[0], "context")) {
+        const sub_args = if (args.len > 1) args[1..] else &[_][]const u8{};
+        // "xyron context explain [KEY]" or bare "xyron context" → explain summary
+        if (sub_args.len == 0) return explain_cmd.run(&.{}, stdout, stderr);
+        if (std.mem.eql(u8, sub_args[0], "explain")) {
+            const explain_args = if (sub_args.len > 1) sub_args[1..] else &[_][]const u8{};
+            return explain_cmd.run(explain_args, stdout, stderr);
+        }
+        // Fall through to project context for backward compat
+        return project_cmd.run(args, stdout, stderr);
     }
     if (std.mem.eql(u8, args[0], "help") or std.mem.eql(u8, args[0], "--help")) return runHelp(stdout);
     stderr.writeAll("xyron: unknown subcommand. Try `xyron help`\n") catch {};
@@ -30,6 +86,19 @@ fn runHelp(stdout: std.fs.File) Result {
         \\xyron — shell utilities
         \\
         \\Commands:
+        \\  xyron init                             Initialize xyron.toml
+        \\  xyron new <ecosystem> <name>          Create new project
+        \\  xyron run <command>                   Run a project command
+        \\  xyron up [service]                   Start project services
+        \\  xyron down                           Stop project services
+        \\  xyron restart <service>              Restart a service
+        \\  xyron ps                             Show service status
+        \\  xyron logs <service>                 Show service logs
+        \\  xyron reload                           Reload config and project context
+        \\  xyron doctor                          Diagnose project issues
+        \\  xyron context explain [KEY]           Explain context/value origin
+        \\  xyron project info                   Show project info
+        \\  xyron project context                Show resolved context
         \\  xyron secrets init                   Set up GPG key
         \\  xyron secrets open [--local]         Browse secrets (TUI)
         \\  xyron secrets get <name>             Get a secret value
