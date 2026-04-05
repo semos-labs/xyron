@@ -9,7 +9,7 @@ const std = @import("std");
 const shell_mod = @import("shell.zig");
 const headless_mod = @import("headless.zig");
 
-const version = "0.1.1";
+const version = "0.1.2";
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

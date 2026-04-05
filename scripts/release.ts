@@ -218,8 +218,23 @@ async function main() {
     ok("Updated src/main.zig version");
   }
 
+  // 6b. Update version in build.zig.zon
+  const zonPath = "./build.zig.zon";
+  const zonContent = await Bun.file(zonPath).text();
+  const updatedZon = zonContent.replace(
+    /\.version\s*=\s*"[^"]*"/,
+    `.version = "${version}"`,
+  );
+
+  if (updatedZon === zonContent) {
+    warn("Could not find .version in build.zig.zon — skipping update");
+  } else {
+    await Bun.write(zonPath, updatedZon);
+    ok("Updated build.zig.zon version");
+  }
+
   // 7. Commit version bump
-  await $`git add ${mainZigPath}`;
+  await $`git add ${mainZigPath} ${zonPath}`;
   const diff = await $`git diff --cached --name-only`.text();
   if (diff.trim()) {
     await $`git commit -m ${"chore: bump version to " + tag}`.quiet();
