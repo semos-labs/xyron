@@ -1,0 +1,111 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.1)"
+        required: true
+        type: string
+
+concurrency:
+  group: publish
+  cancel-in-progress: true
+
+env:
+  GITHUB_REPO: semos-labs/xyron
+  HOMEBREW_TAP: semos-labs/homebrew-tap
+  RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  homebrew:
+    if: ${{ inputs.tag || !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release assets
+        run: |
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPO" \
+            --pattern "xyron-*" \
+            --dir assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Calculate SHA256 checksums
+        id: checksums
+        run: |
+          cd assets
+          echo "darwin_arm64=$(sha256sum xyron-darwin-arm64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "darwin_x64=$(sha256sum xyron-darwin-x64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "linux_x64=$(sha256sum xyron-linux-x64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=$(sha256sum xyron-linux-arm64.tar.gz | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch Homebrew tap update
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: ${{ env.HOMEBREW_TAP }}
+          event-type: update-formula-xyron
+          client-payload: |
+            {
+              "version": "${{ steps.version.outputs.version }}",
+              "tag": "${{ env.RELEASE_TAG }}",
+              "darwin_arm64_sha256": "${{ steps.checksums.outputs.darwin_arm64 }}",
+              "darwin_x64_sha256": "${{ steps.checksums.outputs.darwin_x64 }}",
+              "linux_x64_sha256": "${{ steps.checksums.outputs.linux_x64 }}",
+              "linux_arm64_sha256": "${{ steps.checksums.outputs.linux_arm64 }}"
+            }
+
+      - name: Step summary
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## Release ${{ env.RELEASE_TAG }}
+
+          | Platform | SHA256 |
+          |----------|--------|
+          | darwin-arm64 | \`${{ steps.checksums.outputs.darwin_arm64 }}\` |
+          | darwin-x64 | \`${{ steps.checksums.outputs.darwin_x64 }}\` |
+          | linux-x64 | \`${{ steps.checksums.outputs.linux_x64 }}\` |
+          | linux-arm64 | \`${{ steps.checksums.outputs.linux_arm64 }}\` |
+          EOF
+
+  merge-release-branch:
+    if: ${{ inputs.tag || !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create PR and merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BRANCH="release-${VERSION}"
+
+          if ! gh api "repos/${GITHUB_REPO}/branches/${BRANCH}" --silent 2>/dev/null; then
+            echo "Branch ${BRANCH} does not exist, skipping"
+            exit 0
+          fi
+
+          PR_URL=$(gh pr create \
+            --repo "$GITHUB_REPO" \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore: merge release ${RELEASE_TAG} into main" \
+            --body "Automated PR to merge \`${BRANCH}\` back into \`main\` after release \`${RELEASE_TAG}\`." \
+          )
+
+          echo "Created PR: $PR_URL"
+          gh pr merge "$PR_URL" --squash --delete-branch

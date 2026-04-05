@@ -1,0 +1,268 @@
+#!/usr/bin/env bun
+/**
+ * Release script for Xyron
+ *
+ * Usage:
+ *   bun release                # Bump patch version (0.1.0 → 0.1.1)
+ *   bun release --minor        # Bump minor version (0.1.0 → 0.2.0)
+ *   bun release --major        # Bump major version (0.1.0 → 1.0.0)
+ *   bun release --rc           # Bump patch + RC    (0.1.0 → 0.1.1-rc1)
+ *   bun release --minor --rc   # Bump minor + RC    (0.1.0 → 0.2.0-rc1)
+ *   bun release --major --rc   # Bump major + RC    (0.1.0 → 1.0.0-rc1)
+ *
+ * RC rules:
+ *   - First --rc after a stable release bumps the version and appends -rc1
+ *   - Subsequent --rc bumps the RC number (rc1 → rc2 → rc3 ...)
+ *   - Running without --rc after an RC finalises the version (removes -rcN)
+ */
+
+import { $ } from "bun";
+
+// ── Colors ──────────────────────────────────────────────────────────────────
+
+const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
+const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
+const cyan = (s: string) => `\x1b[36m${s}\x1b[39m`;
+const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
+const red = (s: string) => `\x1b[31m${s}\x1b[39m`;
+const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+$.throws(false); // we handle errors ourselves
+
+function ok(msg: string) { console.log(`  ${green("✓")} ${msg}`); }
+function fail(msg: string) { console.error(`  ${red("✗")} ${msg}`); }
+function warn(msg: string) { console.log(`  ${yellow("⚠")} ${msg}`); }
+
+interface ParsedVersion {
+  major: number;
+  minor: number;
+  patch: number;
+  rc: number | null; // null = stable, 1+ = rc number
+}
+
+function parseVersion(tag: string): ParsedVersion | null {
+  const m = tag.match(/^v?(\d+)\.(\d+)\.(\d+)(?:-rc(\d+))?$/);
+  if (!m) return null;
+  return {
+    major: Number(m[1]),
+    minor: Number(m[2]),
+    patch: Number(m[3]),
+    rc: m[4] != null ? Number(m[4]) : null,
+  };
+}
+
+function formatVersion(v: ParsedVersion): string {
+  const base = `${v.major}.${v.minor}.${v.patch}`;
+  return v.rc != null ? `${base}-rc${v.rc}` : base;
+}
+
+function formatTag(v: ParsedVersion): string {
+  return `v${formatVersion(v)}`;
+}
+
+// ── Main ────────────────────────────────────────────────────────────────────
+
+const args = process.argv.slice(2);
+
+if (args.includes("-h") || args.includes("--help")) {
+  console.log();
+  console.log(`  ${bold("release")} ${dim("— tag & publish a new Xyron version")}`);
+  console.log();
+  console.log(`  ${bold("Usage:")}`);
+  console.log(`    ${cyan("bun release")}                ${dim("patch bump  (0.1.0 → 0.1.1)")}`);
+  console.log(`    ${cyan("bun release --minor")}        ${dim("minor bump  (0.1.0 → 0.2.0)")}`);
+  console.log(`    ${cyan("bun release --major")}        ${dim("major bump  (0.1.0 → 1.0.0)")}`);
+  console.log(`    ${cyan("bun release --rc")}           ${dim("patch RC    (0.1.0 → 0.1.1-rc1)")}`);
+  console.log(`    ${cyan("bun release --minor --rc")}   ${dim("minor RC    (0.1.0 → 0.2.0-rc1)")}`);
+  console.log(`    ${cyan("bun release --major --rc")}   ${dim("major RC    (0.1.0 → 1.0.0-rc1)")}`);
+  console.log();
+  console.log(`  ${bold("Options:")}`);
+  console.log(`    ${cyan("--dry-run, -n")}              ${dim("Show what would happen without making changes")}`);
+  console.log();
+  console.log(`  ${bold("RC rules:")}`);
+  console.log(`    ${dim("First --rc after a stable release bumps version + appends -rc1")}`);
+  console.log(`    ${dim("Subsequent --rc bumps the RC number (rc1 → rc2 → rc3 …)")}`);
+  console.log(`    ${dim("Without --rc after an RC → finalises the version (drops -rcN)")}`);
+  console.log();
+  process.exit(0);
+}
+
+const bumpType = args.includes("--major") ? "major"
+  : args.includes("--minor") ? "minor"
+  : "patch";
+
+const isRC = args.includes("--rc");
+const isDryRun = args.includes("--dry-run") || args.includes("-n");
+
+async function main() {
+  console.log();
+
+  // 1. Resolve current version from latest GitHub tag
+  await $`git fetch --tags origin`.quiet();
+  ok("Fetched tags from origin");
+
+  let latestTag: string;
+  const tagLines = (await $`git tag -l "v*"`.text()).trim();
+  if (tagLines) {
+    const allTags = tagLines.split("\n").map(t => t.trim()).filter(Boolean);
+    const parsed = allTags
+      .map(t => ({ tag: t, v: parseVersion(t) }))
+      .filter((e): e is { tag: string; v: ParsedVersion } => e.v !== null);
+    parsed.sort((a, b) => {
+      if (a.v.major !== b.v.major) return b.v.major - a.v.major;
+      if (a.v.minor !== b.v.minor) return b.v.minor - a.v.minor;
+      if (a.v.patch !== b.v.patch) return b.v.patch - a.v.patch;
+      // stable > rc, higher rc > lower rc
+      if (a.v.rc === null && b.v.rc === null) return 0;
+      if (a.v.rc === null) return -1;
+      if (b.v.rc === null) return 1;
+      return b.v.rc - a.v.rc;
+    });
+    latestTag = parsed.length > 0 ? parsed[0].tag : "v0.0.0";
+  } else {
+    latestTag = "v0.0.0";
+  }
+
+  const current = parseVersion(latestTag);
+  if (!current) {
+    fail(`Invalid tag format: ${bold(latestTag)}`);
+    console.log();
+    process.exit(1);
+  }
+
+  // 2. Compute next version
+  const next: ParsedVersion = { ...current };
+
+  if (isRC) {
+    if (current.rc != null) {
+      next.rc = current.rc + 1;
+    } else {
+      switch (bumpType) {
+        case "major": next.major++; next.minor = 0; next.patch = 0; break;
+        case "minor": next.minor++; next.patch = 0; break;
+        case "patch": next.patch++; break;
+      }
+      next.rc = 1;
+    }
+  } else {
+    if (current.rc != null) {
+      next.rc = null;
+    } else {
+      switch (bumpType) {
+        case "major": next.major++; next.minor = 0; next.patch = 0; break;
+        case "minor": next.minor++; next.patch = 0; break;
+        case "patch": next.patch++; break;
+      }
+    }
+  }
+
+  const version = formatVersion(next);
+  const tag = formatTag(next);
+  const label = isRC ? "release candidate" : bumpType;
+
+  console.log(`  ${bold(latestTag)} ${dim("→")} ${bold(cyan(tag))} ${dim(`(${label})`)}`);
+  console.log();
+
+  if (isDryRun) {
+    ok("Dry run — no changes made");
+    console.log();
+    process.exit(0);
+  }
+
+  // 3. Clean work tree
+  const status = await $`git status --porcelain`.text();
+  if (status.trim() !== "") {
+    fail("Work tree is not clean — commit or stash first");
+    console.log(dim(status.trimEnd().split("\n").map(l => `      ${l}`).join("\n")));
+    console.log();
+    process.exit(1);
+  }
+
+  // 4. Switch to main and pull latest
+  await $`git checkout main`.quiet();
+  ok("Checked out main");
+
+  const pull = await $`git pull origin main`.quiet();
+  if (pull.exitCode !== 0) {
+    fail("Could not pull latest main");
+    console.log();
+    process.exit(1);
+  }
+  ok("Pulled latest main");
+
+  // 5. Create or reuse release branch
+  const baseBranch = `release-${next.major}.${next.minor}.${next.patch}`;
+  const branchExists = (await $`git rev-parse --verify ${baseBranch}`.quiet()).exitCode === 0;
+  if (branchExists) {
+    await $`git checkout ${baseBranch}`.quiet();
+    ok(`Switched to existing branch ${bold(baseBranch)}`);
+  } else {
+    await $`git checkout -b ${baseBranch}`.quiet();
+    ok(`Created branch ${bold(baseBranch)}`);
+  }
+
+  // 6. Update version in src/main.zig
+  const mainZigPath = "./src/main.zig";
+  const mainZigContent = await Bun.file(mainZigPath).text();
+  const updatedMainZig = mainZigContent.replace(
+    /const version = "[^"]*";/,
+    `const version = "${version}";`,
+  );
+
+  if (updatedMainZig === mainZigContent) {
+    warn("Could not find version in src/main.zig — skipping update");
+  } else {
+    await Bun.write(mainZigPath, updatedMainZig);
+    ok("Updated src/main.zig version");
+  }
+
+  // 7. Commit version bump
+  await $`git add ${mainZigPath}`;
+  const diff = await $`git diff --cached --name-only`.text();
+  if (diff.trim()) {
+    await $`git commit -m ${"chore: bump version to " + tag}`.quiet();
+    ok("Committed version bump");
+  } else {
+    ok("Version already up to date");
+  }
+
+  // 8. Tag
+  await $`git tag -a ${tag} -m ${"Release " + tag}`;
+  ok(`Tagged ${bold(tag)}`);
+
+  // 9. Push release branch and tag
+  await $`git push -u origin ${baseBranch}`.quiet();
+  await $`git push origin ${tag}`.quiet();
+  ok("Pushed to origin");
+
+  // 10. GitHub release
+  const ghFlags: string[] = ["--draft", "--generate-notes"];
+  if (isRC) ghFlags.push("--prerelease");
+
+  const gh = await $`gh release create ${tag} --title ${tag} ${ghFlags}`.quiet();
+  if (gh.exitCode === 0) {
+    ok(`Created draft GitHub release${isRC ? " (prerelease)" : ""}`);
+  } else {
+    const flagStr = ghFlags.join(" ");
+    const cmd = `gh release create ${tag} --title ${tag} ${flagStr}`;
+    warn(`Could not create GitHub release — run manually:`);
+    console.log(`      ${cyan(cmd)}`);
+  }
+
+  // 11. Switch back to main
+  await $`git checkout main`.quiet();
+  ok("Checked out main");
+
+  console.log();
+  console.log(`  ${dim("View:")} ${cyan(`https://github.com/semos-labs/xyron/releases/tag/${tag}`)}`);
+  console.log();
+}
+
+main().catch((err) => {
+  console.log();
+  fail(err.message);
+  console.log();
+  process.exit(1);
+});

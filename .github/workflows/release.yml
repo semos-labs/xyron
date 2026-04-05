@@ -1,0 +1,183 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["release-*"]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GITHUB_REPO: semos-labs/xyron
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Resolve which GitHub Release to attach artifacts to ──
+  resolve-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve target release
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            echo "release_tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "Resolved: tag push → $TAG"
+            exit 0
+          fi
+
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          BASE_VERSION="${BRANCH#release-}"
+
+          if [ -z "$BASE_VERSION" ]; then
+            echo "ERROR: could not extract version from branch $BRANCH"
+            exit 1
+          fi
+
+          STABLE_TAG="v${BASE_VERSION}"
+          DRAFT=$(gh release view "$STABLE_TAG" --repo "$GITHUB_REPO" --json isDraft,tagName -q 'select(.isDraft) | .tagName' 2>/dev/null || echo "")
+          if [ -n "$DRAFT" ]; then
+            echo "release_tag=$STABLE_TAG" >> "$GITHUB_OUTPUT"
+            echo "Resolved: draft release → $STABLE_TAG"
+            exit 0
+          fi
+
+          LATEST_RC=$(gh release list --repo "$GITHUB_REPO" --limit 50 --json tagName,isPrerelease \
+            -q "[.[] | select(.isPrerelease and (.tagName | startswith(\"v${BASE_VERSION}-rc\"))) | .tagName] | sort | last // empty")
+
+          if [ -n "$LATEST_RC" ]; then
+            echo "release_tag=$LATEST_RC" >> "$GITHUB_OUTPUT"
+            echo "Resolved: latest RC → $LATEST_RC"
+            exit 0
+          fi
+
+          echo "ERROR: no release found for version $BASE_VERSION"
+          exit 1
+
+  # ── macOS ──
+  build-macos:
+    needs: resolve-release
+    strategy:
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-latest
+            artifact: xyron-darwin-arm64.tar.gz
+          - target: darwin-x64
+            runner: macos-15-intel
+            artifact: xyron-darwin-x64.tar.gz
+
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Remove stale release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+        run: |
+          gh release delete-asset "$RELEASE_TAG" "${{ matrix.artifact }}" --repo "$GITHUB_REPO" --yes 2>/dev/null || true
+
+      - name: Install dependencies
+        run: brew install sqlite lua
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Cache Zig build
+        uses: actions/cache@v4
+        with:
+          path: .zig-cache
+          key: zig-${{ matrix.target }}-${{ hashFiles('build.zig') }}
+          restore-keys: zig-${{ matrix.target }}-
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Strip binary
+        run: strip zig-out/bin/xyron
+
+      - name: Package
+        run: |
+          mkdir -p staging
+          cp zig-out/bin/xyron staging/
+          cd staging
+          tar czf ../${{ matrix.artifact }} xyron
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+        run: |
+          gh release upload "$RELEASE_TAG" ${{ matrix.artifact }} --repo "$GITHUB_REPO" --clobber
+
+  # ── Linux ──
+  build-linux:
+    needs: resolve-release
+    strategy:
+      matrix:
+        include:
+          - target: linux-x64
+            runner: ubuntu-latest
+            artifact: xyron-linux-x64.tar.gz
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            artifact: xyron-linux-arm64.tar.gz
+
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Remove stale release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+        run: |
+          gh release delete-asset "$RELEASE_TAG" "${{ matrix.artifact }}" --repo "$GITHUB_REPO" --yes 2>/dev/null || true
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev liblua5.4-dev
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Strip binary
+        run: strip zig-out/bin/xyron
+
+      - name: Package
+        run: |
+          mkdir -p staging
+          cp zig-out/bin/xyron staging/
+          cd staging
+          tar czf ../${{ matrix.artifact }} xyron
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.resolve-release.outputs.release_tag }}
+        run: |
+          gh release upload "$RELEASE_TAG" ${{ matrix.artifact }} --repo "$GITHUB_REPO" --clobber
