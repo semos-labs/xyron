@@ -134,6 +134,7 @@ fn providePathCommands(
 
     while (path_iter.next()) |dir| {
         if (dir.len == 0) continue;
+        if (!std.fs.path.isAbsolute(dir)) continue;
         scanDirectory(out, dir, prefix, .external_cmd) catch continue;
         if (out.count >= complete.MAX_CANDIDATES / 2) break; // don't flood
     }

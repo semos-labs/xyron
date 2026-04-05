@@ -42,6 +42,7 @@ pub fn suggest(cmd: []const u8, env: *const environ_mod.Environ) ?[]const u8 {
 
     while (path_iter.next()) |dir| {
         if (dir.len == 0) continue;
+        if (!std.fs.path.isAbsolute(dir)) continue;
 
         var d = std.fs.openDirAbsolute(dir, .{ .iterate = true }) catch continue;
         defer d.close();

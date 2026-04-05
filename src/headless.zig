@@ -87,8 +87,11 @@ pub const HeadlessRuntime = struct {
         // Load config
         loadConfig(lua);
 
-        const hist_ptr = allocator.create(history_mod.History) catch null;
-        if (hist_ptr) |h| h.* = .{};
+        const hist_ptr = if (history_mod.History.init(allocator)) |h| blk: {
+            const ptr = allocator.create(history_mod.History) catch break :blk @as(?*history_mod.History, null);
+            ptr.* = h;
+            break :blk ptr;
+        } else |_| null;
 
         return .{
             .allocator = allocator,

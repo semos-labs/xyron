@@ -62,7 +62,7 @@ pub const Shell = struct {
         _ = std.fmt.bufPrint(&sid_buf, "{d}-{d}", .{ pid, ts }) catch {};
 
         var hdb = history_db_mod.HistoryDb.init(allocator, sid_buf[0..sid_len]);
-        var hist = history_mod.History{};
+        var hist = try history_mod.History.init(allocator);
         loadRecentHistory(&hdb, &hist);
         attyx.historyInitialized(hdb.totalEntries());
 
@@ -119,6 +119,7 @@ pub const Shell = struct {
         self.cmd_cache.deinit();
         lua_api.deinit(self.lua);
         self.history_db.deinit();
+        self.history.deinit();
         const jump_cmd = @import("builtins/jump.zig");
         jump_cmd.deinitDb();
         self.env.deinit();
@@ -847,12 +848,63 @@ fn installSignalHandlers() void {
         .flags = 0,
     };
     posix.sigaction(posix.SIG.WINCH, &winch_act, null);
+
+    // Crash signal handlers — write info to /tmp/xyron-crash.log
+    const crash_act = posix.Sigaction{
+        .handler = .{ .handler = handleCrashSignal },
+        .mask = posix.sigemptyset(),
+        .flags = 1 << 0, // SA_RESETHAND — one-shot: re-raise kills the process
+    };
+    posix.sigaction(posix.SIG.ILL, &crash_act, null);
+    posix.sigaction(posix.SIG.SEGV, &crash_act, null);
+    posix.sigaction(posix.SIG.BUS, &crash_act, null);
+    posix.sigaction(posix.SIG.ABRT, &crash_act, null);
 }
 
 fn noop(_: i32) callconv(.c) void {}
 
 fn handleWinch(_: i32) callconv(.c) void {
     winch_pending = true;
+}
+
+fn handleCrashSignal(sig: i32) callconv(.c) void {
+    // Write crash info to /tmp/xyron-crash.log so it survives terminal close.
+    // Keep this minimal — we're in a signal handler.
+    const f = std.fs.createFileAbsolute("/tmp/xyron-crash.log", .{ .truncate = true }) catch return;
+    defer f.close();
+    const sig_name: []const u8 = switch (sig) {
+        4 => "SIGILL (illegal instruction)",
+        10 => "SIGBUS (bus error)",
+        11 => "SIGSEGV (segmentation fault)",
+        6 => "SIGABRT (abort)",
+        else => "unknown signal",
+    };
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "xyron crash: signal {d} ({s})\nreturn address: {x}\n", .{
+        sig, sig_name, @returnAddress(),
+    }) catch "xyron crash: unknown\n";
+    _ = f.writeAll(msg) catch {};
+    // Dump stack trace to the crash log file
+    var trace_buf: [8192]u8 = undefined;
+    const stderr = std.fs.File.stderr();
+    _ = stderr.writeAll(msg) catch {};
+    // Use dumpCurrentStackTrace which goes to stderr — redirect stderr to our file
+    // Instead, manually walk the stack and write addresses
+    var frame_buf: [64]u8 = undefined;
+    var i: usize = 0;
+    var fp: ?[*]const usize = @ptrFromInt(@frameAddress());
+    while (fp) |frame| : (i += 1) {
+        if (i > 50) break; // safety limit
+        const ret_addr = frame[1];
+        if (ret_addr == 0) break;
+        const n = std.fmt.bufPrint(&frame_buf, "  frame {d}: {x}\n", .{ i, ret_addr }) catch break;
+        _ = f.writeAll(n) catch {};
+        _ = stderr.writeAll(n) catch {};
+        fp = @ptrFromInt(frame[0]);
+        if (@intFromPtr(fp) < 0x1000) break; // guard against null-ish pointers
+    }
+    _ = f.writeAll(&trace_buf) catch {};
+    // Re-raise will happen because SA_RESETHAND restores default handler
 }
 
 fn scopy(dest: []u8, src: []const u8) usize {

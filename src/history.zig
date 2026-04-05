@@ -12,9 +12,10 @@ const MAX_ENTRIES: usize = 1000;
 const MAX_ENTRY_LEN: usize = 4096;
 
 pub const History = struct {
-    /// Circular buffer of history entries.
-    entries: [MAX_ENTRIES][MAX_ENTRY_LEN]u8 = undefined,
-    lengths: [MAX_ENTRIES]usize = [_]usize{0} ** MAX_ENTRIES,
+    /// Heap-allocated circular buffer of history entries (avoids ~4MB on the stack).
+    entries: *[MAX_ENTRIES][MAX_ENTRY_LEN]u8,
+    lengths: *[MAX_ENTRIES]usize,
+    allocator: std.mem.Allocator,
     /// Number of entries stored (0..MAX_ENTRIES).
     count: usize = 0,
     /// Write position in the circular buffer.
@@ -26,6 +27,22 @@ pub const History = struct {
     /// Saved input before user started navigating.
     saved_input: [MAX_ENTRY_LEN]u8 = undefined,
     saved_len: usize = 0,
+
+    pub fn init(allocator: std.mem.Allocator) !History {
+        const entries = try allocator.create([MAX_ENTRIES][MAX_ENTRY_LEN]u8);
+        const lengths = try allocator.create([MAX_ENTRIES]usize);
+        lengths.* = [_]usize{0} ** MAX_ENTRIES;
+        return .{
+            .entries = entries,
+            .lengths = lengths,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *History) void {
+        self.allocator.destroy(self.entries);
+        self.allocator.destroy(self.lengths);
+    }
 
     /// Add a command to history.
     pub fn push(self: *History, line: []const u8) void {
@@ -150,7 +167,8 @@ pub const History = struct {
 // ---------------------------------------------------------------------------
 
 test "push and navigate" {
-    var h = History{};
+    var h = try History.init(std.testing.allocator);
+    defer h.deinit();
     h.push("first");
     h.push("second");
     h.push("third");
@@ -164,7 +182,8 @@ test "push and navigate" {
 }
 
 test "navigate down returns to saved input" {
-    var h = History{};
+    var h = try History.init(std.testing.allocator);
+    defer h.deinit();
     h.push("first");
     h.push("second");
 
@@ -177,7 +196,8 @@ test "navigate down returns to saved input" {
 }
 
 test "no consecutive duplicates" {
-    var h = History{};
+    var h = try History.init(std.testing.allocator);
+    defer h.deinit();
     h.push("same");
     h.push("same");
     h.push("same");
@@ -186,7 +206,8 @@ test "no consecutive duplicates" {
 }
 
 test "empty history returns null" {
-    var h = History{};
+    var h = try History.init(std.testing.allocator);
+    defer h.deinit();
     h.beginNavigation("");
     try std.testing.expectEqual(@as(?[]const u8, null), h.navigateUp());
 }

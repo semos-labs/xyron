@@ -68,7 +68,16 @@ pub fn main() !void {
     var sh = try shell_mod.Shell.init(allocator);
     defer sh.deinit();
     sh.ipc_enabled = enable_ipc;
-    try sh.run();
+    sh.run() catch |err| {
+        // Write crash info to a log file so it survives terminal close
+        const crash_log = std.fs.createFileAbsolute("/tmp/xyron-crash.log", .{ .truncate = true }) catch return;
+        defer crash_log.close();
+        crash_log.writer().print("xyron crashed: {s}\n", .{@errorName(err)}) catch {};
+        if (@errorReturnTrace()) |trace| {
+            std.debug.writeStackTrace(crash_log.writer(), trace.*, std.debug.getSelfDebugInfo() catch return) catch {};
+        }
+        return err;
+    };
 
     // Interactive shell exits 0. Last command's exit code is for
     // $? inside the shell, not the shell process itself.

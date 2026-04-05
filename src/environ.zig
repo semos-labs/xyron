@@ -5,6 +5,7 @@
 // export and unset mutate it, and child processes inherit it via toEnvp().
 
 const std = @import("std");
+const c = @cImport(@cInclude("stdlib.h"));
 const attyx_mod = @import("attyx.zig");
 
 pub const Environ = struct {
@@ -30,10 +31,17 @@ pub const Environ = struct {
     }
 
     /// Set an environment variable. Emits Attyx env_changed event.
+    /// Also updates the process environment so execvpeZ can find PATH.
     pub fn set(self: *Environ, key: []const u8, value: []const u8) !void {
         if (self.attyx) |ax| ax.envChanged("set", key, value);
         try self.map.put(key, value);
         if (std.mem.eql(u8, key, "PATH")) self.path_dirty = true;
+        // Sync to process environment (execvpeZ reads PATH from std.c.environ)
+        const key_z = self.allocator.dupeZ(u8, key) catch return;
+        defer self.allocator.free(key_z);
+        const val_z = self.allocator.dupeZ(u8, value) catch return;
+        defer self.allocator.free(val_z);
+        _ = c.setenv(key_z, val_z, 1);
     }
 
     /// Remove an environment variable. Emits Attyx env_changed event.
@@ -41,6 +49,10 @@ pub const Environ = struct {
         if (self.attyx) |ax| ax.envChanged("unset", key, "");
         self.map.remove(key);
         if (std.mem.eql(u8, key, "PATH")) self.path_dirty = true;
+        // Sync to process environment
+        const key_z = self.allocator.dupeZ(u8, key) catch return;
+        defer self.allocator.free(key_z);
+        _ = c.unsetenv(key_z);
     }
 
     /// Convenience: get HOME.
