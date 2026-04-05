@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/Xyron.png" alt="Attyx" width="200">
+</p>
+
 <h1 align="center">🐚 Xyron</h1>
 
 <p align="center">
