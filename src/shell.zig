@@ -733,7 +733,7 @@ fn installLuaTypes() void {
         \\{{
         \\  "workspace.library": ["{s}"],
         \\  "diagnostics.globals": ["xyron"],
-        \\  "runtime.version": "Lua 5.4"
+        \\  "runtime.version": "Lua 5.5"
         \\}}
         \\
     , .{types_dir}) catch return;

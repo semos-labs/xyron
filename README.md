@@ -11,7 +11,7 @@
 <p align="center">
   <a href="https://github.com/semos-labs/xyron/releases/latest"><img src="https://img.shields.io/github/v/release/semos-labs/xyron?label=Release&color=green" alt="Latest Release"></a>
   <img src="https://img.shields.io/badge/Zig-0.15-f7a41d?logo=zig&logoColor=white" alt="Zig 0.15">
-  <img src="https://img.shields.io/badge/Lua-5.4-2C2D72?logo=lua&logoColor=white" alt="Lua 5.4">
+  <img src="https://img.shields.io/badge/Lua-5.5-2C2D72?logo=lua&logoColor=white" alt="Lua 5.5">
   <img src="https://img.shields.io/badge/SQLite-History-003B57?logo=sqlite&logoColor=white" alt="SQLite">
   <img src="https://img.shields.io/badge/License-MIT-blue" alt="MIT License">
 </p>
@@ -177,14 +177,14 @@ chsh -s $(which xyron)
 
 ### From source
 
-Requires **Zig 0.15.2+**, **SQLite3**, and **Lua 5.4**.
+Requires **Zig 0.15.2+** and **SQLite3**. Lua 5.5 is compiled from source automatically.
 
 ```bash
 # macOS
-brew install zig lua sqlite
+brew install zig sqlite
 
 # Linux (Debian/Ubuntu)
-sudo apt install zig libsqlite3-dev liblua5.4-dev
+sudo apt install zig libsqlite3-dev
 
 # Build
 zig build -Doptimize=ReleaseFast

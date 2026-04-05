@@ -9,7 +9,7 @@ Xyron is tightly coupled with **Attyx** (terminal emulator) at `~/Projects/attyx
 ## Language & tooling
 
 - **Zig 0.15** — entire codebase, links sqlite3 and lua via system libraries
-- **Lua 5.4** — scripting/configuration language (no bash/sh scripting, xyron is not POSIX)
+- **Lua 5.5** — scripting/configuration language (no bash/sh scripting, xyron is not POSIX)
 - Shell can delegate to `sh` when needed, but Lua is the first-class scripting interface
 
 ## Architecture rules
@@ -54,7 +54,8 @@ attyx send-keys "exit{Enter}"
 - **Always run tests after changes** (`zig build test`).
 - Every new feature, change, or fix **must have tests**.
 - If a test fails, fix it before moving on.
-- Build links: `-lsqlite3 -llua -lc` with include/lib paths for homebrew.
+- Lua is compiled from source via Zig's package manager (declared in `build.zig.zon`). SQLite and libc are linked from the system.
+- Build links: `-lsqlite3 -lc` with include/lib paths for homebrew.
 
 ## Lua API types
 

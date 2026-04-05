@@ -1,16 +1,59 @@
 const std = @import("std");
 
+/// Lua library C sources (everything except lua.c and luac.c which are standalone programs)
+const lua_lib_sources = [_][]const u8{
+    "lapi.c",
+    "lauxlib.c",
+    "lbaselib.c",
+    "lcode.c",
+    "lcorolib.c",
+    "lctype.c",
+    "ldblib.c",
+    "ldebug.c",
+    "ldo.c",
+    "ldump.c",
+    "lfunc.c",
+    "lgc.c",
+    "linit.c",
+    "liolib.c",
+    "llex.c",
+    "lmathlib.c",
+    "lmem.c",
+    "loadlib.c",
+    "lobject.c",
+    "lopcodes.c",
+    "loslib.c",
+    "lparser.c",
+    "lstate.c",
+    "lstring.c",
+    "lstrlib.c",
+    "ltable.c",
+    "ltablib.c",
+    "ltm.c",
+    "lundump.c",
+    "lutf8lib.c",
+    "lvm.c",
+    "lzio.c",
+};
+
+fn addLuaDep(mod: *std.Build.Module, b: *std.Build) void {
+    const lua_dep = b.dependency("lua", .{});
+    const lua_src = lua_dep.path("src");
+
+    // Add Lua headers to the include path
+    mod.addIncludePath(lua_src);
+
+    // Compile Lua C sources and statically link them
+    mod.addCSourceFiles(.{
+        .root = lua_src,
+        .files = &lua_lib_sources,
+        .flags = &.{"-std=c99"},
+    });
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-
-    // --- Shared module options (link sqlite3 + libc) ---
-    const common_opts = std.Build.Module.CreateOptions{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    };
-    _ = common_opts;
 
     // --- Xyron executable ---
     const exe_mod = b.createModule(.{
@@ -21,18 +64,16 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("sqlite3", .{});
     exe_mod.link_libc = true;
 
-    // Platform-specific include/lib paths
+    // Lua: compiled from source via Zig package manager
+    addLuaDep(exe_mod, b);
+
+    // Platform-specific include/lib paths (sqlite3 only now)
     const resolved = target.result;
     if (resolved.os.tag == .macos) {
-        exe_mod.linkSystemLibrary("lua", .{});
-        // Homebrew: /opt/homebrew on arm64, /usr/local on x64
         exe_mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
         exe_mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
         exe_mod.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
         exe_mod.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
-    } else {
-        // Linux: liblua5.4-dev — CI creates /usr/include/lua → lua5.4 symlink
-        exe_mod.linkSystemLibrary("lua5.4", .{});
     }
 
     // C sources
@@ -100,14 +141,15 @@ pub fn build(b: *std.Build) void {
         });
         mod.linkSystemLibrary("sqlite3", .{});
         mod.link_libc = true;
+
+        // Lua: same as exe
+        addLuaDep(mod, b);
+
         if (resolved.os.tag == .macos) {
-            mod.linkSystemLibrary("lua", .{});
             mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
             mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
             mod.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
             mod.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
-        } else {
-            mod.linkSystemLibrary("lua5.4", .{});
         }
 
         const t = b.addTest(.{ .root_module = mod });

@@ -9,9 +9,9 @@
 
 const std = @import("std");
 pub const c = @cImport({
-    @cInclude("lua/lua.h");
-    @cInclude("lua/lauxlib.h");
-    @cInclude("lua/lualib.h");
+    @cInclude("lua.h");
+    @cInclude("lauxlib.h");
+    @cInclude("lualib.h");
 });
 const environ_mod = @import("environ.zig");
 const lua_hooks = @import("lua_hooks.zig");
