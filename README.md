@@ -45,11 +45,14 @@ Works standalone in any terminal. Works best inside [✨ Attyx](https://github.c
 | 🗄️ | **SQLite history** | Every command recorded with exit code, duration, cwd. Search, filter, rerun. Ctrl+R fuzzy search. |
 | 🔍 | **Smart completions** | Fuzzy picker with descriptions. Parses `--help` and caches flags. Path, env, command providers. |
 | 👻 | **Ghost text** | History-based inline suggestions as you type. Right arrow to accept. |
-| ⌨️ | **Vim mode** | Optional modal editing. Cursor shape and prompt change with mode. |
-| 🎨 | **Prompt engine** | Composable segments: cwd, git branch, jobs, duration, Lua functions. Multiline + right-align. |
+| ⌨️ | **Vim mode** | Normal, insert, visual. Text objects (`ciw`, `da"`, `yi(`). System clipboard. |
+| 🎨 | **Prompt engine** | Composable segments: cwd, git, jobs, duration, project status, Lua widgets. Multiline + right-align. |
+| 📁 | **Project system** | `xyron.toml` defines commands, env, services, secrets. Auto-activates on `cd`. |
+| 🚀 | **Service runtime** | `xyron up/down/ps/logs` — background dev services, project-scoped, survive sessions. |
+| 🩺 | **Doctor & explain** | `xyron doctor` validates setup. `xyron context explain` traces env value provenance. |
+| 🔐 | **Secrets manager** | GPG-encrypted store. `${secret:NAME}` interpolation in `xyron.toml`. Auto-redacted in output. |
 | ⚙️ | **Job control** | Background `&`, Ctrl+Z suspend, `fg`/`bg` resume, process groups. |
 | 📂 | **Directory jumping** | Frecency-based `j` command. Learns from your `cd` usage. |
-| 🔐 | **Secrets manager** | Encrypted store. Reference secrets in commands without exposing in history or env. |
 | 🔎 | **Fuzzy finder** | Built-in `fz` for fuzzy file and directory search. Zero dependencies. |
 | 🔄 | **Migration assistant** | `migrate analyze` + `migrate convert` — translates bash/zsh config to Lua. |
 | 🖥️ | **Attyx integration** | Native popups, IPC socket, headless binary protocol. Structured lifecycle events. |
@@ -115,6 +118,48 @@ Built-in `j` command — a zoxide-style smart jumper. Learns from every `cd` and
 
 ---
 
+## 📁 Project System
+
+Define your project once in `xyron.toml` — Xyron handles environment, commands, services, and diagnostics.
+
+```toml
+[project]
+name = "api"
+
+[commands]
+dev = "bun run dev"
+test = "bun test"
+
+[env]
+sources = [".env", ".env.local"]
+
+[env.values]
+DATABASE_URL = "postgres://user:${secret:DB_PASS}@localhost/mydb"
+
+[secrets]
+required = ["API_KEY"]
+
+[services.web]
+command = "bun run dev"
+```
+
+```bash
+> cd ~/Projects/api
+project: api · env: 2 loaded · 1 secret(s) missing · 2 cmd(s)
+
+> xyron run dev                  # run with resolved env
+> xyron up                       # start background services
+> xyron ps                       # check service status
+> xyron logs -f web              # follow service logs
+> xyron doctor                   # validate everything
+> xyron context explain API_KEY  # trace where a value came from
+
+> xyron init                     # generate xyron.toml from existing project
+> xyron new bun my-app           # scaffold + xyron setup
+```
+
+---
+
 ## 📦 Install
 
 ### Homebrew (macOS & Linux)
@@ -150,23 +195,23 @@ zig build -Doptimize=ReleaseFast
 
 ## ⚡ Configuration
 
-Everything lives in `~/.config/xyron/config.lua`:
+Everything lives in `~/.config/xyron/config.lua`. Full LSP autocomplete via auto-installed type definitions.
 
 ```lua
--- Environment
-xyron.setenv("EDITOR", "vim")
+-- Settings
+xyron.config.completion(true)
+xyron.config.vim_mode(true)
+-- xyron.config.block_ui(true)
 
 -- Aliases
 xyron.alias("ll", "ls -la")
 xyron.alias("gs", "git status")
+xyron.alias("v", "nvim")
 
--- Prompt: path + git branch on line 1, symbol on line 2
-xyron.prompt({
-    "cwd", " ", "git_branch",
-    "spacer",
-    function() return os.date("%H:%M") end,
-    "\n",
-    "symbol", " ",
+-- Prompt: path + git on line 1, symbol on line 2
+xyron.prompt.init({
+    "cwd", " ", "git", "spacer", "xyron_project",
+    "\n", "symbol", " ",
 })
 
 -- Custom command
