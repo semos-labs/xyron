@@ -19,16 +19,21 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe_mod.linkSystemLibrary("sqlite3", .{});
-    exe_mod.linkSystemLibrary("lua", .{});
     exe_mod.link_libc = true;
 
     // Platform-specific include/lib paths
     const resolved = target.result;
     if (resolved.os.tag == .macos) {
+        exe_mod.linkSystemLibrary("lua", .{});
+        // Homebrew: /opt/homebrew on arm64, /usr/local on x64
         exe_mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
         exe_mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+        exe_mod.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
+        exe_mod.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+    } else {
+        // Linux: liblua5.4-dev — CI creates /usr/include/lua → lua5.4 symlink
+        exe_mod.linkSystemLibrary("lua5.4", .{});
     }
-    // Linux: sqlite3-dev and liblua5.4-dev are in standard system paths
 
     // C sources
     exe_mod.addCSourceFile(.{ .file = b.path("src/daemon_spawn.c") });
@@ -94,11 +99,15 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         mod.linkSystemLibrary("sqlite3", .{});
-        mod.linkSystemLibrary("lua", .{});
         mod.link_libc = true;
         if (resolved.os.tag == .macos) {
+            mod.linkSystemLibrary("lua", .{});
             mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
             mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
+            mod.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
+            mod.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+        } else {
+            mod.linkSystemLibrary("lua5.4", .{});
         }
 
         const t = b.addTest(.{ .root_module = mod });

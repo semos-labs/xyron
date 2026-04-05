@@ -48,12 +48,12 @@ pub fn run(args: []const []const u8, stdout: std.fs.File) Result {
         modes[count] = 0;
         if (dir.openFile(entry.name, .{})) |f| {
             defer f.close();
-            if (f.stat()) |s| { sizes[count] = s.size; modes[count] = s.mode; } else |_| {}
+            if (f.stat()) |s| { sizes[count] = s.size; modes[count] = @intCast(s.mode); } else |_| {}
         } else |_| {
             if (dir.openDir(entry.name, .{})) |*d2| {
                 var dm = d2.*;
                 defer dm.close();
-                if (dm.stat()) |s| { modes[count] = s.mode; } else |_| {}
+                if (dm.stat()) |s| { modes[count] = @intCast(s.mode); } else |_| {}
             } else |_| {}
         }
         count += 1;

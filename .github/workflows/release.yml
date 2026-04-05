@@ -155,7 +155,10 @@ jobs:
           gh release delete-asset "$RELEASE_TAG" "${{ matrix.artifact }}" --repo "$GITHUB_REPO" --yes 2>/dev/null || true
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev liblua5.4-dev
+        run: |
+          sudo apt-get update && sudo apt-get install -y libsqlite3-dev liblua5.4-dev
+          # Create symlink so #include <lua/lua.h> resolves (Debian uses lua5.4/ prefix)
+          sudo ln -sf /usr/include/lua5.4 /usr/include/lua
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
