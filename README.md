@@ -117,18 +117,33 @@ Built-in `j` command — a zoxide-style smart jumper. Learns from every `cd` and
 
 ## 📦 Install
 
+### Homebrew (macOS & Linux)
+
+```bash
+brew tap semos-labs/tap
+brew install xyron
+```
+
+Set as default shell:
+```bash
+echo "$(which xyron)" | sudo tee -a /etc/shells
+chsh -s $(which xyron)
+```
+
+### From source
+
 Requires **Zig 0.15.2+**, **SQLite3**, and **Lua 5.4**.
 
 ```bash
-# macOS (Homebrew)
+# macOS
 brew install zig lua sqlite
 
-# Build and run
-zig build
-./zig-out/bin/xyron
+# Linux (Debian/Ubuntu)
+sudo apt install zig libsqlite3-dev liblua5.4-dev
 
-# Run tests
-zig build test
+# Build
+zig build -Doptimize=ReleaseFast
+./zig-out/bin/xyron
 ```
 
 ---
