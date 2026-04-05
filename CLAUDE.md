@@ -8,7 +8,7 @@ Xyron is tightly coupled with **Attyx** (terminal emulator) at `~/Projects/attyx
 
 ## Language & tooling
 
-- **Zig 0.15** — entire codebase, links sqlite3 and lua via system libraries
+- **Zig 0.15** — entire codebase, links sqlite3 via system library, Lua compiled from source
 - **Lua 5.5** — scripting/configuration language (no bash/sh scripting, xyron is not POSIX)
 - Shell can delegate to `sh` when needed, but Lua is the first-class scripting interface
 
@@ -99,6 +99,53 @@ All built-in TUI tools (history explorer, fz, Ctrl+R, future tools) must share a
 - **Cursor**: visible in search input, positioned at end of filter text
 - **Resize**: handle SIGWINCH (EINTR from `c.read`), re-query size, re-render
 - **Alternate screen**: `\x1b[?1049h` on entry, `\x1b[?1049l` on exit (before writing result)
+
+## Releases
+
+Release process uses `bun scripts/release.ts`. CI builds and publishes automatically.
+
+### Commands
+
+```bash
+bun release              # Patch bump: 0.1.1 → 0.1.2
+bun release --minor      # Minor bump: 0.1.1 → 0.2.0
+bun release --major      # Major bump: 0.1.1 → 1.0.0
+bun release --rc         # Patch RC:   0.1.1 → 0.1.2-rc1
+bun release --minor --rc # Minor RC:   0.1.1 → 0.2.0-rc1
+bun release -n           # Dry run
+```
+
+### What the script does
+
+1. Fetches tags, resolves latest version
+2. Computes next version (respects RC rules)
+3. Ensures clean work tree
+4. Pulls latest main, creates/reuses `release-X.Y.Z` branch
+5. Bumps version in `src/main.zig` and `build.zig.zon`
+6. Commits, tags, pushes, creates draft GitHub release
+7. Switches back to main
+
+### RC rules
+
+- First `--rc` after stable: bumps version + appends `-rc1`
+- Subsequent `--rc`: increments RC number (rc1 �� rc2 → rc3)
+- Without `--rc` after an RC: finalises version (drops `-rcN`)
+
+### Release notes
+
+- Written in `releases/vX.Y.Z.md` on the release branch
+- Pushed to the release branch — CI updates the GitHub release body automatically
+- **Focus on user-facing changes** — what users can do, how to use it, why it matters
+- No internal architecture details or implementation specifics
+- Always include PR links for each fix or feature (e.g. `(#42)`)
+- Concise and practical
+
+### Version files
+
+| File | Field | Format |
+|------|-------|--------|
+| `src/main.zig` | `const version = "..."` | `X.Y.Z` or `X.Y.Z-rcN` |
+| `build.zig.zon` | `.version = "..."` | `X.Y.Z` or `X.Y.Z-rcN` |
 
 ## What NOT to do
 
