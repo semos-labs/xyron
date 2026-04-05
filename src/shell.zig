@@ -173,6 +173,9 @@ pub const Shell = struct {
         self.detectInitialProject(stdout);
 
         while (self.running) {
+            // Ensure raw mode is active — fork-based builtins can corrupt terminal state
+            term.enableRawMode() catch {};
+
             // Sync config toggles (may change via xyron reload)
             ed.vim_enabled = lua_api.vim_mode_enabled;
 

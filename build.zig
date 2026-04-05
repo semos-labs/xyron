@@ -30,6 +30,9 @@ pub fn build(b: *std.Build) void {
     }
     // Linux: sqlite3-dev and liblua5.4-dev are in standard system paths
 
+    // C sources
+    exe_mod.addCSourceFile(.{ .file = b.path("src/daemon_spawn.c") });
+
     const exe = b.addExecutable(.{ .name = "xyron", .root_module = exe_mod });
     b.installArtifact(exe);
 

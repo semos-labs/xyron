@@ -495,10 +495,11 @@ pub const Editor = struct {
 
     /// Apply an operator (d, c, y) to a text range.
     pub fn applyOperator(self: *Editor, op: u8, range: TextRange) void {
-        // Save to kill buffer
+        // Save to kill buffer and system clipboard
         const killed = self.buf[range.start..range.end];
         @memcpy(self.kill_buf[0..killed.len], killed);
         self.kill_len = killed.len;
+        copyToClipboard(killed);
 
         switch (op) {
             'd' => {
@@ -547,6 +548,49 @@ pub const Editor = struct {
             '0' => return 0,
             else => return null,
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Clipboard
+    // ------------------------------------------------------------------
+
+    /// Copy text to system clipboard via OSC 52 + pbcopy fallback.
+    fn copyToClipboard(text: []const u8) void {
+        if (text.len == 0) return;
+
+        // OSC 52: \x1b]52;c;<base64>\x07
+        // Works in Attyx, iTerm2, kitty, and most modern terminals.
+        const stderr = std.fs.File.stderr();
+        var osc_buf: [8192]u8 = undefined;
+        var pos: usize = 0;
+        const prefix = "\x1b]52;c;";
+        @memcpy(osc_buf[pos..][0..prefix.len], prefix);
+        pos += prefix.len;
+
+        // Base64 encode
+        const b64 = std.base64.standard;
+        const encoded = b64.Encoder.encode(osc_buf[pos..], text);
+        pos += encoded.len;
+
+        osc_buf[pos] = '\x07'; // ST
+        pos += 1;
+        stderr.writeAll(osc_buf[0..pos]) catch {};
+
+        // Also try pbcopy on macOS as fallback
+        var child = std.process.Child.init(
+            &.{"/usr/bin/pbcopy"},
+            std.heap.page_allocator,
+        );
+        child.stdin_behavior = .Pipe;
+        child.stdout_behavior = .Close;
+        child.stderr_behavior = .Close;
+        child.spawn() catch return;
+        if (child.stdin) |stdin| {
+            stdin.writeAll(text) catch {};
+            stdin.close();
+            child.stdin = null;
+        }
+        _ = child.wait() catch {};
     }
 
     fn isWordChar(ch: u8) bool {

@@ -62,6 +62,14 @@ attyx send-keys "exit{Enter}"
 - Keep annotations accurate: parameter types, return types, doc comments.
 - Config toggles live under `xyron.config.*` (e.g. `xyron.config.completion`). Old top-level names are kept for backward compat with `@deprecated`.
 
+## Terminal styling
+
+- **Always use `src/style.zig`** for ANSI escape sequences. Never write raw `\x1b[...m` strings in builtins or output code.
+- Use `style.print(file, fmt, args)` for formatted output, `style.printDim` / `style.printPass` / `style.printFail` / `style.printWarn` / `style.printHeader` for common patterns.
+- For buffer-based rendering (prompt, TUI), use `style.fg()`, `style.bold()`, `style.reset()`, `style.colored()`, etc.
+- Colors: use `style.Color` enum (`.red`, `.green`, `.cyan`, etc.) — base 16 terminal palette only.
+- Symbols: use `style.box.bullet` (●), `style.box.cross` (✗), etc.
+
 ## Code style
 
 - Idiomatic Zig — follow stdlib conventions

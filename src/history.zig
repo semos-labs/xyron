@@ -119,10 +119,11 @@ pub const History = struct {
             // Must be a prefix match for ghost text to make visual sense
             if (!std.mem.startsWith(u8, entry, query)) continue;
 
-            // Use fuzzy score + recency for ranking
+            // Rank primarily by recency — ghost text should suggest
+            // the most recent prefix match, not the best fuzzy match.
+            const recency: i32 = @intCast((self.count - rev_idx) * 1000);
             const result = fuzzy_mod.score(entry, query);
-            const recency: i32 = @intCast(@min(self.count - rev_idx, 50));
-            const total = if (result.matched) result.value + recency else recency;
+            const total = recency + if (result.matched) result.value else 0;
 
             if (total > best_score) {
                 best_score = total;

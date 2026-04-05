@@ -680,11 +680,13 @@ pub fn refreshLineWithHistory(
         pos += cp(buf[pos..], prompt_str_default);
     }
 
-    // Cursor shape: beam in insert, block in normal/visual
-    if (ed.vim_enabled and (ed.mode == .normal or ed.mode == .visual)) {
-        pos += cp(buf[pos..], "\x1b[2 q"); // block
+    // Cursor: hidden in visual mode, block in normal, beam in insert
+    if (ed.vim_enabled and ed.mode == .visual) {
+        pos += cp(buf[pos..], "\x1b[?25l"); // hide cursor
+    } else if (ed.vim_enabled and ed.mode == .normal) {
+        pos += cp(buf[pos..], "\x1b[?25h\x1b[2 q"); // show + block
     } else {
-        pos += cp(buf[pos..], "\x1b[6 q"); // beam (line)
+        pos += cp(buf[pos..], "\x1b[?25h\x1b[6 q"); // show + beam
     }
 
     const content = ed.content();
@@ -699,10 +701,10 @@ pub fn refreshLineWithHistory(
                 pos += cp(buf[pos..], content[0..vr.start]);
             }
         }
-        // Selected region — inverse video
-        pos += cp(buf[pos..], "\x1b[7m");
+        // Selected region — reset first, then reverse video (matches cursor color)
+        pos += cp(buf[pos..], "\x1b[0;7m");
         pos += cp(buf[pos..], content[vr.start..vr.end]);
-        pos += cp(buf[pos..], "\x1b[27m");
+        pos += cp(buf[pos..], "\x1b[0m");
         // After selection
         if (vr.end < content.len) {
             pos += cp(buf[pos..], content[vr.end..]);

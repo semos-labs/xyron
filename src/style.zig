@@ -162,6 +162,101 @@ pub fn boldText(dest: []u8, text: []const u8) usize {
 }
 
 // ---------------------------------------------------------------------------
+// File write helpers — styled output directly to a File
+// ---------------------------------------------------------------------------
+
+const File = std.fs.File;
+
+/// Write formatted text to a file (like bufPrint + writeAll).
+/// Write formatted text to a file. Newlines are converted to \r\n for raw mode.
+pub fn print(f: File, comptime fmt: []const u8, args: anytype) void {
+    var buf: [4096]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    // Replace \n with \r\n for raw mode compatibility
+    var out: [8192]u8 = undefined;
+    var pos: usize = 0;
+    for (text) |ch| {
+        if (ch == '\n') {
+            out[pos] = '\r';
+            pos += 1;
+        }
+        out[pos] = ch;
+        pos += 1;
+    }
+    f.writeAll(out[0..pos]) catch {};
+}
+
+/// Write a dim line: dim text + reset + newline.
+pub fn printDim(f: File, comptime fmt: []const u8, args: anytype) void {
+    var buf: [4096]u8 = undefined;
+    var pos: usize = 0;
+    pos += dim(buf[pos..]);
+    pos += (std.fmt.bufPrint(buf[pos..], fmt, args) catch return).len;
+    pos += reset(buf[pos..]);
+    pos += crlf(buf[pos..]);
+    f.writeAll(buf[0..pos]) catch {};
+}
+
+/// Write a pass indicator: green ● + name + dim message.
+pub fn printPass(f: File, name: []const u8, msg: []const u8) void {
+    var buf: [4096]u8 = undefined;
+    var pos: usize = 0;
+    pos += cp(buf[pos..], "  ");
+    pos += fg(buf[pos..], .green);
+    pos += cp(buf[pos..], box.bullet);
+    pos += reset(buf[pos..]);
+    pos += cp(buf[pos..], " ");
+    pos += cp(buf[pos..], name);
+    pos += cp(buf[pos..], "  ");
+    pos += dim(buf[pos..]);
+    pos += cp(buf[pos..], msg);
+    pos += reset(buf[pos..]);
+    pos += crlf(buf[pos..]);
+    f.writeAll(buf[0..pos]) catch {};
+}
+
+/// Write a fail indicator: red ✗ + name + message.
+pub fn printFail(f: File, name: []const u8, msg: []const u8) void {
+    var buf: [4096]u8 = undefined;
+    var pos: usize = 0;
+    pos += cp(buf[pos..], "  ");
+    pos += fg(buf[pos..], .red);
+    pos += cp(buf[pos..], box.cross);
+    pos += reset(buf[pos..]);
+    pos += cp(buf[pos..], " ");
+    pos += cp(buf[pos..], name);
+    pos += cp(buf[pos..], "  ");
+    pos += cp(buf[pos..], msg);
+    pos += crlf(buf[pos..]);
+    f.writeAll(buf[0..pos]) catch {};
+}
+
+/// Write a warning indicator: yellow ! + message.
+pub fn printWarn(f: File, msg: []const u8) void {
+    var buf: [4096]u8 = undefined;
+    var pos: usize = 0;
+    pos += cp(buf[pos..], "  ");
+    pos += fg(buf[pos..], .yellow);
+    pos += cp(buf[pos..], "!");
+    pos += reset(buf[pos..]);
+    pos += cp(buf[pos..], " ");
+    pos += cp(buf[pos..], msg);
+    pos += crlf(buf[pos..]);
+    f.writeAll(buf[0..pos]) catch {};
+}
+
+/// Write a section header: bold text.
+pub fn printHeader(f: File, text: []const u8) void {
+    var buf: [256]u8 = undefined;
+    var pos: usize = 0;
+    pos += bold(buf[pos..]);
+    pos += cp(buf[pos..], text);
+    pos += reset(buf[pos..]);
+    pos += crlf(buf[pos..]);
+    f.writeAll(buf[0..pos]) catch {};
+}
+
+// ---------------------------------------------------------------------------
 // Cursor / screen control
 // ---------------------------------------------------------------------------
 
@@ -240,7 +335,7 @@ fn writeCode2(dest: []u8, a: u8, b: u8) usize {
     return (std.fmt.bufPrint(dest, "\x1b[{d};{d}m", .{ a, b }) catch return 0).len;
 }
 
-fn cp(dest: []u8, src: []const u8) usize {
+pub fn cp(dest: []u8, src: []const u8) usize {
     const n = @min(src.len, dest.len);
     @memcpy(dest[0..n], src[0..n]);
     return n;

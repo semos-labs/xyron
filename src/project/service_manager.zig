@@ -11,6 +11,8 @@ const resolver = @import("resolver.zig");
 const loader = @import("loader.zig");
 const types = @import("../types.zig");
 
+const daemon = @import("../daemon.zig");
+
 /// Result of a service operation.
 pub const ServiceOpResult = struct {
     service_name: []const u8,
@@ -44,7 +46,7 @@ pub fn startOne(
     allocator: std.mem.Allocator,
     mdl: *const model.ProjectModel,
     svc: *const model.Service,
-    env_map: ?*const std.process.EnvMap,
+    _: ?*const std.process.EnvMap, // env inherited via fork
     fingerprint: u64,
 ) ServiceOpResult {
     const store = store_mod.getStore();
@@ -85,46 +87,57 @@ pub fn startOne(
         makePathRecursive(log_path[0..sep]);
     }
 
-    const log_file = std.fs.createFileAbsolute(log_path, .{ .truncate = false }) catch {
+    // Truncate log on each start — fresh logs per launch
+    const log_file = std.fs.createFileAbsolute(log_path, .{ .truncate = true }) catch {
         return .{ .service_name = svc.name, .success = false, .message = "cannot open log file" };
     };
 
-    // Seek to end for append
-    log_file.seekFromEnd(0) catch {};
-
     log_file.close();
 
-    // Build command that redirects stdout/stderr to log file
-    var cmd_buf: [8192]u8 = undefined;
-    const sh_cmd = std.fmt.bufPrintZ(&cmd_buf, "echo '--- service start: {s} ---' >> {s} 2>&1; {s} >> {s} 2>&1", .{
-        svc.name, log_path, svc.command, log_path,
-    }) catch {
-        return .{ .service_name = svc.name, .success = false, .message = "command too long" };
+    // Write a self-daemonizing launcher script.
+    // The script does everything: cd, redirect, background, write pid, exit.
+    var launcher_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const launcher_path = std.fmt.bufPrintZ(&launcher_path_buf, "{s}.sh", .{log_path}) catch {
+        return .{ .service_name = svc.name, .success = false, .message = "path too long" };
     };
 
-    // Spawn detached process
-    var child = std.process.Child.init(
-        &.{ "/bin/sh", "-c", sh_cmd },
-        allocator,
-    );
-    child.stdin_behavior = .Close;
-    child.stdout_behavior = .Close;
-    child.stderr_behavior = .Close;
-    child.cwd = abs_cwd;
-    if (env_map) |em| child.env_map = em;
-
-    child.spawn() catch {
-        // Record failure in store
-        if (store.getOrCreate(mdl.project_id, svc.name)) |inst| {
-            inst.state = .failed;
-            inst.updated_at = types.timestampMs();
-            store.save();
-        }
-        return .{ .service_name = svc.name, .success = false, .message = "failed to spawn" };
+    var pid_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const pid_path = std.fmt.bufPrint(&pid_path_buf, "{s}.pid", .{log_path}) catch {
+        return .{ .service_name = svc.name, .success = false, .message = "path too long" };
     };
 
-    // Update the store with the new process info.
-    const pid: i32 = @intCast(child.id);
+    {
+        const script = std.fs.createFileAbsolute(launcher_path, .{}) catch {
+            return .{ .service_name = svc.name, .success = false, .message = "cannot create launcher" };
+        };
+        defer script.close();
+
+        var script_buf: [8192]u8 = undefined;
+        // Script just cd's and exec's — becomes the service process itself.
+        const script_content = std.fmt.bufPrint(&script_buf,
+            "#!/bin/sh\ncd '{s}'\nexec {s}\n",
+            .{ abs_cwd, svc.command },
+        ) catch {
+            return .{ .service_name = svc.name, .success = false, .message = "command too long" };
+        };
+        script.writeAll(script_content) catch {};
+    }
+
+    // Run the launcher via system() — it backgrounds the service and exits.
+    // system() is synchronous but the script exits immediately after &.
+    // Null-terminate paths for C functions
+    var log_z_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    @memcpy(log_z_buf[0..log_path.len], log_path);
+    log_z_buf[log_path.len] = 0;
+    const log_z: [*:0]const u8 = @ptrCast(log_z_buf[0..log_path.len]);
+
+    var pid_z_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    @memcpy(pid_z_buf[0..pid_path.len], pid_path);
+    pid_z_buf[pid_path.len] = 0;
+    const pid_z: [*:0]const u8 = @ptrCast(pid_z_buf[0..pid_path.len]);
+
+    // Double-fork daemon spawn (all C, no Zig runtime in children)
+    const pid = daemon.spawn(launcher_path, log_z, pid_z);
 
     // Record in store
     if (store.getOrCreate(mdl.project_id, svc.name)) |inst| {
@@ -184,6 +197,7 @@ fn stopInstance(inst: *store_mod.ServiceInstance) ServiceOpResult {
     if (inst.pid <= 0) {
         inst.state = .stopped;
         inst.updated_at = types.timestampMs();
+        deleteLogFile(inst);
         return .{ .service_name = name, .success = true, .message = "stopped (no pid)" };
     }
 
@@ -215,7 +229,18 @@ fn stopInstance(inst: *store_mod.ServiceInstance) ServiceOpResult {
     inst.state = .stopped;
     inst.pid = 0;
     inst.updated_at = types.timestampMs();
+    deleteLogFile(inst);
     return .{ .service_name = name, .success = true, .message = "stopped" };
+}
+
+fn deleteLogFile(inst: *const store_mod.ServiceInstance) void {
+    const path = inst.logPathSlice();
+    if (path.len == 0) return;
+    std.fs.deleteFileAbsolute(path) catch {};
+    // Also remove launcher script
+    var sh_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sh_path = std.fmt.bufPrint(&sh_buf, "{s}.sh", .{path}) catch return;
+    std.fs.deleteFileAbsolute(sh_path) catch {};
 }
 
 // =============================================================================
@@ -244,7 +269,7 @@ pub fn restartOne(
 // Logs
 // =============================================================================
 
-/// Read log content for a service. Returns the log content or null.
+/// Read log content for a service. Returns the last `max_bytes` or null.
 pub fn readLogs(allocator: std.mem.Allocator, project_id: []const u8, name: []const u8, max_bytes: usize) ?[]const u8 {
     const store = store_mod.getStore();
     const inst = store.find(project_id, name) orelse return null;
@@ -256,18 +281,43 @@ pub fn readLogs(allocator: std.mem.Allocator, project_id: []const u8, name: []co
 
     const stat = file.stat() catch return null;
     const size = stat.size;
+    if (size == 0) return null;
 
-    // Read last max_bytes
+    // Seek to last max_bytes
+    const read_size = @min(size, max_bytes);
     if (size > max_bytes) {
         file.seekTo(size - max_bytes) catch {};
     }
 
-    return file.readToEndAlloc(allocator, max_bytes) catch null;
+    // Read a fixed chunk — don't use readToEndAlloc which waits for EOF
+    const buf = allocator.alloc(u8, read_size) catch return null;
+    const n = file.read(buf) catch return null;
+    if (n == 0) return null;
+    return buf[0..n];
 }
 
 // =============================================================================
 // Helpers
 // =============================================================================
+
+/// Read the first non-marker line from a log file as an error hint.
+fn readFirstError(allocator: std.mem.Allocator, log_path: []const u8) ?[]const u8 {
+    const file = std.fs.openFileAbsolute(log_path, .{}) catch return null;
+    defer file.close();
+    var buf: [4096]u8 = undefined;
+    const n = file.read(&buf) catch return null;
+    if (n == 0) return null;
+    var iter = std.mem.splitScalar(u8, buf[0..n], '\n');
+    while (iter.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        if (std.mem.startsWith(u8, trimmed, "---")) continue; // skip marker
+        // Return first real line, truncated
+        const max = @min(trimmed.len, 120);
+        return allocator.dupe(u8, trimmed[0..max]) catch null;
+    }
+    return null;
+}
 
 fn makePathRecursive(path: []const u8) void {
     // Walk forward, creating each component
