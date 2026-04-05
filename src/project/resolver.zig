@@ -13,6 +13,7 @@ const std = @import("std");
 const ctx = @import("context.zig");
 const model = @import("model.zig");
 const dotenv = @import("dotenv.zig");
+const secrets_mod = @import("../secrets.zig");
 
 /// System environment represented as a simple key-value iterator interface.
 /// In production, this is the process env. In tests, it can be a mock.
@@ -110,6 +111,45 @@ pub fn resolveContext(
         }) catch {};
     }
 
+    // --- Layer 2.5: manifest [env.values] with secret interpolation ---
+    if (project_model.env.values.len > 0) {
+        var loaded_keys: std.ArrayListUnmanaged([]const u8) = .{};
+        var source_warnings: std.ArrayListUnmanaged([]const u8) = .{};
+
+        // Load secrets store once (lazy — only if needed)
+        var secrets_store: ?secrets_mod.SecretsStore = null;
+        var secrets_loaded = false;
+
+        for (project_model.env.values) |ev| {
+            // Check if value contains ${secret:...} patterns
+            const resolved_value = if (std.mem.indexOf(u8, ev.raw_value, "${secret:") != null) blk: {
+                // Lazy-load secrets store
+                if (!secrets_loaded) {
+                    secrets_store = secrets_mod.SecretsStore.init();
+                    if (secrets_store) |*ss| {
+                        ss.load() catch {
+                            secrets_store = null;
+                        };
+                    }
+                    secrets_loaded = true;
+                }
+                break :blk interpolateSecrets(allocator, ev.raw_value, &secrets_store, &source_warnings);
+            } else ev.raw_value;
+
+            values.put(ev.key, resolved_value) catch {};
+            recordProvenance(allocator, &provenance, ev.key, resolved_value, .manifest, "xyron.toml");
+            loaded_keys.append(allocator, ev.key) catch {};
+        }
+
+        source_results.append(allocator, .{
+            .source_kind = .manifest,
+            .source_name = "xyron.toml [env.values]",
+            .status = .loaded,
+            .loaded_keys = loaded_keys.toOwnedSlice(allocator) catch &.{},
+            .warnings = source_warnings.toOwnedSlice(allocator) catch &.{},
+        }) catch {};
+    }
+
     // --- Layer 3: explicit overrides (highest priority) ---
     if (overrides.keys.len > 0) {
         var loaded_keys: std.ArrayListUnmanaged([]const u8) = .{};
@@ -193,6 +233,63 @@ fn recordProvenance(
             .was_overridden = false,
         }) catch {};
     }
+}
+
+/// Interpolate ${secret:NAME} patterns in a value string.
+/// Returns the resolved string with secrets replaced by their values.
+fn interpolateSecrets(
+    allocator: std.mem.Allocator,
+    raw: []const u8,
+    store: *?secrets_mod.SecretsStore,
+    warn_list: *std.ArrayListUnmanaged([]const u8),
+) []const u8 {
+    var result: std.ArrayListUnmanaged(u8) = .{};
+    var i: usize = 0;
+
+    while (i < raw.len) {
+        if (i + 9 <= raw.len and std.mem.eql(u8, raw[i..][0..9], "${secret:")) {
+            // Find closing }
+            const start = i + 9;
+            const end = std.mem.indexOfScalarPos(u8, raw, start, '}') orelse {
+                // No closing brace — copy literally
+                result.append(allocator, raw[i]) catch {};
+                i += 1;
+                continue;
+            };
+            const secret_name = raw[start..end];
+
+            // Look up the secret
+            if (store.*) |*ss| {
+                if (ss.findByName(secret_name)) |idx| {
+                    const val = ss.secrets[idx].valueSlice();
+                    result.appendSlice(allocator, val) catch {};
+                } else {
+                    // Secret not found — leave placeholder and warn
+                    result.appendSlice(allocator, raw[i .. end + 1]) catch {};
+                    warn_list.append(allocator, std.fmt.allocPrint(
+                        allocator,
+                        "secret not found: {s}",
+                        .{secret_name},
+                    ) catch "secret not found") catch {};
+                }
+            } else {
+                // No secrets store available
+                result.appendSlice(allocator, raw[i .. end + 1]) catch {};
+                warn_list.append(allocator, std.fmt.allocPrint(
+                    allocator,
+                    "secrets store unavailable, cannot resolve: {s}",
+                    .{secret_name},
+                ) catch "secrets store unavailable") catch {};
+            }
+
+            i = end + 1;
+        } else {
+            result.append(allocator, raw[i]) catch {};
+            i += 1;
+        }
+    }
+
+    return result.toOwnedSlice(allocator) catch raw;
 }
 
 /// Compute a stable fingerprint from the resolved values.

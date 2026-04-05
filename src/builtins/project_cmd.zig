@@ -219,6 +219,7 @@ fn printContext(stdout: std.fs.File, resolved: *const project.ResolvedContext) v
             const kind_label: []const u8 = switch (src.source_kind) {
                 .system => "system",
                 .env_file => "file",
+                .manifest => "manifest",
                 .override => "override",
             };
             write(stdout, "  {s} {s}  \x1b[2m{s} ({d} keys)\x1b[0m\n", .{
@@ -240,6 +241,7 @@ fn printContext(stdout: std.fs.File, resolved: *const project.ResolvedContext) v
             if (prov.winner_source == .system) continue;
             const source_label: []const u8 = switch (prov.winner_source) {
                 .env_file => prov.winner_source_name,
+                .manifest => "xyron.toml",
                 .override => "override",
                 .system => "system",
             };

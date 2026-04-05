@@ -181,8 +181,25 @@ fn normalizeCommands(
 
 fn normalizeEnv(allocator: std.mem.Allocator, root_table: *const toml.Table) model.EnvConfig {
     const env_tbl = root_table.getTable("env") orelse return .{};
-    const sources = env_tbl.getStringArray("sources", allocator) orelse return .{};
-    return .{ .sources = sources };
+    const sources = env_tbl.getStringArray("sources", allocator) orelse &.{};
+
+    // Parse [env.values] — explicit key-value pairs (may contain ${secret:NAME})
+    var values: std.ArrayListUnmanaged(model.EnvValue) = .{};
+    if (env_tbl.getTable("values")) |vals_tbl| {
+        for (vals_tbl.entries.keys(), vals_tbl.entries.values()) |key, value| {
+            switch (value) {
+                .string => |v| {
+                    values.append(allocator, .{ .key = key, .raw_value = v }) catch {};
+                },
+                else => {},
+            }
+        }
+    }
+
+    return .{
+        .sources = sources,
+        .values = values.toOwnedSlice(allocator) catch &.{},
+    };
 }
 
 fn normalizeSecrets(allocator: std.mem.Allocator, root_table: *const toml.Table) model.SecretsConfig {

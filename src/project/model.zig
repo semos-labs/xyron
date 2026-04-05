@@ -64,8 +64,14 @@ pub const ProjectInfo = struct {
     name: ?[]const u8 = null,
 };
 
+pub const EnvValue = struct {
+    key: []const u8,
+    raw_value: []const u8, // may contain ${secret:NAME} patterns
+};
+
 pub const EnvConfig = struct {
     sources: []const []const u8 = &.{},
+    values: []const EnvValue = &.{},
 };
 
 pub const SecretsConfig = struct {

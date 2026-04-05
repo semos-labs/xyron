@@ -13,6 +13,7 @@ const std = @import("std");
 pub const SourceKind = enum {
     system,
     env_file,
+    manifest, // [env.values] in xyron.toml
     override,
 };
 

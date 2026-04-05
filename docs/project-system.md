@@ -26,6 +26,11 @@ cwd = "./packages/database"
 [env]
 sources = [".env", ".env.local"]
 
+[env.values]
+OPENAI_API_KEY = "${secret:OPENAI_KEY}"
+DATABASE_URL = "postgres://user:${secret:DB_PASS}@localhost/mydb"
+STATIC_VALUE = "hello"
+
 [secrets]
 required = ["DATABASE_URL", "JWT_SECRET"]
 
@@ -50,10 +55,17 @@ command = "bun run worker:start"
 - Full form: `[commands.migrate]` with `command` and optional `cwd` — for commands that need a different working directory.
 - `cwd` defaults to the project root when not specified.
 
-**`[env]`** — Environment file sources.
+**`[env]`** — Environment configuration.
 - `sources` — Ordered list of `.env` files to load. Later files override earlier ones.
 - Files are resolved relative to the project root.
 - Missing files produce a warning, not an error — `.env.local` is often gitignored and may not exist until the developer creates it.
+
+**`[env.values]`** — Explicit environment variables with optional secret interpolation.
+- Plain values: `STATIC_VALUE = "hello"`
+- Secret references: `API_KEY = "${secret:MY_SECRET}"` — resolved from `xyron secrets` at runtime.
+- Interpolation: `DB_URL = "postgres://user:${secret:DB_PASS}@localhost/db"` — secrets can be embedded in strings.
+- Values from `[env.values]` override env file values but are overridden by explicit overrides.
+- Secret-sourced values are automatically redacted in `xyron context explain`.
 
 **`[secrets]`** — Required environment keys.
 - `required` — List of keys that must be present in the resolved environment.

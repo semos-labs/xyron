@@ -66,6 +66,16 @@ fn isSensitiveKey(key: []const u8) bool {
     return false;
 }
 
+/// Check if a key's raw value in env.values contains a ${secret:...} reference.
+fn isSecretRef(key: []const u8, mdl: *const model.ProjectModel) bool {
+    for (mdl.env.values) |ev| {
+        if (std.mem.eql(u8, ev.key, key)) {
+            return std.mem.indexOf(u8, ev.raw_value, "${secret:") != null;
+        }
+    }
+    return false;
+}
+
 fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len > haystack.len) return false;
     var i: usize = 0;
@@ -185,7 +195,9 @@ pub fn explainKey(allocator: std.mem.Allocator, key: []const u8) KeyResult {
 
     // Look up provenance
     if (resolved.provenance.get(key)) |prov| {
-        const sensitive = isSensitiveKey(key);
+        // Values from manifest secrets or with sensitive key names are redacted
+        const from_secret = prov.winner_source == .manifest and isSecretRef(key, &mdl);
+        const sensitive = from_secret or isSensitiveKey(key);
         const display = if (sensitive)
             redactValue(allocator, prov.final_value)
         else

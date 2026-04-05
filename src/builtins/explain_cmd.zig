@@ -80,6 +80,7 @@ fn runSummary(stdout: std.fs.File, stderr: std.fs.File) Result {
             const kind: []const u8 = switch (src.kind) {
                 .system => "system",
                 .env_file => "file",
+                .manifest => "manifest",
                 .override => "override",
             };
             write(stdout, "  {s} {s}  \x1b[2m{s} ({d} keys)\x1b[0m\n", .{
@@ -193,6 +194,7 @@ fn sourceKindLabel(kind: ctx.SourceKind) []const u8 {
     return switch (kind) {
         .system => "system env",
         .env_file => "env file",
+        .manifest => "xyron.toml",
         .override => "override",
     };
 }
