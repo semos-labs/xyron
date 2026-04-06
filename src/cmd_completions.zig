@@ -16,6 +16,10 @@ pub fn provide(out: *complete.CandidateBuffer, ctx: *const complete.CompletionCo
     if (ctx.cmd_name.len == 0) return;
 
     if (std.mem.eql(u8, ctx.cmd_name, "git")) {
+        if (ctx.cmd_args_len == 0) {
+            // Supplement git subcommands that --help doesn't list
+            provideGitSubcommands(out, ctx.prefix);
+        }
         provideGit(out, ctx);
     } else if (std.mem.eql(u8, ctx.cmd_name, "docker") or std.mem.eql(u8, ctx.cmd_name, "podman")) {
         provideDocker(out, ctx);
@@ -33,6 +37,27 @@ pub fn provide(out: *complete.CandidateBuffer, ctx: *const complete.CompletionCo
 // ---------------------------------------------------------------------------
 // Git
 // ---------------------------------------------------------------------------
+
+/// Supplement git subcommands that `git --help` doesn't list (e.g., checkout).
+fn provideGitSubcommands(out: *complete.CandidateBuffer, prefix: []const u8) void {
+    const extra_cmds = [_]struct { name: []const u8, desc: []const u8 }{
+        .{ .name = "checkout", .desc = "Switch branches or restore files" },
+        .{ .name = "cherry-pick", .desc = "Apply changes from existing commits" },
+        .{ .name = "stash", .desc = "Stash changes in a dirty working directory" },
+        .{ .name = "remote", .desc = "Manage set of tracked repositories" },
+        .{ .name = "submodule", .desc = "Initialize, update, or inspect submodules" },
+        .{ .name = "worktree", .desc = "Manage multiple working trees" },
+        .{ .name = "reflog", .desc = "Manage reflog information" },
+        .{ .name = "clean", .desc = "Remove untracked files" },
+        .{ .name = "apply", .desc = "Apply a patch to files" },
+        .{ .name = "am", .desc = "Apply patches from a mailbox" },
+    };
+    for (extra_cmds) |cmd| {
+        if (prefix.len == 0 or std.mem.startsWith(u8, cmd.name, prefix)) {
+            out.addWithDesc(cmd.name, cmd.desc, .external_cmd);
+        }
+    }
+}
 
 fn provideGit(out: *complete.CandidateBuffer, ctx: *const complete.CompletionContext) void {
     if (ctx.cmd_args_len == 0) return;

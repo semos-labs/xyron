@@ -35,18 +35,21 @@ pub fn gather(
         },
         .argument => {
             if (help_cache) |hc| provideHelpFlags(out, ctx, hc, env);
+            const before_cmd = out.count;
             cmd_completions.provide(out, ctx);
             lua_completions.provide(lua, out, ctx);
-            provideFilesystem(out, ctx.prefix, env);
+            // Skip filesystem if command-specific providers added candidates
+            if (out.count == before_cmd) provideFilesystem(out, ctx.prefix, env);
         },
         .redirect_target => {
             provideFilesystem(out, ctx.prefix, env);
         },
         .flag => {
             if (help_cache) |hc| provideHelpFlags(out, ctx, hc, env);
+            const before_cmd = out.count;
             cmd_completions.provide(out, ctx);
             lua_completions.provide(lua, out, ctx);
-            provideFilesystem(out, ctx.prefix, env);
+            if (out.count == before_cmd) provideFilesystem(out, ctx.prefix, env);
         },
         .env_var => {
             provideEnvVars(out, ctx.prefix, env);
