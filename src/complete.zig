@@ -202,10 +202,13 @@ pub fn runPicker(
     var prev_lines: usize = 0;
 
     // Get the cursor row (the ">" line of the prompt).
-    // cursor_row_estimate tracks the row of the cursor line (last prompt line).
-    // DSR is unreliable in multiplexed environments (Attyx IPC, etc).
+    // Prefer DSR (actual terminal cursor position) over the estimate,
+    // which can drift after commands that produce unexpected output.
     const input_mod_r = @import("input.zig");
-    var prompt_row: usize = if (input_mod_r.cursor_row_estimate > 0)
+    const dsr_pos = overlay.getCursorPos();
+    var prompt_row: usize = if (dsr_pos.row > 0)
+        dsr_pos.row
+    else if (input_mod_r.cursor_row_estimate > 0)
         input_mod_r.cursor_row_estimate
     else
         overlay.getTermSize().rows;
