@@ -29,8 +29,10 @@ pub fn provide(out: *complete.CandidateBuffer, ctx: *const complete.CompletionCo
         provideMakeTargets(out, ctx);
     } else if (std.mem.eql(u8, ctx.cmd_name, "ssh") or std.mem.eql(u8, ctx.cmd_name, "scp")) {
         provideSshHosts(out, ctx);
-    } else if (std.mem.eql(u8, ctx.cmd_name, "cargo")) {
-        provideCargo(out, ctx);
+    } else {
+        // Delegate to extended providers (kubectl, brew, pip, etc.)
+        const ext = @import("cmd_completions_ext.zig");
+        ext.provide(out, ctx);
     }
 }
 
@@ -179,6 +181,13 @@ fn provideDocker(out: *complete.CandidateBuffer, ctx: *const complete.Completion
     // Commands that take image names
     if (std.mem.eql(u8, subcmd, "run") or std.mem.eql(u8, subcmd, "pull") or std.mem.eql(u8, subcmd, "rmi")) {
         addDockerImages(out, ctx.prefix);
+        return;
+    }
+
+    // docker compose <subcmd> <service>
+    if (std.mem.eql(u8, subcmd, "compose")) {
+        const ext = @import("cmd_completions_ext.zig");
+        ext.provideDockerCompose(out, ctx);
         return;
     }
 }
@@ -357,19 +366,10 @@ fn provideSshHosts(out: *complete.CandidateBuffer, ctx: *const complete.Completi
 }
 
 // ---------------------------------------------------------------------------
-// cargo
-// ---------------------------------------------------------------------------
-
-fn provideCargo(_: *complete.CandidateBuffer, _: *const complete.CompletionContext) void {
-    // Cargo subcommands are handled by --help. Placeholder for future
-    // enhancements (e.g., bin targets, test names).
-}
-
-// ---------------------------------------------------------------------------
 // Shared: run a command and capture stdout
 // ---------------------------------------------------------------------------
 
-fn runCommand(argv: []const []const u8, alloc: std.mem.Allocator) ?[]const u8 {
+pub fn runCommand(argv: []const []const u8, alloc: std.mem.Allocator) ?[]const u8 {
     var child = std.process.Child.init(argv, alloc);
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Pipe;

@@ -34,22 +34,21 @@ pub fn gather(
             providePathCommands(out, ctx.prefix, env, cmd_cache);
         },
         .argument => {
-            if (help_cache) |hc| provideHelpFlags(out, ctx, hc, env);
-            const before_cmd = out.count;
+            // Command-specific providers first (git branches, docker containers, etc.)
             cmd_completions.provide(out, ctx);
             lua_completions.provide(lua, out, ctx);
-            // Skip filesystem if command-specific providers added candidates
-            if (out.count == before_cmd) provideFilesystem(out, ctx.prefix, env);
+            if (out.count > 0) return; // command-specific results are sufficient
+            // Fall back to help-derived flags/subcommands, then filesystem
+            if (help_cache) |hc| provideHelpFlags(out, ctx, hc, env);
+            provideFilesystem(out, ctx.prefix, env);
         },
         .redirect_target => {
             provideFilesystem(out, ctx.prefix, env);
         },
         .flag => {
             if (help_cache) |hc| provideHelpFlags(out, ctx, hc, env);
-            const before_cmd = out.count;
             cmd_completions.provide(out, ctx);
             lua_completions.provide(lua, out, ctx);
-            if (out.count == before_cmd) provideFilesystem(out, ctx.prefix, env);
         },
         .env_var => {
             provideEnvVars(out, ctx.prefix, env);
