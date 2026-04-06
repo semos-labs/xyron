@@ -892,6 +892,11 @@ fn apiPromptConfigure(L: ?*c.lua_State) callconv(.c) c_int {
         readBoolField(state, 2, "show_clean", &cfg.show_clean);
         readBoolField(state, 2, "show_state", &cfg.show_state);
         prompt_mod.setGitWidgetConfig(cfg);
+    } else if (std.mem.eql(u8, name, "symbol")) {
+        var cfg = prompt_mod.SymbolWidgetConfig{};
+        readIconField(state, 2, "icon", &cfg.icon, &cfg.icon_len);
+        readIconField(state, 2, "icon_vim", &cfg.icon_vim, &cfg.icon_vim_len);
+        prompt_mod.setSymbolWidgetConfig(cfg);
     }
 
     return 0;

@@ -164,6 +164,24 @@ pub fn setGitWidgetConfig(cfg: GitWidgetConfig) void {
     git_widget_config = cfg;
 }
 
+/// Symbol widget config — configurable via xyron.prompt.configure("symbol", {...})
+pub const SymbolWidgetConfig = struct {
+    icon: [16]u8 = undefined,
+    icon_len: usize = 0,
+    icon_vim: [16]u8 = undefined,
+    icon_vim_len: usize = 0,
+};
+
+var symbol_widget_config: SymbolWidgetConfig = .{};
+
+pub fn getSymbolWidgetConfig() *const SymbolWidgetConfig {
+    return &symbol_widget_config;
+}
+
+pub fn setSymbolWidgetConfig(cfg: SymbolWidgetConfig) void {
+    symbol_widget_config = cfg;
+}
+
 /// Custom widget registry — Lua functions registered via xyron.prompt.register()
 const MAX_CUSTOM_WIDGETS = 16;
 var custom_widget_names: [MAX_CUSTOM_WIDGETS][64]u8 = undefined;
@@ -363,15 +381,20 @@ fn renderCwd(dest: []u8, seg: *const Segment, ctx: *const PromptContext) SegResu
 
 fn renderSymbol(dest: []u8, ctx: *const PromptContext) SegResult {
     var pos: usize = 0;
-    const symbol: []const u8 = if (ctx.vim_normal) "<" else ">";
+    const cfg = getSymbolWidgetConfig();
+    const symbol: []const u8 = if (ctx.vim_normal)
+        (if (cfg.icon_vim_len > 0) cfg.icon_vim[0..cfg.icon_vim_len] else "<")
+    else
+        (if (cfg.icon_len > 0) cfg.icon[0..cfg.icon_len] else ">");
     if (ctx.last_exit_code != 0) {
         pos += style.boldFg(dest[pos..], .red);
     } else {
         pos += if (ctx.vim_normal) style.boldFg(dest[pos..], .yellow) else style.boldFg(dest[pos..], .green);
     }
     pos += cp(dest[pos..], symbol);
+    const vis = visLen(symbol);
     pos += style.reset(dest[pos..]);
-    return .{ .bytes = pos, .visible = 1 };
+    return .{ .bytes = pos, .visible = vis };
 }
 
 fn renderStatus(dest: []u8, ctx: *const PromptContext) SegResult {

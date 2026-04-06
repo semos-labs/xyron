@@ -252,7 +252,7 @@ function xyron.prompt.register(name, callback) end
 
 --- Configure a built-in prompt widget.
 ---
---- Currently supports `"git"` with icon configuration:
+--- Supports `"git"` and `"symbol"` widgets:
 --- ```lua
 --- xyron.prompt.configure("git", {
 ---     branch = "󰊢",
@@ -266,6 +266,11 @@ function xyron.prompt.register(name, callback) end
 ---     clean = "",
 ---     lines_added = "",
 ---     lines_removed = "",
+--- })
+---
+--- xyron.prompt.configure("symbol", {
+---     icon = "❯",      -- prompt symbol (default ">")
+---     icon_vim = "❮",   -- symbol in vim normal mode (default "<")
 --- })
 --- ```
 ---@param name string Widget name

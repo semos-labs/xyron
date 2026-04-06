@@ -31,6 +31,7 @@ const ipc = @import("ipc.zig");
 const context_manager = @import("project/context_manager.zig");
 const project_resolver = @import("project/resolver.zig");
 const git_info_mod = @import("git_info.zig");
+const title = @import("title.zig");
 
 pub const Shell = struct {
     allocator: std.mem.Allocator,
@@ -209,6 +210,13 @@ pub const Shell = struct {
                 input.prompt_fresh = true;
             }
 
+            // Set terminal title to idle (cwd)
+            {
+                var cwd_buf: [std.posix.PATH_MAX]u8 = undefined;
+                const cwd = std.posix.getcwd(&cwd_buf) catch "";
+                title.setIdle(cwd);
+            }
+
             // Build prompt from segments
             var pctx = prompt_mod.buildContext(self.last_exit_code, self.last_duration_ms, self.activeJobCount());
             pctx.vim_normal = ed.vim_enabled and ed.mode == .normal;
@@ -324,6 +332,11 @@ pub const Shell = struct {
 
         while (self.running) {
             self.reapAndNotify(stdout);
+            {
+                var cwd_buf: [std.posix.PATH_MAX]u8 = undefined;
+                const cwd = std.posix.getcwd(&cwd_buf) catch "";
+                title.setIdle(cwd);
+            }
             const pctx = prompt_mod.buildContext(self.last_exit_code, self.last_duration_ms, self.activeJobCount());
             prompt_mod.renderPrompt(stdout, &pctx, self.lua);
             const maybe_line = reader.interface.takeDelimiter('\n') catch |err| {

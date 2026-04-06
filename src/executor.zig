@@ -16,6 +16,7 @@ const block_ui = @import("block_ui.zig");
 const attyx_mod = @import("attyx.zig");
 const history_db_mod = @import("history_db.zig");
 const jobs_mod = @import("jobs.zig");
+const title = @import("title.zig");
 
 const c = @cImport({
     @cInclude("unistd.h");
@@ -70,6 +71,11 @@ pub fn executeGroup(
     const stderr = std.fs.File.stderr();
 
     ax.groupStarted(exec_plan);
+
+    // Set terminal title to the running command
+    if (exec_plan.steps.len > 0 and exec_plan.steps[0].argv.len > 0) {
+        title.setCommand(exec_plan.steps[0].argv);
+    }
 
     if (exec_plan.steps.len == 1) {
         const step = &exec_plan.steps[0];
