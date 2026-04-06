@@ -202,13 +202,8 @@ pub fn runPicker(
     var prev_lines: usize = 0;
 
     // Get the cursor row (the ">" line of the prompt).
-    // Prefer DSR (actual terminal cursor position) over the estimate,
-    // which can drift after commands that produce unexpected output.
     const input_mod_r = @import("input.zig");
-    const dsr_pos = overlay.getCursorPos();
-    var prompt_row: usize = if (dsr_pos.row > 0)
-        dsr_pos.row
-    else if (input_mod_r.cursor_row_estimate > 0)
+    var prompt_row: usize = if (input_mod_r.cursor_row_estimate > 0)
         input_mod_r.cursor_row_estimate
     else
         overlay.getTermSize().rows;
@@ -258,7 +253,7 @@ pub fn runPicker(
             },
             // Editing
             .backspace => {
-                if (ed.cursor > word_start) {
+                if (ed.cursor > 0) {
                     ed.backspace();
                     content_changed = true;
                 }
@@ -291,6 +286,12 @@ pub fn runPicker(
         // Re-gather candidates on content change (providers use prefix from editor)
         if (content_changed) {
             regather(ed, &all, &word_start, &scored_indices, &scored_values, &scored_count, &selected, &scroll, env, cmd_cache, help_cache, lua);
+
+            // Dismiss if no candidates left or editor is empty
+            if (scored_count == 0 or ed.len == 0) {
+                clearInlineList(stdout, prev_lines, prompt_row);
+                return .cancelled;
+            }
         }
 
         renderInlineList(stdout, prompt_str, ed, &all, &scored_indices, scored_count, selected, scroll, max_visible, &prev_lines, &prompt_row, hl_ctx);
@@ -318,48 +319,39 @@ fn renderInlineList(
     prompt_row: *usize,
     hl_ctx: anytype,
 ) void {
+    _ = prompt_row;
+    const input_mod = @import("input.zig");
+    const extra = input_mod.prompt_extra_lines;
     var buf: [16384]u8 = undefined;
     var pos: usize = 0;
 
     const visible_end = @min(scroll + max_visible, count);
     const rendered = visible_end - scroll;
     const new_lines = rendered + @as(usize, if (count > max_visible) 1 else 0);
-    const term_rows = overlay.getTermSize().rows;
-    const input_mod = @import("input.zig");
-    const extra = input_mod.prompt_extra_lines;
 
-    // prompt_row is the cursor row (last line of prompt, e.g. the ">" line).
-    // Full prompt starts at prompt_row - extra.
-    // List goes below at prompt_row + 1.
-
-    // Ensure there's room below the prompt for the list.
-    const space_below = if (term_rows >= prompt_row.*) term_rows - prompt_row.* else 0;
-    if (new_lines > space_below) {
-        const need = new_lines - space_below;
-        for (0..need) |_| {
+    // First render: push newlines to make room, then come back
+    if (prev_lines.* == 0) {
+        for (0..new_lines) |_| {
             pos += cp(buf[pos..], "\n");
         }
-        prompt_row.* -= @min(need, prompt_row.* - 1);
+        if (new_lines > 0) {
+            const up = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{new_lines}) catch "";
+            pos += up.len;
+        }
+        // Flush the scroll immediately so terminal state is settled
         stdout.writeAll(buf[0..pos]) catch {};
         pos = 0;
     }
 
-    // Jump to the start of the full prompt (accounting for extra lines above cursor)
-    const prompt_start_row = if (prompt_row.* > extra) prompt_row.* - extra else 1;
-
-    // Clear all prompt lines
-    for (0..extra + 1) |li| {
-        const row = prompt_start_row + li;
-        const g = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H\x1b[K", .{row}) catch "";
-        pos += g.len;
+    // Move up to the start of the multi-line prompt and re-render it
+    if (extra > 0) {
+        const up_extra = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{extra}) catch "";
+        pos += up_extra.len;
     }
-
-    // Render prompt at prompt_start_row (set prompt_fresh so renderPromptIntoBuf
-    // doesn't emit cursor-up or \x1b[J which would fight with our absolute positioning)
-    const goto_start = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H", .{prompt_start_row}) catch "";
-    pos += goto_start.len;
+    pos += cp(buf[pos..], "\r");
     input_mod.prompt_fresh = true;
     pos += input_mod.renderPromptIntoBuf(buf[pos..], prompt_str, ed, hl_ctx);
+    // Cursor is now at the end of input on the ">" line
 
     // Compute column widths for alignment
     var max_name_w: usize = 0;
@@ -377,11 +369,10 @@ fn renderInlineList(
     const name_col = if (has_any_desc) max_name_w + 2 else max_name_w;
     const row_width = 1 + name_col + max_desc_w + 1;
 
-    // Render list items at absolute rows below prompt
+    // Render each list item on its own line (below the prompt)
     for (scroll..visible_end, 0..) |i, li| {
-        const row = prompt_row.* + 1 + li;
-        const goto = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H\x1b[K", .{row}) catch "";
-        pos += goto.len;
+        _ = li;
+        pos += cp(buf[pos..], "\n\r\x1b[K"); // move down, clear line
 
         const idx = indices[i];
         const cand = &all.items[idx];
@@ -433,9 +424,7 @@ fn renderInlineList(
 
     // Scroll indicator
     if (count > max_visible) {
-        const row = prompt_row.* + 1 + rendered;
-        const goto = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H\x1b[K", .{row}) catch "";
-        pos += goto.len;
+        pos += cp(buf[pos..], "\n\r\x1b[K");
         pos += cp(buf[pos..], "\x1b[2m  ");
         const indicator = std.fmt.bufPrint(buf[pos..], "[{d}/{d}]", .{ selected + 1, count }) catch "";
         pos += indicator.len;
@@ -443,40 +432,39 @@ fn renderInlineList(
     }
 
     // Clear leftover lines from a previous larger render
-    if (prev_lines.* > new_lines) {
-        for (new_lines..prev_lines.*) |li| {
-            const row = prompt_row.* + 1 + li;
-            if (row > term_rows) break;
-            const goto = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H\x1b[K", .{row}) catch "";
-            pos += goto.len;
-        }
+    const clear_count = if (prev_lines.* > new_lines) prev_lines.* - new_lines else 0;
+    for (0..clear_count) |_| {
+        pos += cp(buf[pos..], "\n\r\x1b[K");
     }
 
+    // Move back up to the prompt cursor line.
+    // We moved down: new_lines (items + indicator) + clear_count (leftovers)
+    const lines_below = new_lines + clear_count;
     prev_lines.* = new_lines;
 
-    // Move cursor back to prompt line at the right column
-    const prompt_w = promptVisibleWidth(prompt_str);
-    const cursor_col = prompt_w + ed.visibleCursorPos() + 1; // 1-based
-    const goto_cur = std.fmt.bufPrint(buf[pos..], "\x1b[{d};{d}H", .{ prompt_row.*, cursor_col }) catch "";
-    pos += goto_cur.len;
+    if (lines_below > 0) {
+        const up2 = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{lines_below}) catch "";
+        pos += up2.len;
+    }
+    const cursor_col = promptVisibleWidth(prompt_str) + ed.visibleCursorPos() + 1;
+    const col = std.fmt.bufPrint(buf[pos..], "\x1b[{d}G", .{cursor_col}) catch "";
+    pos += col.len;
 
     stdout.writeAll(buf[0..pos]) catch {};
 }
 
 /// Clear the inline list rows below the prompt.
 fn clearInlineList(stdout: std.fs.File, prev_lines: usize, prompt_row: usize) void {
+    _ = prompt_row;
     if (prev_lines == 0) return;
     var buf: [512]u8 = undefined;
     var pos: usize = 0;
-    // Clear each list row individually
-    for (0..prev_lines) |i| {
-        const row = prompt_row + 1 + i;
-        const goto = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H\x1b[K", .{row}) catch "";
-        pos += goto.len;
+    for (0..prev_lines) |_| {
+        pos += cp(buf[pos..], "\n\r\x1b[K");
     }
-    // Return cursor to prompt
-    const goto_cur = std.fmt.bufPrint(buf[pos..], "\x1b[{d};1H", .{prompt_row}) catch "";
-    pos += goto_cur.len;
+    // Move back up
+    const up = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{prev_lines}) catch "";
+    pos += up.len;
     stdout.writeAll(buf[0..pos]) catch {};
 }
 
