@@ -71,6 +71,29 @@ function xyron.completion(enabled) end
 ---@param callback fun(args: string[]): integer Callback receiving args, returning exit code
 function xyron.command(name, callback) end
 
+--- Register a lazy-loaded command. The module is only require()'d on first invocation.
+--- The module should return either a function or a table with a `run` field.
+---@param name string Command name
+---@param module_name string Module to require() on first use
+function xyron.lazy_command(name, module_name) end
+
+--- Defer a function to run after the first prompt renders.
+--- Use for slow initialization (e.g. sourcing nvm.sh) that shouldn't delay startup.
+---@param fn fun() Function to call after first prompt
+function xyron.defer(fn) end
+
+---@class SourceOpts
+---@field vars? string[] Only import these variables (default: all changed vars)
+---@field run? string Command to run after sourcing (output is printed, env captured in one call)
+
+--- Source a bash script and import environment changes into xyron.
+--- Runs `source <script>` in bash, captures env vars, and applies changes.
+--- With `run`, executes a command after sourcing and captures both output and env in a single bash call.
+---@param script string Path to the bash script to source
+---@param opts? SourceOpts Options
+---@return boolean success Whether the script sourced successfully
+function xyron.source(script, opts) end
+
 --- Execute a shell command string.
 ---@param cmd string Shell command to execute
 ---@return { exit_code: integer }

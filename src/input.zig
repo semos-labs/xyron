@@ -57,6 +57,36 @@ pub fn readLine(
     // before the key loop starts — no input to interfere with).
     if (overlay.enabled) complete_mod.cachePromptRow();
 
+    // If a background git refresh is in-flight (e.g. cold start), wait
+    // briefly for it to finish so the first prompt shows git info without
+    // requiring a keystroke. This only fires once per readLine entry.
+    {
+        const git_info_mod = @import("git_info.zig");
+        if (git_info_mod.isRefreshing()) {
+            var waited: usize = 0;
+            while (waited < 500) {
+                // Check stdin so we bail immediately if the user types
+                var fds: [1]std.posix.pollfd = .{
+                    .{ .fd = std.posix.STDIN_FILENO, .events = std.posix.POLL.IN, .revents = 0 },
+                };
+                const ready = std.posix.poll(&fds, 50) catch break;
+                if (ready > 0) break;
+                waited += 50;
+                if (!git_info_mod.isRefreshing()) break;
+            }
+            if (!git_info_mod.isRefreshing()) {
+                // Git data arrived — rebuild and overwrite the current prompt
+                const prompt_mod = @import("prompt.zig");
+                var pctx = prompt_mod.buildContext(prompt_last_exit, prompt_last_duration, prompt_job_count);
+                pctx.vim_normal = (ed.mode == .normal or ed.mode == .visual);
+                var pbuf: [prompt_mod.MAX_PROMPT]u8 = undefined;
+                const pr = prompt_mod.render(&pbuf, &pctx, prompt_lua);
+                refreshLine(stdout, pr.text, ed, hl);
+                prompt_extra_lines = if (pr.line_count > 1) pr.line_count - 1 else 0;
+            }
+        }
+    }
+
     // Pending operator for vim (e.g., 'd' waiting for motion)
     var pending_op: u8 = 0;
 

@@ -79,6 +79,80 @@ pub fn init(env: *environ_mod.Environ, attyx_enabled: bool) LuaState {
     // Set as global "xyron"
     c.lua_setglobal(L, "xyron");
 
+    // xyron.lazy_command(name, module_name) — register a command that
+    // defers require(module_name) until first invocation.
+    // xyron.defer(fn) — queue a function to run after the first prompt renders.
+    const lazy_code =
+        \\xyron._deferred = {}
+        \\function xyron.lazy_command(name, mod)
+        \\  xyron.command(name, function(args)
+        \\    local m = require(mod)
+        \\    local fn = type(m) == "function" and m or (type(m) == "table" and m.run)
+        \\    if fn then
+        \\      xyron.command(name, fn)
+        \\      return fn(args)
+        \\    end
+        \\  end)
+        \\end
+        \\function xyron.defer(fn)
+        \\  table.insert(xyron._deferred, fn)
+        \\end
+        \\function xyron.source(script, opts)
+        \\  opts = opts or {}
+        \\  local vars = opts.vars
+        \\  local run_cmd = opts.run
+        \\  local export_parts = {}
+        \\  if vars then
+        \\    for _, v in ipairs(vars) do
+        \\      export_parts[#export_parts+1] = string.format('echo "::xyron_env::%s=${%s}"', v, v)
+        \\    end
+        \\  else
+        \\    export_parts[#export_parts+1] = 'env -0 | tr "\\0" "\\n" | while IFS= read -r line; do echo "::xyron_env::$line"; done'
+        \\  end
+        \\  local export = table.concat(export_parts, " && ")
+        \\  local inner
+        \\  if run_cmd then
+        \\    inner = string.format('source %q && %s && echo "::xyron_env_marker::" && %s', script, run_cmd, export)
+        \\  else
+        \\    inner = string.format('source %q && %s', script, export)
+        \\  end
+        \\  local result = xyron.capture("bash -c '" .. inner:gsub("'", "'\\''") .. "'")
+        \\  if result.exit_code ~= 0 then
+        \\    if run_cmd then io.write(result.output) end
+        \\    return false
+        \\  end
+        \\  local output = result.output
+        \\  local user_output, env_section
+        \\  if run_cmd then
+        \\    local marker = "::xyron_env_marker::\n"
+        \\    local pos = output:find(marker, 1, true)
+        \\    if pos then
+        \\      user_output = output:sub(1, pos - 1)
+        \\      env_section = output:sub(pos + #marker)
+        \\    else
+        \\      user_output = output
+        \\      env_section = ""
+        \\    end
+        \\    io.write(user_output)
+        \\  else
+        \\    env_section = output
+        \\  end
+        \\  for line in env_section:gmatch("::xyron_env::([^\n]+)") do
+        \\    local k, v = line:match("^([^=]+)=(.*)")
+        \\    if k and #k > 0 then
+        \\      local cur = xyron.getenv(k)
+        \\      if cur ~= v then xyron.setenv(k, v) end
+        \\    end
+        \\  end
+        \\  return true
+        \\end
+    ;
+    if (c.luaL_loadstring(L, lazy_code) == 0) {
+        _ = pcall(L, 0, 0);
+    } else {
+        c.lua_settop(L, -2);
+    }
+
     // Disable io.popen — it calls fork() which is unsafe with background
     // threads (deadlocks on inherited mutexes → SIGABRT).
     // Use xyron.capture() instead.
@@ -108,6 +182,25 @@ pub fn setPackagePath(L: LuaState, config_dir: []const u8) void {
         _ = pcall(state, 0, 0);
     } else {
         c.lua_settop(state, -2); // pop error
+    }
+}
+
+/// Run all functions queued via xyron.defer(), then clear the queue.
+pub fn runDeferred(L: LuaState) void {
+    const state = L orelse return;
+    const code =
+        \\for _, fn in ipairs(xyron._deferred or {}) do
+        \\  local ok, err = pcall(fn)
+        \\  if not ok then
+        \\    io.stderr:write("xyron: deferred: " .. tostring(err) .. "\n")
+        \\  end
+        \\end
+        \\xyron._deferred = {}
+    ;
+    if (c.luaL_loadstring(state, code) == 0) {
+        _ = pcall(state, 0, 0);
+    } else {
+        c.lua_settop(state, -2);
     }
 }
 

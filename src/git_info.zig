@@ -55,6 +55,11 @@ var refreshing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Check if a background refresh is currently in-flight.
+pub fn isRefreshing() bool {
+    return refreshing.load(.acquire);
+}
+
 /// Return the most recent cached git info (non-blocking).
 pub fn read() GitInfo {
     cache_mutex.lock();

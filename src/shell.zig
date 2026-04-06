@@ -179,6 +179,8 @@ pub const Shell = struct {
         // Kick off first background git info refresh
         git_info_mod.requestRefresh();
 
+        var deferred_done = false;
+
         while (self.running) {
             // Ensure raw mode is active — fork-based builtins can corrupt terminal state
             term.enableRawMode() catch {};
@@ -230,6 +232,29 @@ pub const Shell = struct {
 
             const hl_ctx = input.HighlightCtx{ .cache = &self.cmd_cache, .env = &self.env, .help_cache = &self.help_cache };
             input.refreshLine(stdout, prompt_str, &ed, &hl_ctx);
+
+            // Run xyron.defer() callbacks after the first prompt is visible.
+            // This lets slow init (e.g. sourcing nvm.sh) happen without
+            // delaying prompt display.
+            if (!deferred_done) {
+                deferred_done = true;
+                // Deferred callbacks may call xyron.capture (fork) — need cooked mode
+                term.disableRawMode();
+                lua_api.runDeferred(self.lua);
+                term.enableRawMode() catch {};
+                // PATH may have changed — invalidate and re-render prompt
+                if (self.env.path_dirty) {
+                    self.cmd_cache.invalidate();
+                    self.env.path_dirty = false;
+                }
+                // Re-render prompt to pick up any env changes from deferred init
+                var pctx2 = prompt_mod.buildContext(self.last_exit_code, self.last_duration_ms, self.activeJobCount());
+                pctx2.vim_normal = ed.vim_enabled and ed.mode == .normal;
+                var pbuf2: [prompt_mod.MAX_PROMPT]u8 = undefined;
+                const pr2 = prompt_mod.render(&pbuf2, &pctx2, self.lua);
+                input.prompt_extra_lines = if (pr2.line_count > 1) pr2.line_count - 1 else 0;
+                input.refreshLine(stdout, pr2.text, &ed, &hl_ctx);
+            }
 
             const result = input.readLine(&ed, prompt_str, &self.history, &hl_ctx) catch |err| {
                 var msg_buf: [256]u8 = undefined;
