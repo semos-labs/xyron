@@ -130,6 +130,24 @@ pub fn renderHighlighted(
             continue;
         }
 
+        // Semicolon — command separator
+        if (ch == ';') {
+            pos += emitStyled(out[pos..], ";", .pipe);
+            i += 1;
+            cmd_pos = true;
+            after_redirect = false;
+            continue;
+        }
+
+        // Double ampersand / double pipe — command separators (must come before single | and &)
+        if ((ch == '&' or ch == '|') and i + 1 < input.len and input[i + 1] == ch) {
+            pos += emitStyled(out[pos..], input[i .. i + 2], .pipe);
+            i += 2;
+            cmd_pos = true;
+            after_redirect = false;
+            continue;
+        }
+
         // Pipe
         if (ch == '|') {
             pos += emitStyled(out[pos..], "|", .pipe);
@@ -139,7 +157,7 @@ pub fn renderHighlighted(
             continue;
         }
 
-        // Ampersand
+        // Single ampersand (background)
         if (ch == '&') {
             pos += emitStyled(out[pos..], "&", .ampersand);
             i += 1;
@@ -181,7 +199,7 @@ pub fn renderHighlighted(
         const word_start = i;
         while (i < input.len) {
             const c = input[i];
-            if (c == ' ' or c == '\t' or c == '|' or c == '>' or c == '<' or c == '&') break;
+            if (c == ' ' or c == '\t' or c == '|' or c == '>' or c == '<' or c == '&' or c == ';') break;
             i += 1;
         }
         const word = input[word_start..i];
@@ -324,4 +342,32 @@ test "command cache caches PATH lookups" {
     try std.testing.expect(cache.exists("ls", &env));
     // Nonexistent should be false
     try std.testing.expect(!cache.exists("__xyron_nonexistent__", &env));
+}
+
+test "command after && is classified as command" {
+    var cache = CommandCache.init(std.testing.allocator);
+    defer cache.deinit();
+    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+    var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
+
+    // "cd foo && exit" — exit should be highlighted as builtin
+    var buf: [512]u8 = undefined;
+    const len = renderHighlighted(&buf, "cd foo && exit", &cache, &env);
+    const result = buf[0..len];
+    // After &&, "exit" should get builtin_cmd style (bold cyan \x1b[1;36m)
+    try std.testing.expect(std.mem.indexOf(u8, result, "\x1b[1;36m" ++ "exit") != null);
+}
+
+test "command after semicolon is classified as command" {
+    var cache = CommandCache.init(std.testing.allocator);
+    defer cache.deinit();
+    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+    var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
+
+    var buf: [512]u8 = undefined;
+    const len = renderHighlighted(&buf, "cd foo; exit", &cache, &env);
+    const result = buf[0..len];
+    try std.testing.expect(std.mem.indexOf(u8, result, "\x1b[1;36m" ++ "exit") != null);
 }

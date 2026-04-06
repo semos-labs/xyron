@@ -505,12 +505,19 @@ pub fn analyzeContext(content: []const u8, cursor: usize) CompletionContext {
         while (i < word_start and (text[i] == ' ' or text[i] == '\t')) : (i += 1) {}
         if (i >= word_start) break;
 
+        // Semicolon — command separator
+        if (text[i] == ';') { is_cmd_pos = true; after_redirect = false; cmd_name = ""; cmd_args_len = 0; i += 1; continue; }
+        // && or || — command separators
+        if ((text[i] == '&' or text[i] == '|') and i + 1 < word_start and text[i + 1] == text[i]) { is_cmd_pos = true; after_redirect = false; cmd_name = ""; cmd_args_len = 0; i += 2; continue; }
+        // Single pipe — command separator
         if (text[i] == '|') { is_cmd_pos = true; after_redirect = false; cmd_name = ""; cmd_args_len = 0; i += 1; continue; }
+        // Single & — background, not a separator for completion purposes
+        if (text[i] == '&') { i += 1; continue; }
         if (text[i] == '>' or text[i] == '<') { after_redirect = true; i += 1; continue; }
         if (text[i] == '2' and i + 1 < word_start and text[i + 1] == '>') { after_redirect = true; i += 2; continue; }
 
         const ws = i;
-        while (i < word_start and text[i] != ' ' and text[i] != '\t' and text[i] != '|' and text[i] != '>' and text[i] != '<') : (i += 1) {}
+        while (i < word_start and text[i] != ' ' and text[i] != '\t' and text[i] != '|' and text[i] != '>' and text[i] != '<' and text[i] != '&' and text[i] != ';') : (i += 1) {}
         const word = text[ws..i];
 
         if (after_redirect) { after_redirect = false; continue; }
