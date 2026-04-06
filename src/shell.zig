@@ -30,6 +30,7 @@ const overlay = @import("overlay.zig");
 const ipc = @import("ipc.zig");
 const context_manager = @import("project/context_manager.zig");
 const project_resolver = @import("project/resolver.zig");
+const git_info_mod = @import("git_info.zig");
 
 pub const Shell = struct {
     allocator: std.mem.Allocator,
@@ -127,6 +128,7 @@ pub const Shell = struct {
 
     pub fn run(self: *Shell) !void {
         const stdout = std.fs.File.stdout();
+        lua_api.setEnv(&self.env);
         lua_api.setBlockTable(&self.blocks);
         lua_api.setHistoryDb(&self.history_db);
 
@@ -173,6 +175,9 @@ pub const Shell = struct {
 
         // Detect initial project context at startup
         self.detectInitialProject(stdout);
+
+        // Kick off first background git info refresh
+        git_info_mod.requestRefresh();
 
         while (self.running) {
             // Ensure raw mode is active — fork-based builtins can corrupt terminal state
@@ -239,6 +244,8 @@ pub const Shell = struct {
                         var line_copy: [editor_mod.MAX_LINE]u8 = undefined;
                         @memcpy(line_copy[0..line.len], line);
                         self.executeLine(line_copy[0..line.len]);
+                        // Refresh git info in the background for the next prompt
+                        git_info_mod.requestRefresh();
                         // Estimate cursor row after command execution.
                         // In block UI mode, use the saved block line count for accuracy.
                         // Otherwise assume the output filled the screen.
@@ -366,7 +373,9 @@ pub const Shell = struct {
         if (expanded.commands.len == 1 and !expanded.background) {
             const cmd = &expanded.commands[0];
             if (cmd.argv.len > 0 and lua_commands.isLuaCommand(cmd.argv[0])) {
+                term.suspendRawMode();
                 const code = lua_commands.execute(self.lua, cmd.argv[0], cmd.argv);
+                term.resumeRawMode();
                 self.last_exit_code = code;
                 _ = self.history_db.recordCommand(trimmed, "", code, 0, types.timestampMs(), false, &.{});
                 return;
@@ -496,6 +505,8 @@ pub const Shell = struct {
 
     /// Reload Lua config and re-resolve project context.
     fn reloadConfig(self: *Shell, stdout: std.fs.File) void {
+        // Clear require() cache so user modules are re-executed
+        lua_api.clearModuleCache(self.lua);
         // Reload Lua config
         loadLuaConfig(self.lua);
 
@@ -832,15 +843,24 @@ fn shouldDelegateToSh(line: []const u8) bool {
 var winch_pending: bool = false;
 
 fn installSignalHandlers() void {
-    const ignore = posix.Sigaction{
+    const noop_act = posix.Sigaction{
         .handler = .{ .handler = noop },
         .mask = posix.sigemptyset(),
         .flags = 0,
     };
-    posix.sigaction(posix.SIG.INT, &ignore, null);
-    posix.sigaction(posix.SIG.TSTP, &ignore, null);
-    posix.sigaction(posix.SIG.TTOU, &ignore, null);
-    posix.sigaction(posix.SIG.TTIN, &ignore, null);
+    posix.sigaction(posix.SIG.INT, &noop_act, null);
+    posix.sigaction(posix.SIG.TSTP, &noop_act, null);
+
+    // SIGTTOU/SIGTTIN must use SIG_IGN (not a noop handler) so that
+    // tcsetpgrp/tcsetattr succeed when called from a background group.
+    // POSIX only skips the signal when the disposition is SIG_IGN or blocked.
+    const sig_ign = posix.Sigaction{
+        .handler = .{ .handler = posix.SIG.IGN },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.TTOU, &sig_ign, null);
+    posix.sigaction(posix.SIG.TTIN, &sig_ign, null);
 
     // SIGWINCH: re-render blocks on terminal resize
     const winch_act = posix.Sigaction{

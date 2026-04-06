@@ -76,6 +76,12 @@ function xyron.command(name, callback) end
 ---@return { exit_code: integer }
 function xyron.exec(cmd) end
 
+--- Execute a shell command and capture its stdout.
+--- Use this instead of io.popen (which is disabled).
+---@param cmd string Shell command to execute
+---@return { output: string, exit_code: integer }
+function xyron.capture(cmd) end
+
 -- =============================================================================
 -- Completions
 -- =============================================================================
