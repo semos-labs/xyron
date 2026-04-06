@@ -4,6 +4,9 @@
 // conflicts/deleted), ahead/behind counts, and repo state (rebase/merge/
 // cherry-pick). Uses `git status --porcelain=v2 --branch` for file status
 // and reads .git/HEAD + state files directly for everything else.
+//
+// All git subprocess work runs on a background thread. The prompt reads
+// from a cached snapshot so it never blocks on I/O.
 
 const std = @import("std");
 
@@ -27,18 +30,80 @@ pub const GitInfo = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Static buffers (slices in GitInfo point into these)
+// Static buffers used by readFresh() — only touched by the bg thread
 // ---------------------------------------------------------------------------
 
 var branch_buf: [128]u8 = undefined;
+var worktree_buf: [256]u8 = undefined;
 var gitdir_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+// ---------------------------------------------------------------------------
+// Cache — read by the main thread, written by the bg thread under mutex
+// ---------------------------------------------------------------------------
+
+var cache_mutex: std.Thread.Mutex = .{};
+var cached_info: GitInfo = .{};
+var cached_branch: [128]u8 = undefined;
+var cached_branch_len: usize = 0;
+var cached_worktree: [256]u8 = undefined;
+var cached_worktree_len: usize = 0;
+
+var refresh_thread: ?std.Thread = null;
+var refreshing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Read full git info for the current working directory.
+/// Return the most recent cached git info (non-blocking).
 pub fn read() GitInfo {
+    cache_mutex.lock();
+    defer cache_mutex.unlock();
+    return cached_info;
+}
+
+/// Kick off a background refresh. No-op if one is already running.
+pub fn requestRefresh() void {
+    // Don't stack up threads
+    if (refreshing.load(.acquire)) return;
+
+    // Join the previous thread if any
+    if (refresh_thread) |t| {
+        t.join();
+        refresh_thread = null;
+    }
+
+    refresh_thread = std.Thread.spawn(.{}, refreshWorker, .{}) catch return;
+}
+
+fn refreshWorker() void {
+    refreshing.store(true, .release);
+    defer refreshing.store(false, .release);
+
+    const info = readFresh();
+
+    cache_mutex.lock();
+    defer cache_mutex.unlock();
+
+    // Copy branch string into cache-owned buffer
+    cached_branch_len = @min(info.branch.len, cached_branch.len);
+    @memcpy(cached_branch[0..cached_branch_len], info.branch[0..cached_branch_len]);
+
+    // Copy worktree name into cache-owned buffer
+    cached_worktree_len = @min(info.worktree_name.len, cached_worktree.len);
+    @memcpy(cached_worktree[0..cached_worktree_len], info.worktree_name[0..cached_worktree_len]);
+
+    // Store the snapshot with cache-owned slices
+    cached_info = info;
+    cached_info.branch = cached_branch[0..cached_branch_len];
+    cached_info.worktree_name = cached_worktree[0..cached_worktree_len];
+}
+
+// ---------------------------------------------------------------------------
+// Blocking read — runs only on the background thread
+// ---------------------------------------------------------------------------
+
+fn readFresh() GitInfo {
     var info = GitInfo{};
 
     // Walk up from cwd looking for .git (directory or worktree file)
@@ -62,9 +127,14 @@ pub fn read() GitInfo {
             info.is_worktree = true;
             // Worktree name = last component of the directory containing .git file
             if (std.mem.lastIndexOf(u8, dir, "/")) |sep| {
-                info.worktree_name = dir[sep + 1 ..];
+                const name = dir[sep + 1 ..];
+                const n = @min(name.len, worktree_buf.len);
+                @memcpy(worktree_buf[0..n], name[0..n]);
+                info.worktree_name = worktree_buf[0..n];
             } else {
-                info.worktree_name = dir;
+                const n = @min(dir.len, worktree_buf.len);
+                @memcpy(worktree_buf[0..n], dir[0..n]);
+                info.worktree_name = worktree_buf[0..n];
             }
             const f = std.fs.cwd().openFile(dgp, .{}) catch return info;
             defer f.close();
@@ -309,4 +379,12 @@ test "empty GitInfo defaults" {
     try std.testing.expectEqual(@as(usize, 0), info.staged);
     try std.testing.expectEqual(false, info.is_worktree);
     try std.testing.expectEqualStrings("", info.branch);
+}
+
+test "read returns cached info without blocking" {
+    // read() should return immediately (default empty info)
+    const info = read();
+    // Just verify it doesn't block or crash
+    _ = info.branch;
+    _ = info.staged;
 }

@@ -30,6 +30,7 @@ const overlay = @import("overlay.zig");
 const ipc = @import("ipc.zig");
 const context_manager = @import("project/context_manager.zig");
 const project_resolver = @import("project/resolver.zig");
+const git_info_mod = @import("git_info.zig");
 
 pub const Shell = struct {
     allocator: std.mem.Allocator,
@@ -174,6 +175,9 @@ pub const Shell = struct {
         // Detect initial project context at startup
         self.detectInitialProject(stdout);
 
+        // Kick off first background git info refresh
+        git_info_mod.requestRefresh();
+
         while (self.running) {
             // Ensure raw mode is active — fork-based builtins can corrupt terminal state
             term.enableRawMode() catch {};
@@ -239,6 +243,8 @@ pub const Shell = struct {
                         var line_copy: [editor_mod.MAX_LINE]u8 = undefined;
                         @memcpy(line_copy[0..line.len], line);
                         self.executeLine(line_copy[0..line.len]);
+                        // Refresh git info in the background for the next prompt
+                        git_info_mod.requestRefresh();
                         // Estimate cursor row after command execution.
                         // In block UI mode, use the saved block line count for accuracy.
                         // Otherwise assume the output filled the screen.
