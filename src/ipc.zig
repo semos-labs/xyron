@@ -20,6 +20,7 @@ const complete_help = @import("complete_help.zig");
 const history_mod = @import("history.zig");
 const history_db_mod = @import("history_db.zig");
 const jobs_mod = @import("jobs.zig");
+const lua_api = @import("lua_api.zig");
 
 /// References to shell state (set by shell.zig after init).
 pub var env: ?*environ_mod.Environ = null;
@@ -28,6 +29,7 @@ pub var help_cache: ?*complete_help.HelpCache = null;
 pub var history: ?*history_mod.History = null;
 pub var history_db: ?*history_db_mod.HistoryDb = null;
 pub var job_table: ?*jobs_mod.JobTable = null;
+pub var lua: lua_api.LuaState = null;
 
 /// Xyron's socket path and fd.
 var socket_path_buf: [256]u8 = undefined;
@@ -263,7 +265,7 @@ fn handleGetCompletions(fd: posix.fd_t, payload: []const u8) void {
     const e = env orelse return;
     const cc = cmd_cache orelse return;
 
-    const result = complete_mod.getCompletions(buffer, @min(cursor, buffer.len), e, cc, help_cache);
+    const result = complete_mod.getCompletions(buffer, @min(cursor, buffer.len), e, cc, help_cache, lua);
 
     var buf: [proto.MAX_PAYLOAD]u8 = undefined;
     var w = proto.PayloadWriter.init(&buf);

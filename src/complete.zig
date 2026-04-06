@@ -9,6 +9,7 @@ const posix = std.posix;
 const editor_mod = @import("editor.zig");
 const environ_mod = @import("environ.zig");
 const highlight = @import("highlight.zig");
+const lua_api = @import("lua_api.zig");
 const providers = @import("complete_providers.zig");
 const help_mod = @import("complete_help.zig");
 const keys = @import("keys.zig");
@@ -111,6 +112,7 @@ pub fn getCompletions(
     env: *const environ_mod.Environ,
     cmd_cache: *highlight.CommandCache,
     help_cache: ?*help_mod.HelpCache,
+    lua: lua_api.LuaState,
 ) CompletionResult {
     const ctx = analyzeContext(buffer, cursor);
     var result = CompletionResult{
@@ -123,7 +125,7 @@ pub fn getCompletions(
         var buf: CandidateBuffer = .{};
     };
     S.buf.count = 0;
-    providers.gather(&S.buf, &ctx, env, cmd_cache, help_cache);
+    providers.gather(&S.buf, &ctx, env, cmd_cache, help_cache, lua);
     result.candidates = &S.buf;
 
     // Score and sort
@@ -146,6 +148,7 @@ pub fn runPicker(
     env: *const environ_mod.Environ,
     cmd_cache: *highlight.CommandCache,
     help_cache: ?*help_mod.HelpCache,
+    lua: lua_api.LuaState,
     hl_ctx: anytype,
 ) PickerResult {
     // Analyze context and gather candidates
@@ -170,11 +173,12 @@ pub fn runPicker(
             ev: *const environ_mod.Environ,
             cc: *highlight.CommandCache,
             hc: ?*help_mod.HelpCache,
+            L: lua_api.LuaState,
         ) void {
             const ctx = analyzeContext(e.content(), e.cursor);
             ws.* = ctx.word_start;
             a.count = 0;
-            providers.gather(a, &ctx, ev, cc, hc);
+            providers.gather(a, &ctx, ev, cc, hc, L);
             scoreAndFilter(a, ctx.prefix, si, sv, sc);
             sel.* = 0;
             scr.* = 0;
@@ -184,7 +188,7 @@ pub fn runPicker(
     var selected: usize = 0;
     var scroll: usize = 0;
 
-    regather(ed, &all, &word_start, &scored_indices, &scored_values, &scored_count, &selected, &scroll, env, cmd_cache, help_cache);
+    regather(ed, &all, &word_start, &scored_indices, &scored_values, &scored_count, &selected, &scroll, env, cmd_cache, help_cache, lua);
 
     if (scored_count == 0 and all.count == 0) return .cancelled;
 
@@ -283,7 +287,7 @@ pub fn runPicker(
 
         // Re-gather candidates on content change (providers use prefix from editor)
         if (content_changed) {
-            regather(ed, &all, &word_start, &scored_indices, &scored_values, &scored_count, &selected, &scroll, env, cmd_cache, help_cache);
+            regather(ed, &all, &word_start, &scored_indices, &scored_values, &scored_count, &selected, &scroll, env, cmd_cache, help_cache, lua);
         }
 
         renderInlineList(stdout, prompt_str, ed, &all, &scored_indices, scored_count, selected, scroll, max_visible, &prev_lines, &prompt_row, hl_ctx);
@@ -1073,6 +1077,7 @@ pub fn updateInline(
     env: *const environ_mod.Environ,
     cmd_cache: *highlight.CommandCache,
     help_cache: ?*help_mod.HelpCache,
+    lua_state: lua_api.LuaState,
     hl_ctx: anytype,
 ) void {
     var s = &inline_state;
@@ -1099,7 +1104,7 @@ pub fn updateInline(
 
     // Gather and score
     s.all.count = 0;
-    providers.gather(&s.all, &ctx, env, cmd_cache, help_cache);
+    providers.gather(&s.all, &ctx, env, cmd_cache, help_cache, lua_state);
     if (s.all.count == 0) {
         if (s.active) dismissInline(stdout);
         return;

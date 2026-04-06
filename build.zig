@@ -131,6 +131,7 @@ pub fn build(b: *std.Build) void {
         "src/block_ui.zig",
         "src/history_search.zig",
         "src/project_test.zig",
+        "src/cmd_completions.zig",
     };
 
     for (test_modules) |path| {

@@ -16,6 +16,7 @@ pub const c = @cImport({
 const environ_mod = @import("environ.zig");
 const lua_hooks = @import("lua_hooks.zig");
 const lua_commands = @import("lua_commands.zig");
+const lua_completions = @import("lua_completions.zig");
 
 pub const LuaState = ?*c.lua_State;
 
@@ -67,6 +68,7 @@ pub fn init(env: *environ_mod.Environ, attyx_enabled: bool) LuaState {
     registerFn(L, "pick", apiPick);
     registerFn(L, "has_attyx_ui", apiHasAttyxUi);
     registerFn(L, "project_info", apiProjectInfo);
+    registerFn(L, "complete", apiComplete);
 
     // Set as global "xyron"
     c.lua_setglobal(L, "xyron");
@@ -205,6 +207,19 @@ fn apiCommand(L: ?*c.lua_State) callconv(.c) c_int {
     c.lua_pushvalue(state, 2);
     const ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
     lua_commands.registerCommand(std.mem.span(name), ref);
+    return 0;
+}
+
+/// xyron.complete(cmd_name, callback) — register a completion provider
+fn apiComplete(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    const name = c.lua_tolstring(state, 1, null) orelse return 0;
+
+    if (c.lua_type(state, 2) != c.LUA_TFUNCTION) return 0;
+
+    c.lua_pushvalue(state, 2);
+    const ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
+    lua_completions.registerProvider(std.mem.span(name), ref);
     return 0;
 }
 

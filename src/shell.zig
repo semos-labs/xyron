@@ -83,7 +83,7 @@ pub const Shell = struct {
 
         // Initialize project context with session ID derived from pid+timestamp
         const session_num: u64 = @intCast(@as(i64, pid) * 1000000 + @rem(ts, 1000000));
-        var project_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        const project_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
 
         return .{
             .allocator = allocator,
@@ -97,7 +97,7 @@ pub const Shell = struct {
             .cmd_cache = highlight.CommandCache.init(allocator),
             .help_cache = complete_help.HelpCache.init(hdb.db),
             .lua = lua,
-            .project_state = context_manager.SessionProjectState.init(project_arena.allocator(), session_num),
+            .project_state = context_manager.SessionProjectState.init(allocator, session_num),
             .project_arena = project_arena,
             .last_exit_code = 0,
             .last_duration_ms = 0,
@@ -135,6 +135,7 @@ pub const Shell = struct {
             ipc.env = &self.env;
             ipc.cmd_cache = &self.cmd_cache;
             ipc.help_cache = &self.help_cache;
+            ipc.lua = self.lua;
             ipc.history = &self.history;
             ipc.history_db = &self.history_db;
             ipc.job_table = &self.job_table;

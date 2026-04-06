@@ -8,6 +8,9 @@ const std = @import("std");
 const posix = std.posix;
 const builtins = @import("builtins.zig");
 const lua_commands = @import("lua_commands.zig");
+const lua_completions = @import("lua_completions.zig");
+const lua_api = @import("lua_api.zig");
+const cmd_completions = @import("cmd_completions.zig");
 const environ_mod = @import("environ.zig");
 const highlight = @import("highlight.zig");
 const complete = @import("complete.zig");
@@ -21,6 +24,7 @@ pub fn gather(
     env: *const environ_mod.Environ,
     cmd_cache: *highlight.CommandCache,
     help_cache: ?*help_mod.HelpCache,
+    lua: lua_api.LuaState,
 ) void {
     switch (ctx.kind) {
         .command => {
@@ -30,8 +34,9 @@ pub fn gather(
             providePathCommands(out, ctx.prefix, env, cmd_cache);
         },
         .argument => {
-            // Help-derived flags and subcommands first, then filesystem
             if (help_cache) |hc| provideHelpFlags(out, ctx, hc, env);
+            cmd_completions.provide(out, ctx);
+            lua_completions.provide(lua, out, ctx);
             provideFilesystem(out, ctx.prefix, env);
         },
         .redirect_target => {
@@ -39,6 +44,8 @@ pub fn gather(
         },
         .flag => {
             if (help_cache) |hc| provideHelpFlags(out, ctx, hc, env);
+            cmd_completions.provide(out, ctx);
+            lua_completions.provide(lua, out, ctx);
             provideFilesystem(out, ctx.prefix, env);
         },
         .env_var => {

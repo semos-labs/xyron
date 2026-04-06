@@ -218,14 +218,14 @@ pub fn readLine(
                             // Trigger completion
                             const ipc_mod = @import("ipc.zig");
                             if (ipc_mod.attyx_connected) {
-                                complete_mod.updateInline(ed, stdout, prompt_str, ctx.env, ctx.cache, ctx.help_cache, ctx);
+                                complete_mod.updateInline(ed, stdout, prompt_str, ctx.env, ctx.cache, ctx.help_cache, prompt_lua, ctx);
                                 if (!complete_mod.inline_state.active) {
                                     refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
                                 }
                             } else {
                                 const result = complete_mod.runPicker(
                                     ed, stdout, prompt_str, ctx.env, ctx.cache,
-                                    ctx.help_cache, ctx,
+                                    ctx.help_cache, prompt_lua, ctx,
                                 );
                                 if (result == .interrupted) {
                                     // Propagate ^C as interrupt
@@ -314,7 +314,7 @@ pub fn readLine(
         const update_existing = overlay.enabled and complete_mod.inline_state.active and ipc_mod.attyx_connected;
         if (content_changed and (as_you_type or update_existing) and hl != null) {
             if (hl) |ctx| {
-                complete_mod.updateInline(ed, stdout, prompt_str, ctx.env, ctx.cache, ctx.help_cache, ctx);
+                complete_mod.updateInline(ed, stdout, prompt_str, ctx.env, ctx.cache, ctx.help_cache, prompt_lua, ctx);
             }
             // If overlay dismissed itself (no candidates), we still need a refresh
             if (!complete_mod.inline_state.active) {

@@ -77,6 +77,38 @@ function xyron.command(name, callback) end
 function xyron.exec(cmd) end
 
 -- =============================================================================
+-- Completions
+-- =============================================================================
+
+---@class xyron.CompletionContext
+---@field cmd_name string The base command name
+---@field args string[] Non-flag arguments after the command
+---@field prefix string The partial word being completed
+---@field kind "command"|"argument"|"flag"|"env_var"|"redirect_target"|"none"
+
+--- Register a completion provider for a command.
+---
+--- The callback receives a context table and should return an array of
+--- completion candidates. Each candidate can be a string or a table
+--- with `text` and optional `desc` fields.
+---
+--- Example:
+--- ```lua
+--- xyron.complete("myapp", function(ctx)
+---     if ctx.args[1] == "deploy" then
+---         return {"staging", "production"}
+---     end
+---     return {
+---         {text = "deploy", desc = "Deploy the app"},
+---         {text = "status", desc = "Show status"},
+---     }
+--- end)
+--- ```
+---@param cmd_name string Command to provide completions for
+---@param callback fun(ctx: xyron.CompletionContext): (string|{text: string, desc?: string})[]
+function xyron.complete(cmd_name, callback) end
+
+-- =============================================================================
 -- Hooks
 -- =============================================================================
 

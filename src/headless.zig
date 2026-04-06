@@ -468,6 +468,7 @@ pub const HeadlessRuntime = struct {
             &self.env,
             &self.cmd_cache,
             &self.help_cache,
+            self.lua,
         );
 
         // Response schema:
