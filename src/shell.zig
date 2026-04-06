@@ -832,15 +832,24 @@ fn shouldDelegateToSh(line: []const u8) bool {
 var winch_pending: bool = false;
 
 fn installSignalHandlers() void {
-    const ignore = posix.Sigaction{
+    const noop_act = posix.Sigaction{
         .handler = .{ .handler = noop },
         .mask = posix.sigemptyset(),
         .flags = 0,
     };
-    posix.sigaction(posix.SIG.INT, &ignore, null);
-    posix.sigaction(posix.SIG.TSTP, &ignore, null);
-    posix.sigaction(posix.SIG.TTOU, &ignore, null);
-    posix.sigaction(posix.SIG.TTIN, &ignore, null);
+    posix.sigaction(posix.SIG.INT, &noop_act, null);
+    posix.sigaction(posix.SIG.TSTP, &noop_act, null);
+
+    // SIGTTOU/SIGTTIN must use SIG_IGN (not a noop handler) so that
+    // tcsetpgrp/tcsetattr succeed when called from a background group.
+    // POSIX only skips the signal when the disposition is SIG_IGN or blocked.
+    const sig_ign = posix.Sigaction{
+        .handler = .{ .handler = posix.SIG.IGN },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.TTOU, &sig_ign, null);
+    posix.sigaction(posix.SIG.TTIN, &sig_ign, null);
 
     // SIGWINCH: re-render blocks on terminal resize
     const winch_act = posix.Sigaction{

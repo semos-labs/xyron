@@ -1,8 +1,9 @@
 // executor.zig — Runs execution plans: foreground and background.
 //
-// Foreground jobs stay in the shell's process group so Ctrl+Z
-// naturally delivers SIGTSTP to them. Background jobs get their
-// own process group to avoid receiving terminal signals.
+// Every job (foreground and background) gets its own process group.
+// Foreground jobs receive terminal control via tcsetpgrp so Ctrl+Z
+// delivers SIGTSTP only to the job, not the shell. After the job
+// finishes or stops, the shell reclaims the terminal.
 
 const std = @import("std");
 const posix = std.posix;
@@ -15,6 +16,10 @@ const block_ui = @import("block_ui.zig");
 const attyx_mod = @import("attyx.zig");
 const history_db_mod = @import("history_db.zig");
 const jobs_mod = @import("jobs.zig");
+
+const c = @cImport({
+    @cInclude("unistd.h");
+});
 
 const MAX_PIPELINE: usize = 32;
 
@@ -34,6 +39,23 @@ var shell_pgid: posix.pid_t = 0;
 
 pub fn initShellPgid() void {
     shell_pgid = std.c.getpid();
+    // Ensure the shell is its own process group leader and owns the terminal.
+    posix.setpgid(0, 0) catch {};
+    _ = c.tcsetpgrp(posix.STDIN_FILENO, shell_pgid);
+}
+
+pub fn getShellPgid() posix.pid_t {
+    return shell_pgid;
+}
+
+/// Give terminal control to a process group (for foreground jobs / fg builtin).
+pub fn giveTerminal(pgid: posix.pid_t) void {
+    _ = c.tcsetpgrp(posix.STDIN_FILENO, pgid);
+}
+
+/// Reclaim terminal control for the shell.
+pub fn takeTerminal() void {
+    _ = c.tcsetpgrp(posix.STDIN_FILENO, shell_pgid);
 }
 
 pub fn executeGroup(
@@ -230,6 +252,9 @@ pub fn waitForJobFg(job: *jobs_mod.Job) jobs_mod.JobState {
         }
     }
 
+    // Reclaim terminal control for the shell.
+    takeTerminal();
+
     if (was_stopped) {
         job.state = .stopped;
         return .stopped;
@@ -292,19 +317,15 @@ fn forkPipeline(
         };
 
         if (pid == 0) {
-            // Child: background jobs get their own process group
-            if (background) {
-                const tgt = if (pgid == 0) @as(posix.pid_t, 0) else pgid;
-                posix.setpgid(0, tgt) catch {};
-            }
+            // Child: every job gets its own process group for proper job control.
+            const tgt = if (pgid == 0) @as(posix.pid_t, 0) else pgid;
+            posix.setpgid(0, tgt) catch {};
             childExec(steps, &pipes, n, i, effective_envp);
         }
 
-        // Parent: set pgid for background jobs
-        if (background) {
-            if (i == 0) pgid = pid;
-            posix.setpgid(pid, pgid) catch {};
-        }
+        // Parent: set pgid (both foreground and background)
+        if (i == 0) pgid = pid;
+        posix.setpgid(pid, pgid) catch {};
 
         if (result.pid_count < MAX_PIPELINE) {
             result.pids[result.pid_count] = pid;
@@ -312,11 +333,17 @@ fn forkPipeline(
         }
     }
 
-    result.pgid = if (background) pgid else shell_pgid;
+    result.pgid = pgid;
 
     for (0..n - 1) |i| {
         posix.close(pipes[i][0]);
         posix.close(pipes[i][1]);
+    }
+
+    // Give foreground jobs terminal control so signals (Ctrl+Z, Ctrl+C)
+    // go to the job's process group, not the shell's.
+    if (!background and pgid > 0) {
+        giveTerminal(pgid);
     }
 
     return result;
@@ -348,6 +375,9 @@ fn waitForForeground(
             }
         }
     }
+
+    // Reclaim terminal control for the shell.
+    takeTerminal();
 
     return .{ .exit_code = last_code, .stopped = was_stopped };
 }

@@ -16,8 +16,11 @@ pub fn run(args: []const []const u8, stdout: std.fs.File, stderr: std.fs.File, j
         var buf: [256]u8 = undefined;
         stdout.writeAll(std.fmt.bufPrint(&buf, "{s}\n", .{j.rawInputSlice()}) catch "") catch {};
         term_mod.suspendRawMode();
+        // Give terminal control to the job's process group before resuming.
+        executor.giveTerminal(j.pgid);
         if (j.state == .stopped) j.cont();
         const state = executor.waitForJobFg(j);
+        // waitForJobFg calls takeTerminal() to reclaim the terminal.
         term_mod.resumeRawMode();
         if (state == .stopped) return .{ .exit_code = 148 };
         return .{ .exit_code = j.exit_code };
