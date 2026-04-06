@@ -24,6 +24,11 @@ pub const LuaState = ?*c.lua_State;
 var global_env: ?*environ_mod.Environ = null;
 var global_attyx_enabled: bool = false;
 
+/// Update the environment pointer (must be called after Shell is at its final location).
+pub fn setEnv(env: *environ_mod.Environ) void {
+    global_env = env;
+}
+
 /// Initialize the Lua VM and register the xyron API.
 pub fn init(env: *environ_mod.Environ, attyx_enabled: bool) LuaState {
     global_env = env;
@@ -44,6 +49,7 @@ pub fn init(env: *environ_mod.Environ, attyx_enabled: bool) LuaState {
     registerFn(L, "on", apiOn);
     registerFn(L, "command", apiCommand);
     registerFn(L, "exec", apiExec);
+    registerFn(L, "capture", apiCapture);
     // xyron.prompt = { register = fn, configure = fn, init = fn }
     c.lua_createtable(L, 0, 3);
     registerFn(L, "register", apiPromptRegister);
@@ -73,6 +79,15 @@ pub fn init(env: *environ_mod.Environ, attyx_enabled: bool) LuaState {
     // Set as global "xyron"
     c.lua_setglobal(L, "xyron");
 
+    // Disable io.popen — it calls fork() which is unsafe with background
+    // threads (deadlocks on inherited mutexes → SIGABRT).
+    // Use xyron.capture() instead.
+    if (c.luaL_loadstring(L, "io.popen = nil") == 0) {
+        _ = pcall(L, 0, 0);
+    } else {
+        c.lua_settop(L, -2);
+    }
+
     return L;
 }
 
@@ -93,6 +108,32 @@ pub fn setPackagePath(L: LuaState, config_dir: []const u8) void {
         _ = pcall(state, 0, 0);
     } else {
         c.lua_settop(state, -2); // pop error
+    }
+}
+
+/// Clear user module cache so require() re-executes on reload.
+/// Preserves built-in modules (anything not in the config directory).
+pub fn clearModuleCache(L: LuaState) void {
+    const state = L orelse return;
+    // for k in pairs(package.loaded) do
+    //   if type(package.loaded[k]) ~= "boolean" then
+    //     package.loaded[k] = nil
+    //   end
+    // end
+    const code =
+        \\for k, v in pairs(package.loaded) do
+        \\  if type(v) ~= "boolean" and k ~= "_G" and k ~= "string"
+        \\     and k ~= "table" and k ~= "math" and k ~= "io"
+        \\     and k ~= "os" and k ~= "coroutine" and k ~= "debug"
+        \\     and k ~= "package" and k ~= "utf8" then
+        \\    package.loaded[k] = nil
+        \\  end
+        \\end
+    ;
+    if (c.luaL_loadstring(state, code) == 0) {
+        _ = pcall(state, 0, 0);
+    } else {
+        c.lua_settop(state, -2);
     }
 }
 
@@ -229,6 +270,10 @@ fn apiExec(L: ?*c.lua_State) callconv(.c) c_int {
     const cmd = c.lua_tolstring(state, 1, null) orelse return 0;
     const cmd_str = std.mem.span(cmd);
 
+    // Drain background threads before fork to avoid deadlocks
+    const git_info = @import("git_info.zig");
+    git_info.waitForRefresh();
+
     // Execute via system sh for simplicity
     var child = std.process.Child.init(&.{ "/bin/sh", "-c", cmd_str }, std.heap.page_allocator);
     child.stdin_behavior = .Inherit;
@@ -255,6 +300,88 @@ fn apiExec(L: ?*c.lua_State) callconv(.c) c_int {
     };
 
     c.lua_createtable(state, 0, 1);
+    c.lua_pushinteger(state, code);
+    c.lua_setfield(state, -2, "exit_code");
+    return 1;
+}
+
+/// xyron.capture(cmd_string) -> {output=string, exit_code=N}
+/// Like exec, but captures stdout and returns it as a string.
+fn apiCapture(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    const cmd = c.lua_tolstring(state, 1, null) orelse return 0;
+    const cmd_str = std.mem.span(cmd);
+
+    // Drain background threads before fork to avoid deadlocks
+    const git_info = @import("git_info.zig");
+    git_info.waitForRefresh();
+
+    var child = std.process.Child.init(&.{ "/bin/sh", "-c", cmd_str }, std.heap.page_allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Inherit;
+
+    child.spawn() catch {
+        c.lua_createtable(state, 0, 2);
+        _ = c.lua_pushlstring(state, "", 0);
+        c.lua_setfield(state, -2, "output");
+        c.lua_pushinteger(state, 127);
+        c.lua_setfield(state, -2, "exit_code");
+        return 1;
+    };
+
+    // Read stdout with poll timeout
+    var output_buf: [65536]u8 = undefined;
+    var total: usize = 0;
+
+    const stdout_fd = if (child.stdout) |f| f.handle else {
+        _ = child.wait() catch {};
+        c.lua_createtable(state, 0, 2);
+        _ = c.lua_pushlstring(state, "", 0);
+        c.lua_setfield(state, -2, "output");
+        c.lua_pushinteger(state, 127);
+        c.lua_setfield(state, -2, "exit_code");
+        return 1;
+    };
+
+    const posix = std.posix;
+    var fds = [_]posix.pollfd{.{
+        .fd = stdout_fd,
+        .events = posix.POLL.IN,
+        .revents = 0,
+    }};
+
+    var deadline: i32 = 5000; // 5s timeout
+    while (total < output_buf.len and deadline > 0) {
+        const start = std.time.milliTimestamp();
+        const ready = posix.poll(&fds, deadline) catch break;
+        const elapsed: i32 = @intCast(@min(std.time.milliTimestamp() - start, 5000));
+        deadline -= elapsed;
+        if (ready == 0) break;
+        if (fds[0].revents & posix.POLL.IN != 0) {
+            const n = posix.read(stdout_fd, output_buf[total..]) catch break;
+            if (n == 0) break;
+            total += n;
+        } else break;
+    }
+
+    const term = child.wait() catch {
+        c.lua_createtable(state, 0, 2);
+        _ = c.lua_pushlstring(state, &output_buf, total);
+        c.lua_setfield(state, -2, "output");
+        c.lua_pushinteger(state, 127);
+        c.lua_setfield(state, -2, "exit_code");
+        return 1;
+    };
+
+    const code: c_int = switch (term) {
+        .Exited => |co| @intCast(co),
+        else => 1,
+    };
+
+    c.lua_createtable(state, 0, 2);
+    _ = c.lua_pushlstring(state, &output_buf, total);
+    c.lua_setfield(state, -2, "output");
     c.lua_pushinteger(state, code);
     c.lua_setfield(state, -2, "exit_code");
     return 1;

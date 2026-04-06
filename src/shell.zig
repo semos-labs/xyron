@@ -128,6 +128,7 @@ pub const Shell = struct {
 
     pub fn run(self: *Shell) !void {
         const stdout = std.fs.File.stdout();
+        lua_api.setEnv(&self.env);
         lua_api.setBlockTable(&self.blocks);
         lua_api.setHistoryDb(&self.history_db);
 
@@ -372,7 +373,9 @@ pub const Shell = struct {
         if (expanded.commands.len == 1 and !expanded.background) {
             const cmd = &expanded.commands[0];
             if (cmd.argv.len > 0 and lua_commands.isLuaCommand(cmd.argv[0])) {
+                term.suspendRawMode();
                 const code = lua_commands.execute(self.lua, cmd.argv[0], cmd.argv);
+                term.resumeRawMode();
                 self.last_exit_code = code;
                 _ = self.history_db.recordCommand(trimmed, "", code, 0, types.timestampMs(), false, &.{});
                 return;
@@ -502,6 +505,8 @@ pub const Shell = struct {
 
     /// Reload Lua config and re-resolve project context.
     fn reloadConfig(self: *Shell, stdout: std.fs.File) void {
+        // Clear require() cache so user modules are re-executed
+        lua_api.clearModuleCache(self.lua);
         // Reload Lua config
         loadLuaConfig(self.lua);
 

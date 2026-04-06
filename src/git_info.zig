@@ -76,6 +76,15 @@ pub fn requestRefresh() void {
     refresh_thread = std.Thread.spawn(.{}, refreshWorker, .{}) catch return;
 }
 
+/// Block until any in-flight refresh finishes. Call before fork()
+/// to avoid fork+thread crashes.
+pub fn waitForRefresh() void {
+    if (refresh_thread) |t| {
+        t.join();
+        refresh_thread = null;
+    }
+}
+
 fn refreshWorker() void {
     refreshing.store(true, .release);
     defer refreshing.store(false, .release);
