@@ -8,6 +8,8 @@
 const std = @import("std");
 const builtins = @import("builtins.zig");
 const lua_commands = @import("lua_commands.zig");
+const lua_api = @import("lua_api.zig");
+const lua_eval = @import("lua_eval.zig");
 const aliases_mod = @import("aliases.zig");
 const path_search = @import("path_search.zig");
 const environ_mod = @import("environ.zig");
@@ -19,6 +21,7 @@ const environ_mod = @import("environ.zig");
 pub const TokenClass = enum {
     builtin_cmd,
     lua_cmd,
+    lua_code,
     valid_cmd,
     unknown_cmd,
     flag,
@@ -38,6 +41,7 @@ fn styleFor(class: TokenClass) []const u8 {
     return switch (class) {
         .builtin_cmd => "\x1b[1;36m", // bold cyan
         .lua_cmd => "\x1b[1;35m", // bold magenta
+        .lua_code => "\x1b[35m", // magenta
         .valid_cmd => "\x1b[1;32m", // bold green
         .unknown_cmd => "\x1b[4;31m", // underline red
         .flag => "\x1b[36m", // cyan
@@ -110,8 +114,18 @@ pub fn renderHighlighted(
     input: []const u8,
     cache: *CommandCache,
     env: *const environ_mod.Environ,
+    lua: ?lua_api.LuaState,
 ) usize {
     if (input.len == 0) return 0;
+
+    // Lua mode: highlight entire line as Lua code.
+    // Heuristics flag candidates, then luaL_loadstring confirms it actually parses as Lua.
+    const lua_state: lua_api.LuaState = if (lua) |l| l else null;
+    if (lua_eval.expressionShorthand(input) != null or
+        (lua_eval.isLuaCode(input) and lua_eval.compilesAsLua(lua_state, input)))
+    {
+        return renderLuaHighlighted(out, input);
+    }
 
     var pos: usize = 0; // write position in out
     var i: usize = 0; // read position in input
@@ -283,6 +297,123 @@ fn emitStyled(dest: []u8, text: []const u8, class: TokenClass) usize {
 }
 
 // ---------------------------------------------------------------------------
+// Lua highlighting
+// ---------------------------------------------------------------------------
+
+const LUA_KEYWORDS = [_][]const u8{
+    "and",      "break", "do",       "else",   "elseif", "end",
+    "false",    "for",   "function", "goto",   "if",     "in",
+    "local",    "nil",   "not",      "or",     "repeat", "return",
+    "then",     "true",  "until",    "while",
+};
+
+fn isLuaKeyword(word: []const u8) bool {
+    for (&LUA_KEYWORDS) |kw| {
+        if (std.mem.eql(u8, word, kw)) return true;
+    }
+    return false;
+}
+
+/// Highlight a line as Lua code with keyword coloring.
+fn renderLuaHighlighted(out: []u8, input: []const u8) usize {
+    var pos: usize = 0;
+    var i: usize = 0;
+
+    // `=` prefix gets special treatment — highlight it as an operator
+    if (input.len > 0 and input[0] == '=') {
+        pos += emitStyled(out[pos..], "=", .pipe); // yellow bold for the `=`
+        i = 1;
+    }
+
+    while (i < input.len and pos + 20 < out.len) {
+        const ch = input[i];
+
+        // Whitespace
+        if (ch == ' ' or ch == '\t') {
+            out[pos] = ch;
+            pos += 1;
+            i += 1;
+            continue;
+        }
+
+        // Strings
+        if (ch == '"' or ch == '\'') {
+            const quote = ch;
+            const start = i;
+            i += 1;
+            while (i < input.len and input[i] != quote) : (i += 1) {
+                if (input[i] == '\\') i += 1;
+            }
+            if (i < input.len) i += 1;
+            pos += emitStyled(out[pos..], input[start..i], .quoted);
+            continue;
+        }
+
+        // Long strings: [[ ... ]]
+        if (ch == '[' and i + 1 < input.len and input[i + 1] == '[') {
+            const start = i;
+            i += 2;
+            while (i + 1 < input.len) : (i += 1) {
+                if (input[i] == ']' and input[i + 1] == ']') {
+                    i += 2;
+                    break;
+                }
+            }
+            pos += emitStyled(out[pos..], input[start..i], .quoted);
+            continue;
+        }
+
+        // Comments: --
+        if (ch == '-' and i + 1 < input.len and input[i + 1] == '-') {
+            // Rest of line is a comment — dim it
+            pos += emit(out[pos..], "\x1b[2m");
+            const rest = input[i..];
+            pos += emit(out[pos..], rest);
+            pos += emit(out[pos..], RESET);
+            i = input.len;
+            continue;
+        }
+
+        // Numbers
+        if (ch >= '0' and ch <= '9') {
+            const start = i;
+            while (i < input.len and ((input[i] >= '0' and input[i] <= '9') or
+                input[i] == '.' or input[i] == 'x' or input[i] == 'X' or
+                (input[i] >= 'a' and input[i] <= 'f') or
+                (input[i] >= 'A' and input[i] <= 'F'))) : (i += 1) {}
+            pos += emitStyled(out[pos..], input[start..i], .lua_cmd); // magenta for numbers
+            continue;
+        }
+
+        // Identifiers and keywords
+        if (isIdentChar(ch)) {
+            const start = i;
+            while (i < input.len and isIdentChar(input[i])) : (i += 1) {}
+            const word = input[start..i];
+            if (isLuaKeyword(word)) {
+                pos += emitStyled(out[pos..], word, .lua_code); // magenta for keywords
+            } else {
+                pos += emit(out[pos..], word);
+            }
+            continue;
+        }
+
+        // Operators and punctuation — default color
+        out[pos] = ch;
+        pos += 1;
+        i += 1;
+    }
+
+    pos += emit(out[pos..], RESET);
+    return pos;
+}
+
+fn isIdentChar(ch: u8) bool {
+    return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or
+        (ch >= '0' and ch <= '9') or ch == '_';
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -353,7 +484,7 @@ test "command after && is classified as command" {
 
     // "cd foo && exit" — exit should be highlighted as builtin
     var buf: [512]u8 = undefined;
-    const len = renderHighlighted(&buf, "cd foo && exit", &cache, &env);
+    const len = renderHighlighted(&buf, "cd foo && exit", &cache, &env, null);
     const result = buf[0..len];
     // After &&, "exit" should get builtin_cmd style (bold cyan \x1b[1;36m)
     try std.testing.expect(std.mem.indexOf(u8, result, "\x1b[1;36m" ++ "exit") != null);
@@ -367,7 +498,7 @@ test "command after semicolon is classified as command" {
     var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
 
     var buf: [512]u8 = undefined;
-    const len = renderHighlighted(&buf, "cd foo; exit", &cache, &env);
+    const len = renderHighlighted(&buf, "cd foo; exit", &cache, &env, null);
     const result = buf[0..len];
     try std.testing.expect(std.mem.indexOf(u8, result, "\x1b[1;36m" ++ "exit") != null);
 }

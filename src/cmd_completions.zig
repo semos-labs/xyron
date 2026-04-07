@@ -7,6 +7,7 @@
 const std = @import("std");
 const posix = std.posix;
 const complete = @import("complete.zig");
+const project = @import("project/mod.zig");
 
 const TIMEOUT_MS: i32 = 500;
 const MAX_OUTPUT: usize = 32768;
@@ -25,6 +26,8 @@ pub fn provide(out: *complete.CandidateBuffer, ctx: *const complete.CompletionCo
         provideDocker(out, ctx);
     } else if (std.mem.eql(u8, ctx.cmd_name, "npm") or std.mem.eql(u8, ctx.cmd_name, "bun") or std.mem.eql(u8, ctx.cmd_name, "yarn") or std.mem.eql(u8, ctx.cmd_name, "pnpm")) {
         provideNpmScripts(out, ctx);
+    } else if (std.mem.eql(u8, ctx.cmd_name, "xyron") or std.mem.eql(u8, ctx.cmd_name, "xy")) {
+        provideXyron(out, ctx);
     } else if (std.mem.eql(u8, ctx.cmd_name, "make") or std.mem.eql(u8, ctx.cmd_name, "gmake")) {
         provideMakeTargets(out, ctx);
     } else if (std.mem.eql(u8, ctx.cmd_name, "ssh") or std.mem.eql(u8, ctx.cmd_name, "scp")) {
@@ -33,6 +36,102 @@ pub fn provide(out: *complete.CandidateBuffer, ctx: *const complete.CompletionCo
         // Delegate to extended providers (kubectl, brew, pip, etc.)
         const ext = @import("cmd_completions_ext.zig");
         ext.provide(out, ctx);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// xyron / xy — subcommands and project commands/services
+// ---------------------------------------------------------------------------
+
+fn provideXyron(out: *complete.CandidateBuffer, ctx: *const complete.CompletionContext) void {
+    if (ctx.cmd_args_len == 0) {
+        // Complete subcommands
+        const subcmds = [_]struct { name: []const u8, desc: []const u8 }{
+            .{ .name = "run", .desc = "Run a project command" },
+            .{ .name = "up", .desc = "Start project services" },
+            .{ .name = "down", .desc = "Stop project services" },
+            .{ .name = "restart", .desc = "Restart a service" },
+            .{ .name = "ps", .desc = "Show service status" },
+            .{ .name = "logs", .desc = "Show service logs" },
+            .{ .name = "init", .desc = "Initialize xyron.toml" },
+            .{ .name = "new", .desc = "Create new project" },
+            .{ .name = "reload", .desc = "Reload config" },
+            .{ .name = "doctor", .desc = "Diagnose project issues" },
+            .{ .name = "context", .desc = "Show/explain context" },
+            .{ .name = "project", .desc = "Project info" },
+            .{ .name = "secrets", .desc = "Manage secrets" },
+        };
+        for (subcmds) |cmd| {
+            if (ctx.prefix.len == 0 or std.mem.startsWith(u8, cmd.name, ctx.prefix)) {
+                out.addWithDesc(cmd.name, cmd.desc, .builtin);
+            }
+        }
+        return;
+    }
+
+    const subcmd = ctx.cmd_args[0];
+
+    // "xyron run <TAB>" — complete project command names
+    if (std.mem.eql(u8, subcmd, "run")) {
+        addProjectCommands(out, ctx.prefix);
+        return;
+    }
+
+    // "xyron up/restart/logs <TAB>" — complete service names
+    if (std.mem.eql(u8, subcmd, "up") or std.mem.eql(u8, subcmd, "restart") or std.mem.eql(u8, subcmd, "logs")) {
+        addProjectServices(out, ctx.prefix);
+        return;
+    }
+
+    // "xyron secrets <TAB>" — complete secrets subcommands
+    if (std.mem.eql(u8, subcmd, "secrets") and ctx.cmd_args_len == 1) {
+        const secrets_cmds = [_]struct { name: []const u8, desc: []const u8 }{
+            .{ .name = "init", .desc = "Set up GPG key" },
+            .{ .name = "open", .desc = "Browse secrets (TUI)" },
+            .{ .name = "get", .desc = "Get a secret value" },
+            .{ .name = "add", .desc = "Add a secret" },
+            .{ .name = "list", .desc = "List secrets" },
+        };
+        for (secrets_cmds) |cmd| {
+            if (ctx.prefix.len == 0 or std.mem.startsWith(u8, cmd.name, ctx.prefix)) {
+                out.addWithDesc(cmd.name, cmd.desc, .builtin);
+            }
+        }
+        return;
+    }
+
+    // "xyron context <TAB>"
+    if (std.mem.eql(u8, subcmd, "context") and ctx.cmd_args_len == 1) {
+        if (ctx.prefix.len == 0 or std.mem.startsWith(u8, "explain", ctx.prefix)) {
+            out.addWithDesc("explain", "Explain context/value origin", .builtin);
+        }
+        return;
+    }
+}
+
+fn addProjectCommands(out: *complete.CandidateBuffer, prefix: []const u8) void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const load_result = project.loadFromCwd(arena.allocator());
+    if (load_result.status != .valid) return;
+    const mdl = load_result.model orelse return;
+    for (mdl.commands) |cmd| {
+        if (prefix.len == 0 or std.mem.startsWith(u8, cmd.name, prefix)) {
+            out.addWithDesc(cmd.name, cmd.command, .builtin);
+        }
+    }
+}
+
+fn addProjectServices(out: *complete.CandidateBuffer, prefix: []const u8) void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const load_result = project.loadFromCwd(arena.allocator());
+    if (load_result.status != .valid) return;
+    const mdl = load_result.model orelse return;
+    for (mdl.services) |svc| {
+        if (prefix.len == 0 or std.mem.startsWith(u8, svc.name, prefix)) {
+            out.addWithDesc(svc.name, svc.command, .builtin);
+        }
     }
 }
 

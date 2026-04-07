@@ -23,6 +23,7 @@ pub const HighlightCtx = struct {
     cache: *highlight.CommandCache,
     env: *const environ_mod.Environ,
     help_cache: ?*complete_help.HelpCache = null,
+    lua: ?lua_api.LuaState = null,
 };
 
 pub const ReadResult = union(enum) {
@@ -135,7 +136,7 @@ pub fn readLine(
                     clr_pos += cp(clr_buf[clr_pos..], prompt_str);
                     const hl_mod = @import("highlight.zig");
                     if (hl) |ctx| {
-                        clr_pos += hl_mod.renderHighlighted(clr_buf[clr_pos..], ed.content(), ctx.cache, ctx.env);
+                        clr_pos += hl_mod.renderHighlighted(clr_buf[clr_pos..], ed.content(), ctx.cache, ctx.env, ctx.lua);
                     } else {
                         clr_pos += cp(clr_buf[clr_pos..], ed.content());
                     }
@@ -726,7 +727,7 @@ pub fn refreshLineWithHistory(
         // Before selection
         if (vr.start > 0) {
             if (hl) |ctx| {
-                pos += highlight.renderHighlighted(buf[pos..], content[0..vr.start], ctx.cache, ctx.env);
+                pos += highlight.renderHighlighted(buf[pos..], content[0..vr.start], ctx.cache, ctx.env, ctx.lua);
             } else {
                 pos += cp(buf[pos..], content[0..vr.start]);
             }
@@ -740,7 +741,7 @@ pub fn refreshLineWithHistory(
             pos += cp(buf[pos..], content[vr.end..]);
         }
     } else if (hl) |ctx| {
-        pos += highlight.renderHighlighted(buf[pos..], content, ctx.cache, ctx.env);
+        pos += highlight.renderHighlighted(buf[pos..], content, ctx.cache, ctx.env, ctx.lua);
     } else {
         pos += cp(buf[pos..], content);
     }
@@ -819,7 +820,7 @@ pub fn renderPromptIntoBuf(
     // Editor content with highlighting
     const content = ed.content();
     if (hl) |ctx| {
-        pos += highlight.renderHighlighted(out[pos..], content, ctx.cache, ctx.env);
+        pos += highlight.renderHighlighted(out[pos..], content, ctx.cache, ctx.env, ctx.lua);
     } else {
         pos += cp(out[pos..], content);
     }

@@ -22,6 +22,7 @@ const jobs_mod = @import("jobs.zig");
 const lua_api = @import("lua_api.zig");
 const lua_hooks = @import("lua_hooks.zig");
 const lua_commands = @import("lua_commands.zig");
+const lua_eval = @import("lua_eval.zig");
 const highlight = @import("highlight.zig");
 const aliases_mod = @import("aliases.zig");
 const complete_help = @import("complete_help.zig");
@@ -238,7 +239,7 @@ pub const Shell = struct {
             input.prompt_job_count = self.activeJobCount();
             input.prompt_lua = self.lua;
 
-            const hl_ctx = input.HighlightCtx{ .cache = &self.cmd_cache, .env = &self.env, .help_cache = &self.help_cache };
+            const hl_ctx = input.HighlightCtx{ .cache = &self.cmd_cache, .env = &self.env, .help_cache = &self.help_cache, .lua = self.lua };
             input.refreshLine(stdout, prompt_str, &ed, &hl_ctx);
 
             // Run xyron.defer() callbacks after the first prompt is visible.
@@ -255,13 +256,16 @@ pub const Shell = struct {
                     self.cmd_cache.invalidate();
                     self.env.path_dirty = false;
                 }
-                // Re-render prompt to pick up any env changes from deferred init
+                // Re-render prompt to pick up any env changes from deferred init.
+                // refreshLine must run BEFORE updating prompt_extra_lines so
+                // it moves the cursor up by the OLD line count (the prompt
+                // that's currently visible), not the NEW one.
                 var pctx2 = prompt_mod.buildContext(self.last_exit_code, self.last_duration_ms, self.activeJobCount());
                 pctx2.vim_normal = ed.vim_enabled and ed.mode == .normal;
                 var pbuf2: [prompt_mod.MAX_PROMPT]u8 = undefined;
                 const pr2 = prompt_mod.render(&pbuf2, &pctx2, self.lua);
-                input.prompt_extra_lines = if (pr2.line_count > 1) pr2.line_count - 1 else 0;
                 input.refreshLine(stdout, pr2.text, &ed, &hl_ctx);
+                input.prompt_extra_lines = if (pr2.line_count > 1) pr2.line_count - 1 else 0;
             }
 
             const result = input.readLine(&ed, prompt_str, &self.history, &hl_ctx) catch |err| {
@@ -358,6 +362,16 @@ pub const Shell = struct {
 
         self.history.push(trimmed);
 
+        // Lua expression shorthand: `=expr` evaluates and prints
+        if (lua_eval.expressionShorthand(trimmed)) |expr| {
+            term.suspendRawMode();
+            const result = lua_eval.evalExpression(self.lua, expr);
+            term.resumeRawMode();
+            self.last_exit_code = result.exit_code;
+            _ = self.history_db.recordCommand(trimmed, "", result.exit_code, 0, types.timestampMs(), false, &.{});
+            return;
+        }
+
         // Alias expansion: replace first word if it's an alias
         var expanded_buf: [editor_mod.MAX_LINE]u8 = undefined;
         var input_to_parse = trimmed;
@@ -378,6 +392,17 @@ pub const Shell = struct {
                 pos += rl;
                 input_to_parse = expanded_buf[0..pos];
             }
+        }
+
+        // Detect Lua code and execute directly.
+        // Heuristics flag candidates, then luaL_loadstring confirms it actually parses as Lua.
+        if (lua_eval.isLuaCode(input_to_parse) and lua_eval.compilesAsLua(self.lua, input_to_parse)) {
+            term.suspendRawMode();
+            const result = lua_eval.evalCode(self.lua, input_to_parse);
+            term.resumeRawMode();
+            self.last_exit_code = result.exit_code;
+            _ = self.history_db.recordCommand(trimmed, "", result.exit_code, 0, types.timestampMs(), false, &.{});
+            return;
         }
 
         // Detect bash/sh commands and delegate to /bin/sh
@@ -493,16 +518,23 @@ pub const Shell = struct {
 
         if (result.should_exit) { self.running = false; return; }
 
-        // Command correction: suggest close matches on exit 127
-        if (result.exit_code == 127 and exec_plan.steps.len > 0 and exec_plan.steps[0].argv.len > 0) {
-            const correction = @import("correction.zig");
-            if (correction.suggest(exec_plan.steps[0].argv[0], &self.env)) |suggestion| {
-                var cbuf: [256]u8 = undefined;
-                var cpos: usize = 0;
-                cpos += scopy(cbuf[cpos..], "\x1b[33mDid you mean \x1b[1m");
-                cpos += scopy(cbuf[cpos..], suggestion);
-                cpos += scopy(cbuf[cpos..], "\x1b[22m?\x1b[0m\n");
-                stdout.writeAll(cbuf[0..cpos]) catch {};
+        // Command not found: try as Lua before showing correction
+        if (result.exit_code == 127) {
+            if (lua_eval.tryAsLua(self.lua, trimmed)) |lua_result| {
+                self.last_exit_code = lua_result.exit_code;
+                return;
+            }
+            // Not valid Lua either — suggest corrections
+            if (exec_plan.steps.len > 0 and exec_plan.steps[0].argv.len > 0) {
+                const correction = @import("correction.zig");
+                if (correction.suggest(exec_plan.steps[0].argv[0], &self.env)) |suggestion| {
+                    var cbuf: [256]u8 = undefined;
+                    var cpos: usize = 0;
+                    cpos += scopy(cbuf[cpos..], "\x1b[33mDid you mean \x1b[1m");
+                    cpos += scopy(cbuf[cpos..], suggestion);
+                    cpos += scopy(cbuf[cpos..], "\x1b[22m?\x1b[0m\n");
+                    stdout.writeAll(cbuf[0..cpos]) catch {};
+                }
             }
         }
 

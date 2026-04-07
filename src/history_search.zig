@@ -306,11 +306,13 @@ fn render(
     const max_vis = visibleRows(ts);
     const vis_end = @min(scroll + max_vis, count);
 
+    var empty_rows_used: usize = 0;
     if (count == 0) {
         const empty_row = rows / 2;
         { var er: usize = 3; while (er < empty_row and pos < buf.len - 20) : (er += 1) {
             pos += style.clearLine(buf[pos..]);
             pos += style.crlf(buf[pos..]);
+            empty_rows_used += 1;
         }}
         const msg = if (filter.len > 0) "No matches" else "No history";
         const pad_l = if (cols > msg.len) (cols - msg.len) / 2 else 0;
@@ -318,6 +320,7 @@ fn render(
         pos += style.dimText(buf[pos..], msg);
         pos += style.clearLine(buf[pos..]);
         pos += style.crlf(buf[pos..]);
+        empty_rows_used += 1;
     } else {
         for (scroll..vis_end) |vi| {
             const idx = scored_idx[vi];
@@ -381,7 +384,7 @@ fn render(
     }
 
     // Pad remaining
-    const used_rows = 3 + (vis_end - scroll);
+    const used_rows = 3 + (vis_end - scroll) + empty_rows_used;
     { var r: usize = used_rows; while (r + 2 < rows and pos < buf.len - 10) : (r += 1) {
         pos += style.clearLine(buf[pos..]);
         pos += style.crlf(buf[pos..]);

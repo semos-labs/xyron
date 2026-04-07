@@ -6,6 +6,56 @@
 
 Loaded on shell startup. Errors are reported but don't prevent the shell from starting.
 
+## Inline Lua evaluation
+
+Lua is a first-class citizen in Xyron — you can type Lua code directly at the shell prompt.
+
+### Expression shorthand
+
+Prefix any expression with `=` to evaluate it and print the result:
+
+```
+> = 2 + 2
+4
+> = xyron.cwd()
+/Users/you/projects
+> = string.format("hello %s", "world")
+hello world
+> = {1, 2, 3}
+table: 0x...
+```
+
+### Auto-detected Lua patterns
+
+The following are automatically recognized as Lua and executed directly:
+
+- **Declarations**: `local x = 5`, `function foo() ... end`
+- **Assignments**: `x = 42`, `t.key = "value"`
+- **Function calls**: `print("hello")`, `xyron.setenv("FOO", "bar")`, `table.insert(t, v)`
+- **Return statements**: `return 42`
+- **Block keywords**: `repeat`, `for ... do ... end`, `if ... then ... end`
+
+```
+> local x = 42
+> print(x)
+42
+> xyron.setenv("EDITOR", "vim")
+> for i = 1, 5 do print(i) end
+1
+2
+3
+4
+5
+```
+
+### Lua fallback
+
+If a command is not found as a builtin, alias, Lua command, or external program, Xyron tries to interpret it as Lua before showing an error. This catches expressions and statements that don't match the pattern detection heuristics.
+
+### Syntax highlighting
+
+Lua code at the prompt is highlighted with Lua-aware coloring: keywords in magenta, strings in green, comments dimmed.
+
 ## API reference
 
 All functions are on the global `xyron` table.
