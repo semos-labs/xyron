@@ -40,7 +40,7 @@ pub const CompletionContext = struct {
 // Candidate model
 // ---------------------------------------------------------------------------
 
-pub const MAX_CANDIDATES: usize = 256;
+pub const MAX_CANDIDATES: usize = 4096;
 pub const MAX_TEXT: usize = 256;
 pub const MAX_DESC: usize = 80;
 
