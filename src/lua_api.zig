@@ -14,6 +14,7 @@ pub const c = @cImport({
     @cInclude("lualib.h");
 });
 const environ_mod = @import("environ.zig");
+const style = @import("style.zig");
 const lua_hooks = @import("lua_hooks.zig");
 const lua_commands = @import("lua_commands.zig");
 const lua_completions = @import("lua_completions.zig");
@@ -790,14 +791,77 @@ fn apiAlias(L: ?*c.lua_State) callconv(.c) c_int {
 /// xyron.prompt({segments}) — configure prompt from Lua.
 /// Each element is either a string (builtin name or literal) or a function.
 /// Builtin names: "cwd", "symbol", "status", "duration", "jobs", "git_branch"
-/// xyron.prompt.init({...}) — set up prompt segments (same as old xyron.prompt())
+/// Map a color name string to a style.Color enum value.
+fn parseColorName(name: []const u8) ?style.Color {
+    const eql = std.mem.eql;
+    if (eql(u8, name, "black")) return .black;
+    if (eql(u8, name, "red")) return .red;
+    if (eql(u8, name, "green")) return .green;
+    if (eql(u8, name, "yellow")) return .yellow;
+    if (eql(u8, name, "blue")) return .blue;
+    if (eql(u8, name, "magenta")) return .magenta;
+    if (eql(u8, name, "cyan")) return .cyan;
+    if (eql(u8, name, "white")) return .white;
+    if (eql(u8, name, "bright_black")) return .bright_black;
+    if (eql(u8, name, "bright_red")) return .bright_red;
+    if (eql(u8, name, "bright_green")) return .bright_green;
+    if (eql(u8, name, "bright_yellow")) return .bright_yellow;
+    if (eql(u8, name, "bright_blue")) return .bright_blue;
+    if (eql(u8, name, "bright_magenta")) return .bright_magenta;
+    if (eql(u8, name, "bright_cyan")) return .bright_cyan;
+    if (eql(u8, name, "bright_white")) return .bright_white;
+    if (eql(u8, name, "default")) return .default;
+    return null;
+}
+
+/// Read an optional color field from a Lua table at the given stack index.
+fn readColorField(state: *c.lua_State, idx: c_int, field: [*:0]const u8) ?style.Color {
+    _ = c.lua_getfield(state, idx, field);
+    defer c.lua_settop(state, -(1) - 1);
+    if (c.lua_type(state, -1) == c.LUA_TSTRING) {
+        const s = c.lua_tolstring(state, -1, null);
+        if (s) |ptr| return parseColorName(std.mem.span(ptr));
+    }
+    return null;
+}
+
+/// Resolve a segment name string to a SegmentKind, or null for special/unknown names.
+fn resolveSegmentKind(name: []const u8) ?prompt_mod.SegmentKind {
+    const eql = std.mem.eql;
+    if (eql(u8, name, "cwd")) return .cwd;
+    if (eql(u8, name, "symbol")) return .symbol;
+    if (eql(u8, name, "status")) return .status;
+    if (eql(u8, name, "duration")) return .duration;
+    if (eql(u8, name, "jobs")) return .jobs;
+    if (eql(u8, name, "git") or eql(u8, name, "git_branch")) return .git_branch;
+    if (eql(u8, name, "xyron_project")) return .xyron_project;
+    if (eql(u8, name, "spacer")) return .spacer;
+    return null;
+}
+
+const prompt_mod = @import("prompt.zig");
+
+/// xyron.prompt.init(segments, [options]) — set up prompt segments
+///
+/// Segments can be strings or tables: { "cwd", fg = "white", bg = "blue" }
+/// Options table (optional 2nd arg): { separator = "" }
 fn apiPromptInit(L: ?*c.lua_State) callconv(.c) c_int {
-    const prompt_mod = @import("prompt.zig");
     const state = L orelse return 0;
 
     if (c.lua_type(state, 1) != c.LUA_TTABLE) return 0;
 
     var cfg = prompt_mod.PromptConfig{};
+
+    // Parse optional options table (2nd argument)
+    if (c.lua_type(state, 2) == c.LUA_TTABLE) {
+        _ = c.lua_getfield(state, 2, "separator");
+        if (c.lua_type(state, -1) == c.LUA_TSTRING) {
+            const sep = c.lua_tolstring(state, -1, null);
+            if (sep) |ptr| cfg.setSeparator(std.mem.span(ptr));
+        }
+        c.lua_settop(state, -(1) - 1);
+    }
+
     const len = c.lua_rawlen(state, 1);
     var i: usize = 1;
 
@@ -806,27 +870,39 @@ fn apiPromptInit(L: ?*c.lua_State) callconv(.c) c_int {
         const t = c.lua_type(state, -1);
 
         if (t == c.LUA_TSTRING) {
+            // Simple string segment (backward compatible)
             const s = c.lua_tolstring(state, -1, null);
             if (s) |name| {
                 const n = std.mem.span(name);
-                if (std.mem.eql(u8, n, "cwd")) { cfg.addBuiltin(.cwd, "\x1b[1;34m"); }
-                else if (std.mem.eql(u8, n, "symbol")) { cfg.addBuiltin(.symbol, ""); }
-                else if (std.mem.eql(u8, n, "status")) { cfg.addBuiltin(.status, "\x1b[31m"); }
-                else if (std.mem.eql(u8, n, "duration")) { cfg.addBuiltin(.duration, "\x1b[33m"); }
-                else if (std.mem.eql(u8, n, "jobs")) { cfg.addBuiltin(.jobs, "\x1b[33m"); }
-                else if (std.mem.eql(u8, n, "git")) { cfg.addBuiltin(.git_branch, "\x1b[35m"); }
-                else if (std.mem.eql(u8, n, "git_branch")) { cfg.addBuiltin(.git_branch, "\x1b[35m"); }
-                else if (std.mem.eql(u8, n, "xyron_project")) { cfg.addBuiltin(.xyron_project, ""); }
-                else if (std.mem.eql(u8, n, "\n")) { cfg.addNewline(); }
-                else if (std.mem.eql(u8, n, "spacer")) { cfg.addBuiltin(.spacer, ""); }
-                else {
-                    // Check custom widgets
-                    if (prompt_mod.findCustomWidget(n)) |ref| {
-                        cfg.addLua(ref);
-                    } else {
-                        cfg.addText(n, ""); // literal text
-                    }
+                addSegmentByName(&cfg, n, null, null);
+            }
+        } else if (t == c.LUA_TTABLE) {
+            // Table segment: { "name", fg = "color", bg = "color" }
+            // or { fn, fg = "color", bg = "color" }
+            const fg_color = readColorField(state, -1, "fg");
+            const bg_color = readColorField(state, -1, "bg");
+
+            // Get the first array element (segment name or function)
+            _ = c.lua_rawgeti(state, -1, 1);
+            const elem_type = c.lua_type(state, -1);
+
+            if (elem_type == c.LUA_TSTRING) {
+                const s = c.lua_tolstring(state, -1, null);
+                if (s) |name| {
+                    const n = std.mem.span(name);
+                    addSegmentByName(&cfg, n, fg_color, bg_color);
                 }
+                c.lua_settop(state, -(1) - 1); // pop string
+            } else if (elem_type == c.LUA_TFUNCTION) {
+                const ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
+                if (fg_color != null or bg_color != null) {
+                    cfg.addStyledLua(ref, fg_color, bg_color);
+                } else {
+                    cfg.addLua(ref);
+                }
+                // ref consumed the value, don't pop — but pop the outer table below
+            } else {
+                c.lua_settop(state, -(1) - 1); // pop unknown element
             }
         } else if (t == c.LUA_TFUNCTION) {
             const ref = c.luaL_ref(state, c.LUA_REGISTRYINDEX);
@@ -841,9 +917,52 @@ fn apiPromptInit(L: ?*c.lua_State) callconv(.c) c_int {
     return 0;
 }
 
+/// Add a segment by name, with optional powerline colors.
+fn addSegmentByName(cfg: *prompt_mod.PromptConfig, name: []const u8, fg_color: ?style.Color, bg_color: ?style.Color) void {
+    const has_style = fg_color != null or bg_color != null;
+
+    if (std.mem.eql(u8, name, "\n")) {
+        cfg.addNewline();
+        return;
+    }
+
+    if (resolveSegmentKind(name)) |kind| {
+        if (has_style) {
+            cfg.addStyledBuiltin(kind, fg_color, bg_color);
+        } else {
+            // Use default colors for classic mode
+            const default_color: []const u8 = switch (kind) {
+                .cwd => "\x1b[1;34m",
+                .status => "\x1b[31m",
+                .duration => "\x1b[33m",
+                .jobs => "\x1b[33m",
+                .git_branch => "\x1b[35m",
+                else => "",
+            };
+            cfg.addBuiltin(kind, default_color);
+        }
+        return;
+    }
+
+    // Check custom widgets
+    if (prompt_mod.findCustomWidget(name)) |ref| {
+        if (has_style) {
+            cfg.addStyledLua(ref, fg_color, bg_color);
+        } else {
+            cfg.addLua(ref);
+        }
+    } else {
+        // Literal text
+        if (has_style) {
+            cfg.addStyledText(name, fg_color, bg_color);
+        } else {
+            cfg.addText(name, "");
+        }
+    }
+}
+
 /// xyron.prompt.register(name, fn(config)) — register a custom widget
 fn apiPromptRegister(L: ?*c.lua_State) callconv(.c) c_int {
-    const prompt_mod = @import("prompt.zig");
     const state = L orelse return 0;
 
     if (c.lua_type(state, 1) != c.LUA_TSTRING) return 0;
@@ -859,7 +978,6 @@ fn apiPromptRegister(L: ?*c.lua_State) callconv(.c) c_int {
 
 /// xyron.prompt.configure(name, config_table) — configure a widget
 fn apiPromptConfigure(L: ?*c.lua_State) callconv(.c) c_int {
-    const prompt_mod = @import("prompt.zig");
     const state = L orelse return 0;
 
     if (c.lua_type(state, 1) != c.LUA_TSTRING) return 0;

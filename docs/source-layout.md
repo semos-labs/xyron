@@ -9,6 +9,7 @@ src/
   editor.zig            Line buffer with cursor, vim mode, UTF-8
   input.zig             readLine loop: keys → editor → display → ghost text
   prompt.zig            Prompt engine with modular segments
+  prompt_powerline.zig  Powerline-style rendering (separator transitions, bg colors)
   token.zig             Lexer (words, pipes, redirects, &, quotes)
   ast.zig               AST types (Pipeline, SimpleCommand, Redirect)
   parser.zig            Tokens → AST (inline env assignments, quoted flags)

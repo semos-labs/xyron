@@ -277,9 +277,26 @@ function xyron.prompt.register(name, callback) end
 ---@param config table Configuration table
 function xyron.prompt.configure(name, config) end
 
+--- Prompt segment colors.
+---@alias xyron.prompt.Color
+---| "black" | "red" | "green" | "yellow" | "blue" | "magenta" | "cyan" | "white"
+---| "bright_black" | "bright_red" | "bright_green" | "bright_yellow"
+---| "bright_blue" | "bright_magenta" | "bright_cyan" | "bright_white"
+---| "default"
+
+--- A styled prompt segment: `{ "name", fg = "color", bg = "color" }`.
+---@class xyron.prompt.Segment
+---@field [1] string|fun(): string Segment name or callback
+---@field fg? xyron.prompt.Color Foreground color
+---@field bg? xyron.prompt.Color Background color
+
+--- Prompt init options.
+---@class xyron.prompt.Options
+---@field separator? string Separator glyph for powerline style (e.g. "", "")
+
 --- Initialize the prompt layout.
 ---
---- Accepts an array of segment names and literal strings.
+--- Accepts an array of segment names, literal strings, or styled segment tables.
 ---
 --- Built-in segments:
 --- - `"cwd"` — current directory (with ~ contraction)
@@ -295,12 +312,23 @@ function xyron.prompt.configure(name, config) end
 --- Custom widgets registered via `xyron.prompt.register()` are referenced by name.
 --- Literal strings (like `" "`) are rendered as-is.
 ---
---- Example:
+--- Classic mode (no separator):
 --- ```lua
 --- xyron.prompt.init({
 ---     "cwd", " ", "git", "spacer", "xyron_project",
 ---     "\n", "symbol", " ",
 --- })
 --- ```
----@param segments (string|fun(): string)[]
-function xyron.prompt.init(segments) end
+---
+--- Powerline mode (with separator and per-segment colors):
+--- ```lua
+--- xyron.prompt.init({
+---     { "cwd", fg = "white", bg = "blue" },
+---     { "git", fg = "white", bg = "magenta" },
+---     "\n",
+---     "symbol", " ",
+--- }, { separator = "" })
+--- ```
+---@param segments (string|fun(): string|xyron.prompt.Segment)[]
+---@param options? xyron.prompt.Options
+function xyron.prompt.init(segments, options) end

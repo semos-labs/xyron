@@ -62,10 +62,10 @@ end)
 ### Prompt configuration
 
 ```lua
-xyron.prompt({
+xyron.prompt.init({
     "cwd",           -- ~/path (bold blue)
     " ",             -- literal text
-    "git_branch",    -- branch from .git/HEAD (magenta)
+    "git",           -- branch from .git/HEAD (magenta)
     "jobs",          -- ⚙N when background jobs exist (yellow)
     "spacer",        -- fills remaining width (pushes next items right)
     function()       -- custom Lua segment (returns string)
@@ -80,6 +80,39 @@ xyron.prompt({
 ```
 
 Segments return empty string when not applicable (e.g., `jobs` hidden when no jobs).
+
+### Powerline prompt
+
+Segments can be tables with `fg` and `bg` colors. Pass a `separator` in the options to enable powerline-style transitions between segments.
+
+```lua
+xyron.prompt.init({
+    { "cwd", fg = "white", bg = "blue" },
+    { "git", fg = "white", bg = "magenta" },
+    { "duration", fg = "black", bg = "yellow" },
+    "\n",
+    "symbol", " ",
+}, { separator = "" })  -- or "" for rounded style
+```
+
+Available colors: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, and bright variants (`bright_black`, `bright_red`, etc.). These map to the terminal's base 16 palette, so they respect the user's theme.
+
+Segments without `bg` on a powerline line render normally (no background or separator). This lets you mix powerline segments with plain ones (e.g., `symbol` on the second line).
+
+Custom widgets and Lua functions also support powerline colors:
+
+```lua
+xyron.prompt.register("clock", function()
+    return os.date("%H:%M")
+end)
+
+xyron.prompt.init({
+    { "cwd", fg = "white", bg = "blue" },
+    { "clock", fg = "black", bg = "green" },
+    "\n",
+    "symbol", " ",
+}, { separator = "" })
+```
 
 ### Vim mode
 
@@ -161,8 +194,8 @@ xyron.command("mkcd", function(args)
 end)
 
 -- Prompt
-xyron.prompt({
-    "cwd", " ", "git_branch", "\n", "symbol", " ",
+xyron.prompt.init({
+    "cwd", " ", "git", "\n", "symbol", " ",
 })
 
 -- Notify on failure
