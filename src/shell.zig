@@ -175,6 +175,15 @@ pub const Shell = struct {
         // Write Lua type definitions for LSP (async, non-blocking)
         installLuaTypes();
 
+        // Report initial CWD to the terminal
+        if (self.attyx.enabled) {
+            var init_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const init_cwd = posix.getcwd(&init_cwd_buf) catch "";
+            if (init_cwd.len > 0) {
+                self.attyx.cwdChanged("", init_cwd);
+            }
+        }
+
         // Detect initial project context at startup
         self.detectInitialProject(stdout);
 

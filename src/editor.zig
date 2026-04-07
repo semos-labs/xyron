@@ -89,7 +89,7 @@ pub const Editor = struct {
         self.insertBytes(bytes);
     }
 
-    fn insertBytes(self: *Editor, bytes: []const u8) void {
+    pub fn insertBytes(self: *Editor, bytes: []const u8) void {
         const n = bytes.len;
         if (self.len + n > MAX_LINE) return;
 

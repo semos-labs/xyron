@@ -96,6 +96,51 @@ pub fn readLine(
 
         // Keys that work in both modes
         switch (key) {
+            .paste_begin => {
+                // Bracketed paste: read all input until paste_end,
+                // insert it all at once, then do a single refresh.
+                complete_mod.dismissInline(stdout);
+                var paste_buf: [editor_mod.MAX_LINE]u8 = undefined;
+                var paste_len: usize = 0;
+                while (true) {
+                    const pk = keys.readKey() catch break;
+                    switch (pk) {
+                        .paste_end => break,
+                        .char => |ch| {
+                            if (paste_len < paste_buf.len) {
+                                paste_buf[paste_len] = ch;
+                                paste_len += 1;
+                            }
+                        },
+                        .utf8 => |u| {
+                            const slice = u.bytes[0..u.len];
+                            if (paste_len + slice.len <= paste_buf.len) {
+                                @memcpy(paste_buf[paste_len..][0..slice.len], slice);
+                                paste_len += slice.len;
+                            }
+                        },
+                        .enter => {
+                            // Newlines in paste come as enter keys — insert literal newline
+                            if (paste_len < paste_buf.len) {
+                                paste_buf[paste_len] = '\n';
+                                paste_len += 1;
+                            }
+                        },
+                        .tab => {
+                            if (paste_len < paste_buf.len) {
+                                paste_buf[paste_len] = '\t';
+                                paste_len += 1;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+                if (paste_len > 0) {
+                    ed.insertBytes(paste_buf[0..paste_len]);
+                }
+                refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
+                continue;
+            },
             .resize => {
                 // Terminal resized — re-render prompt cleanly.
                 // Block re-rendering requires terminal emulator support

@@ -45,11 +45,18 @@ pub fn enableRawMode() !void {
 
     try posix.tcsetattr(posix.STDIN_FILENO, .FLUSH, raw);
     raw_mode_active = true;
+
+    // Enable bracketed paste mode so we can detect pasted text
+    const stdout = std.fs.File.stdout();
+    stdout.writeAll("\x1b[?2004h") catch {};
 }
 
 /// Restore original terminal mode.
 pub fn disableRawMode() void {
     if (raw_mode_active and orig_saved) {
+        // Disable bracketed paste mode before restoring terminal
+        const stdout = std.fs.File.stdout();
+        stdout.writeAll("\x1b[?2004l") catch {};
         posix.tcsetattr(posix.STDIN_FILENO, .FLUSH, orig_termios) catch {};
         raw_mode_active = false;
     }
@@ -58,6 +65,8 @@ pub fn disableRawMode() void {
 /// Suspend raw mode for child execution. Restores the clean original state.
 pub fn suspendRawMode() void {
     if (raw_mode_active and orig_saved) {
+        const stdout = std.fs.File.stdout();
+        stdout.writeAll("\x1b[?2004l") catch {};
         posix.tcsetattr(posix.STDIN_FILENO, .FLUSH, orig_termios) catch {};
     }
 }
@@ -65,7 +74,7 @@ pub fn suspendRawMode() void {
 /// Re-enable raw mode after child execution.
 pub fn resumeRawMode() void {
     if (raw_mode_active) {
-        enableRawMode() catch {};
+        enableRawMode() catch {}; // enableRawMode sends \x1b[?2004h
     }
 }
 

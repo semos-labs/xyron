@@ -49,6 +49,8 @@ pub const Key = union(enum) {
     alt_f, // word forward
     alt_d, // kill word forward
     alt_backspace, // kill word backward (same as ctrl_w)
+    paste_begin, // bracketed paste start (\x1b[200~)
+    paste_end, // bracketed paste end (\x1b[201~)
     resize, // terminal resized (SIGWINCH)
     unknown,
 };
@@ -193,6 +195,7 @@ fn parseEscapeSequence() Key {
         'H' => .home,
         'F' => .end_key,
         'Z' => .shift_tab,
+        '2' => parseBracketedPaste(),
         '3' => blk: {
             // Delete key: ESC [ 3 ~
             var tilde: [1]u8 = undefined;
@@ -201,6 +204,23 @@ fn parseEscapeSequence() Key {
         },
         else => .unknown,
     };
+}
+
+/// Parse bracketed paste sequences: ESC [ 2 0 0 ~ (start) / ESC [ 2 0 1 ~ (end).
+/// Called after reading ESC [ 2.
+fn parseBracketedPaste() Key {
+    // We've read ESC [ 2 — expect 0 0 ~ or 0 1 ~
+    var seq: [3]u8 = undefined;
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        const rc = c.read(posix.STDIN_FILENO, @ptrCast(&seq[i]), 1);
+        if (rc <= 0) return .unknown;
+    }
+    if (seq[0] == '0' and seq[2] == '~') {
+        if (seq[1] == '0') return .paste_begin;
+        if (seq[1] == '1') return .paste_end;
+    }
+    return .unknown;
 }
 
 // ---------------------------------------------------------------------------
