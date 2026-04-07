@@ -102,6 +102,7 @@ pub fn build(b: *std.Build) void {
         "src/builtins.zig",
         "src/attyx.zig",
         "src/prompt.zig",
+        "src/prompt_powerline.zig",
         "src/executor.zig",
         "src/term.zig",
         "src/keys.zig",
