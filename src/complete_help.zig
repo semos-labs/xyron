@@ -79,21 +79,15 @@ pub const HelpCache = struct {
 
     /// Query cached flags matching a prefix. Returns flags with descriptions.
     pub fn queryFlags(self: *HelpCache, cmd: []const u8, prefix: []const u8, out: *complete.CandidateBuffer) void {
+        _ = prefix;
         var db = &(self.db orelse return);
 
         var stmt = db.prepare(
-            "SELECT flag, description FROM command_help_flags WHERE command = ?1 AND flag LIKE ?2",
+            "SELECT flag, description FROM command_help_flags WHERE command = ?1",
         ) catch return;
         defer stmt.deinit();
 
         stmt.bindText(1, cmd);
-
-        var pattern_buf: [256]u8 = undefined;
-        const plen = @min(prefix.len, 254);
-        @memcpy(pattern_buf[0..plen], prefix[0..plen]);
-        pattern_buf[plen] = '%';
-        pattern_buf[plen + 1] = 0;
-        stmt.bindText(2, pattern_buf[0 .. plen + 1]);
 
         while (true) {
             const has_row = stmt.step() catch break;

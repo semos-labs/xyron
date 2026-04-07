@@ -77,9 +77,7 @@ fn provideKubectl(out: *complete.CandidateBuffer, ctx: *const complete.Completio
             .{ .name = "pv", .desc = "PersistentVolume" },
         };
         for (types) |t| {
-            if (ctx.prefix.len == 0 or std.mem.startsWith(u8, t.name, ctx.prefix)) {
-                out.addWithDesc(t.name, t.desc, .external_cmd);
-            }
+            out.addWithDesc(t.name, t.desc, .external_cmd);
         }
         // For `logs` and `exec`, jump straight to pod names
         if (std.mem.eql(u8, subcmd, "logs") or std.mem.eql(u8, subcmd, "exec")) {
@@ -102,7 +100,7 @@ fn addKubectlResources(out: *complete.CandidateBuffer, resource_type: []const u8
     while (iter.next()) |line| {
         const name = std.mem.trim(u8, line, " \t\r");
         if (name.len == 0) continue;
-        if (prefix.len > 0 and !std.mem.startsWith(u8, name, prefix)) continue;
+        _ = prefix;
         out.add(name, .external_cmd);
     }
 }
@@ -149,7 +147,6 @@ fn provideBrew(out: *complete.CandidateBuffer, ctx: *const complete.CompletionCo
                     // First column is the service name
                     const name_end = std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len;
                     const name = trimmed[0..name_end];
-                    if (ctx.prefix.len > 0 and !std.mem.startsWith(u8, name, ctx.prefix)) continue;
                     out.add(name, .external_cmd);
                 }
             }
@@ -178,7 +175,6 @@ fn providePip(out: *complete.CandidateBuffer, ctx: *const complete.CompletionCon
             // Format: "package==version"
             const eq = std.mem.indexOf(u8, trimmed, "==") orelse trimmed.len;
             const name = trimmed[0..eq];
-            if (ctx.prefix.len > 0 and !std.mem.startsWith(u8, name, ctx.prefix)) continue;
             out.add(name, .external_cmd);
         }
     }
@@ -228,7 +224,7 @@ fn addGoTestNames(out: *complete.CandidateBuffer, prefix: []const u8) void {
             @memcpy(full_buf[0..4], "Test");
             @memcpy(full_buf[4..][0..name.len], name);
             const full = full_buf[0 .. 4 + name.len];
-            if (prefix.len > 0 and !std.mem.startsWith(u8, full, prefix)) continue;
+            _ = prefix;
             out.add(full, .external_cmd);
         }
     }
@@ -262,7 +258,7 @@ fn addZigBuildSteps(out: *complete.CandidateBuffer, prefix: []const u8) void {
         const name_end = std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len;
         const name = trimmed[0..name_end];
         if (name.len == 0) continue;
-        if (prefix.len > 0 and !std.mem.startsWith(u8, name, prefix)) continue;
+        _ = prefix;
         // Extract description
         const desc_start = std.mem.trimLeft(u8, trimmed[name_end..], " \t");
         out.addWithDesc(name, desc_start, .external_cmd);
@@ -300,7 +296,6 @@ fn provideSystemctl(out: *complete.CandidateBuffer, ctx: *const complete.Complet
         // First column is unit name
         const name_end = std.mem.indexOfAny(u8, trimmed, " \t") orelse trimmed.len;
         const name = trimmed[0..name_end];
-        if (ctx.prefix.len > 0 and !std.mem.startsWith(u8, name, ctx.prefix)) continue;
         out.add(name, .external_cmd);
     }
 }
@@ -348,7 +343,6 @@ fn addCargoTargets(out: *complete.CandidateBuffer, prefix: []const u8) void {
             const eq = std.mem.indexOf(u8, trimmed, "=") orelse continue;
             const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t\"'");
             if (val.len == 0) continue;
-            if (prefix.len > 0 and !std.mem.startsWith(u8, val, prefix)) continue;
             out.add(val, .external_cmd);
         }
     }
@@ -370,7 +364,7 @@ fn addCargoTargets(out: *complete.CandidateBuffer, prefix: []const u8) void {
             const eq = std.mem.indexOf(u8, trimmed, "=") orelse continue;
             const val = std.mem.trim(u8, trimmed[eq + 1 ..], " \t\"'");
             if (val.len == 0) continue;
-            if (prefix.len > 0 and !std.mem.startsWith(u8, val, prefix)) continue;
+            _ = prefix;
             out.addWithDesc(val, "default binary", .external_cmd);
             break;
         }
@@ -428,7 +422,7 @@ fn addComposeServices(out: *complete.CandidateBuffer, prefix: []const u8) void {
                 // Must end with ':'
                 if (trimmed.len > 1 and trimmed[trimmed.len - 1] == ':') {
                     const name = trimmed[0 .. trimmed.len - 1];
-                    if (prefix.len > 0 and !std.mem.startsWith(u8, name, prefix)) continue;
+                    _ = prefix;
                     out.add(name, .external_cmd);
                 }
             } else if (line[0] != ' ' and line[0] != '#') {
@@ -449,7 +443,7 @@ fn addLines(out: *complete.CandidateBuffer, output: []const u8, prefix: []const 
     while (iter.next()) |line| {
         const name = std.mem.trim(u8, line, " \t\r");
         if (name.len == 0) continue;
-        if (prefix.len > 0 and !std.mem.startsWith(u8, name, prefix)) continue;
+        _ = prefix;
         out.add(name, .external_cmd);
     }
 }

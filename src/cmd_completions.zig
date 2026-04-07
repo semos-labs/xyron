@@ -62,9 +62,7 @@ fn provideXyron(out: *complete.CandidateBuffer, ctx: *const complete.CompletionC
             .{ .name = "secrets", .desc = "Manage secrets" },
         };
         for (subcmds) |cmd| {
-            if (ctx.prefix.len == 0 or std.mem.startsWith(u8, cmd.name, ctx.prefix)) {
-                out.addWithDesc(cmd.name, cmd.desc, .builtin);
-            }
+            out.addWithDesc(cmd.name, cmd.desc, .builtin);
         }
         return;
     }
@@ -93,45 +91,39 @@ fn provideXyron(out: *complete.CandidateBuffer, ctx: *const complete.CompletionC
             .{ .name = "list", .desc = "List secrets" },
         };
         for (secrets_cmds) |cmd| {
-            if (ctx.prefix.len == 0 or std.mem.startsWith(u8, cmd.name, ctx.prefix)) {
-                out.addWithDesc(cmd.name, cmd.desc, .builtin);
-            }
+            out.addWithDesc(cmd.name, cmd.desc, .builtin);
         }
         return;
     }
 
     // "xyron context <TAB>"
     if (std.mem.eql(u8, subcmd, "context") and ctx.cmd_args_len == 1) {
-        if (ctx.prefix.len == 0 or std.mem.startsWith(u8, "explain", ctx.prefix)) {
-            out.addWithDesc("explain", "Explain context/value origin", .builtin);
-        }
+        out.addWithDesc("explain", "Explain context/value origin", .builtin);
         return;
     }
 }
 
 fn addProjectCommands(out: *complete.CandidateBuffer, prefix: []const u8) void {
+    _ = prefix;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const load_result = project.loadFromCwd(arena.allocator());
     if (load_result.status != .valid) return;
     const mdl = load_result.model orelse return;
     for (mdl.commands) |cmd| {
-        if (prefix.len == 0 or std.mem.startsWith(u8, cmd.name, prefix)) {
-            out.addWithDesc(cmd.name, cmd.command, .builtin);
-        }
+        out.addWithDesc(cmd.name, cmd.command, .builtin);
     }
 }
 
 fn addProjectServices(out: *complete.CandidateBuffer, prefix: []const u8) void {
+    _ = prefix;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const load_result = project.loadFromCwd(arena.allocator());
     if (load_result.status != .valid) return;
     const mdl = load_result.model orelse return;
     for (mdl.services) |svc| {
-        if (prefix.len == 0 or std.mem.startsWith(u8, svc.name, prefix)) {
-            out.addWithDesc(svc.name, svc.command, .builtin);
-        }
+        out.addWithDesc(svc.name, svc.command, .builtin);
     }
 }
 
@@ -141,6 +133,7 @@ fn addProjectServices(out: *complete.CandidateBuffer, prefix: []const u8) void {
 
 /// Supplement git subcommands that `git --help` doesn't list (e.g., checkout).
 fn provideGitSubcommands(out: *complete.CandidateBuffer, prefix: []const u8) void {
+    _ = prefix;
     const extra_cmds = [_]struct { name: []const u8, desc: []const u8 }{
         .{ .name = "checkout", .desc = "Switch branches or restore files" },
         .{ .name = "cherry-pick", .desc = "Apply changes from existing commits" },
@@ -154,9 +147,7 @@ fn provideGitSubcommands(out: *complete.CandidateBuffer, prefix: []const u8) voi
         .{ .name = "am", .desc = "Apply patches from a mailbox" },
     };
     for (extra_cmds) |cmd| {
-        if (prefix.len == 0 or std.mem.startsWith(u8, cmd.name, prefix)) {
-            out.addWithDesc(cmd.name, cmd.desc, .external_cmd);
-        }
+        out.addWithDesc(cmd.name, cmd.desc, .external_cmd);
     }
 }
 
@@ -199,9 +190,7 @@ fn provideGit(out: *complete.CandidateBuffer, ctx: *const complete.CompletionCon
     if (std.mem.eql(u8, subcmd, "stash") and pos == 0) {
         const stash_cmds = [_][]const u8{ "pop", "apply", "drop", "list", "show", "push", "clear" };
         for (stash_cmds) |sc| {
-            if (ctx.prefix.len == 0 or std.mem.startsWith(u8, sc, ctx.prefix)) {
-                out.add(sc, .external_cmd);
-            }
+            out.add(sc, .external_cmd);
         }
         return;
     }
@@ -238,7 +227,7 @@ fn parseBranches(out: *complete.CandidateBuffer, output: []const u8, prefix: []c
         }
 
         if (name.len == 0) continue;
-        if (prefix.len > 0 and !std.mem.startsWith(u8, name, prefix)) continue;
+        _ = prefix;
         const desc: []const u8 = if (is_remote) "remote" else "branch";
         out.addWithDesc(name, desc, .external_cmd);
     }
@@ -253,7 +242,7 @@ fn addGitRemotes(out: *complete.CandidateBuffer, prefix: []const u8) void {
     while (iter.next()) |line| {
         const name = std.mem.trim(u8, line, " \t\r");
         if (name.len == 0) continue;
-        if (prefix.len > 0 and !std.mem.startsWith(u8, name, prefix)) continue;
+        _ = prefix;
         out.addWithDesc(name, "remote", .external_cmd);
     }
 }
@@ -303,10 +292,9 @@ fn addDockerContainers(out: *complete.CandidateBuffer, prefix: []const u8) void 
         if (std.mem.indexOf(u8, trimmed, "\t")) |tab| {
             const name = trimmed[0..tab];
             const status = trimmed[tab + 1 ..];
-            if (prefix.len > 0 and !std.mem.startsWith(u8, name, prefix)) continue;
+            _ = prefix;
             out.addWithDesc(name, status, .external_cmd);
         } else {
-            if (prefix.len > 0 and !std.mem.startsWith(u8, trimmed, prefix)) continue;
             out.add(trimmed, .external_cmd);
         }
     }
@@ -322,7 +310,7 @@ fn addDockerImages(out: *complete.CandidateBuffer, prefix: []const u8) void {
         const name = std.mem.trim(u8, line, " \t\r");
         if (name.len == 0) continue;
         if (std.mem.eql(u8, name, "<none>:<none>")) continue;
-        if (prefix.len > 0 and !std.mem.startsWith(u8, name, prefix)) continue;
+        _ = prefix;
         out.add(name, .external_cmd);
     }
 }
@@ -368,9 +356,7 @@ fn provideNpmScripts(out: *complete.CandidateBuffer, ctx: *const complete.Comple
         const between = std.mem.trim(u8, after_q2[0..colon], " \t\r\n");
         if (between.len == 0) {
             // It's a key
-            if (ctx.prefix.len == 0 or std.mem.startsWith(u8, key, ctx.prefix)) {
-                out.add(key, .external_cmd);
-            }
+            out.add(key, .external_cmd);
         }
 
         // Skip past the value
@@ -419,7 +405,6 @@ fn provideMakeTargets(out: *complete.CandidateBuffer, ctx: *const complete.Compl
             if (target.len == 0) continue;
             // Skip targets with $ (variable references)
             if (std.mem.indexOf(u8, target, "$") != null) continue;
-            if (ctx.prefix.len > 0 and !std.mem.startsWith(u8, target, ctx.prefix)) continue;
             out.add(target, .external_cmd);
         }
     }
@@ -458,7 +443,6 @@ fn provideSshHosts(out: *complete.CandidateBuffer, ctx: *const complete.Completi
             if (host.len == 0) continue;
             // Skip patterns with wildcards
             if (std.mem.indexOf(u8, host, "*") != null) continue;
-            if (ctx.prefix.len > 0 and !std.mem.startsWith(u8, host, ctx.prefix)) continue;
             out.add(host, .external_cmd);
         }
     }
@@ -521,10 +505,11 @@ test "parseBranches remote skips HEAD" {
     try std.testing.expect(buf.count >= 2);
 }
 
-test "parseBranches prefix filter" {
+test "parseBranches adds all candidates (fuzzy filtering is downstream)" {
     var buf = complete.CandidateBuffer{};
     parseBranches(&buf, "  main\n  feature/foo\n  develop\n", "f", false);
-    try std.testing.expectEqual(@as(usize, 1), buf.count);
+    // All branches are added — fuzzy filtering happens in scoreAndFilter
+    try std.testing.expectEqual(@as(usize, 3), buf.count);
 }
 
 test "provideMakeTargets" {

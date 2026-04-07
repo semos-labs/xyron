@@ -62,6 +62,7 @@ pub fn gather(
 // ---------------------------------------------------------------------------
 
 fn provideBuiltins(out: *complete.CandidateBuffer, prefix: []const u8) void {
+    _ = prefix;
     const entries = [_]struct { name: []const u8, desc: []const u8 }{
         .{ .name = "cd", .desc = "Change directory" },
         .{ .name = "pwd", .desc = "Print working directory" },
@@ -94,9 +95,7 @@ fn provideBuiltins(out: *complete.CandidateBuffer, prefix: []const u8) void {
         .{ .name = "j", .desc = "Jump to directory (shorthand)" },
     };
     for (entries) |e| {
-        if (prefix.len == 0 or std.mem.startsWith(u8, e.name, prefix)) {
-            out.addWithDesc(e.name, e.desc, .builtin);
-        }
+        out.addWithDesc(e.name, e.desc, .builtin);
     }
 }
 
@@ -105,11 +104,10 @@ fn provideBuiltins(out: *complete.CandidateBuffer, prefix: []const u8) void {
 // ---------------------------------------------------------------------------
 
 fn provideAliases(out: *complete.CandidateBuffer, prefix: []const u8) void {
+    _ = prefix;
     for (0..aliases_mod.aliasCount()) |i| {
         const name = aliases_mod.nameAt(i);
-        if (prefix.len == 0 or std.mem.startsWith(u8, name, prefix)) {
-            out.addWithDesc(name, aliases_mod.expansionAt(i), .alias);
-        }
+        out.addWithDesc(name, aliases_mod.expansionAt(i), .alias);
     }
 }
 
@@ -118,11 +116,10 @@ fn provideAliases(out: *complete.CandidateBuffer, prefix: []const u8) void {
 // ---------------------------------------------------------------------------
 
 fn provideLuaCommands(out: *complete.CandidateBuffer, prefix: []const u8) void {
+    _ = prefix;
     for (0..lua_commands.commandCount()) |i| {
         const name = lua_commands.commandNameAt(i);
-        if (prefix.len == 0 or std.mem.startsWith(u8, name, prefix)) {
-            out.add(name, .lua_cmd);
-        }
+        out.add(name, .lua_cmd);
     }
 }
 
@@ -186,7 +183,7 @@ fn provideFilesystem(out: *complete.CandidateBuffer, prefix: []const u8, env: *c
     var iter = d.iterate();
     while (iter.next() catch null) |entry| {
         if (entry.name[0] == '.' and name_part.len == 0) continue; // skip hidden unless prefix starts with .
-        if (name_part.len == 0 or std.mem.startsWith(u8, entry.name, name_part)) {
+        {
             // Build full candidate: dir_prefix + entry.name [+ /]
             var buf: [complete.MAX_TEXT]u8 = undefined;
             var pos: usize = 0;
@@ -213,13 +210,11 @@ fn provideFilesystem(out: *complete.CandidateBuffer, prefix: []const u8, env: *c
 // ---------------------------------------------------------------------------
 
 fn provideEnvVars(out: *complete.CandidateBuffer, prefix: []const u8, env: *const environ_mod.Environ) void {
-    // prefix includes the $ — strip it for matching
-    const name_prefix = if (prefix.len > 0 and prefix[0] == '$') prefix[1..] else prefix;
-
+    _ = prefix;
     var iter = env.map.iterator();
     while (iter.next()) |entry| {
         const key = entry.key_ptr.*;
-        if (name_prefix.len == 0 or std.mem.startsWith(u8, key, name_prefix)) {
+        {
             var buf: [complete.MAX_TEXT]u8 = undefined;
             buf[0] = '$';
             const kl = @min(key.len, buf.len - 1);
@@ -275,6 +270,7 @@ fn provideHelpFlags(
 // ---------------------------------------------------------------------------
 
 fn scanDirectory(out: *complete.CandidateBuffer, dir_path: []const u8, prefix: []const u8, kind: complete.CandidateKind) !void {
+    _ = prefix;
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     @memcpy(path_buf[0..dir_path.len], dir_path);
     path_buf[dir_path.len] = 0;
@@ -284,9 +280,7 @@ fn scanDirectory(out: *complete.CandidateBuffer, dir_path: []const u8, prefix: [
 
     var iter = d.iterate();
     while (iter.next() catch null) |entry| {
-        if (std.mem.startsWith(u8, entry.name, prefix)) {
-            out.add(entry.name, kind);
-        }
+        out.add(entry.name, kind);
         if (out.count >= complete.MAX_CANDIDATES) break;
     }
 }
@@ -295,10 +289,11 @@ fn scanDirectory(out: *complete.CandidateBuffer, dir_path: []const u8, prefix: [
 // Tests
 // ---------------------------------------------------------------------------
 
-test "provideBuiltins matches prefix" {
+test "provideBuiltins adds all candidates regardless of prefix" {
     var buf = complete.CandidateBuffer{};
     provideBuiltins(&buf, "ex");
-    try std.testing.expect(buf.count >= 2); // export, exit
+    // All builtins added — fuzzy filtering happens in scoreAndFilter
+    try std.testing.expect(buf.count >= 10);
 }
 
 test "provideBuiltins matches all on empty prefix" {

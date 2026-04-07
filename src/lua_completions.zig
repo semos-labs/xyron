@@ -126,9 +126,7 @@ pub fn provide(
             const s = c.lua_tolstring(state, -1, null);
             if (s) |text_ptr| {
                 const text = std.mem.span(text_ptr);
-                if (ctx.prefix.len == 0 or std.mem.startsWith(u8, text, ctx.prefix)) {
-                    out.add(text, .external_cmd);
-                }
+                out.add(text, .external_cmd);
             }
         } else if (c.lua_type(state, -1) == c.LUA_TTABLE) {
             // {text = "...", desc = "..."}
@@ -138,14 +136,12 @@ pub fn provide(
 
             if (text_ptr) |tp| {
                 const text = std.mem.span(tp);
-                if (ctx.prefix.len == 0 or std.mem.startsWith(u8, text, ctx.prefix)) {
-                    _ = c.lua_getfield(state, -1, "desc");
-                    const desc_ptr = c.lua_tolstring(state, -1, null);
-                    c.lua_settop(state, -(1) - 1);
+                _ = c.lua_getfield(state, -1, "desc");
+                const desc_ptr = c.lua_tolstring(state, -1, null);
+                c.lua_settop(state, -(1) - 1);
 
-                    const desc = if (desc_ptr) |d| std.mem.span(d) else "";
-                    out.addWithDesc(text, desc, .external_cmd);
-                }
+                const desc = if (desc_ptr) |d| std.mem.span(d) else "";
+                out.addWithDesc(text, desc, .external_cmd);
             }
         }
 
