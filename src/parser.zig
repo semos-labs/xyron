@@ -122,6 +122,11 @@ fn parseSimpleCommand(allocator: std.mem.Allocator, tokens: []const Token) Parse
                 redirects.append(allocator, .{ .kind = kind, .path = tokens[i].value }) catch return ParseError.OutOfMemory;
                 i += 1;
             },
+            .redirect_dup => {
+                past_assignments = true;
+                redirects.append(allocator, .{ .kind = .dup, .path = tokens[i].value }) catch return ParseError.OutOfMemory;
+                i += 1;
+            },
             .pipe, .ampersand => return ParseError.UnexpectedPipe,
         }
     }
@@ -218,4 +223,13 @@ test "empty input returns EmptyInput" {
 
 test "missing redirect target" {
     try std.testing.expectError(ParseError.MissingRedirectTarget, parse(std.testing.allocator, "echo >"));
+}
+
+test "fd dup redirect parsed" {
+    var p = try parse(std.testing.allocator, "cmd 2>&1 | grep foo");
+    defer p.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), p.commands.len);
+    try std.testing.expectEqual(@as(usize, 1), p.commands[0].redirects.len);
+    try std.testing.expectEqual(ast.RedirectKind.dup, p.commands[0].redirects[0].kind);
+    try std.testing.expectEqualStrings("2>&1", p.commands[0].redirects[0].path);
 }

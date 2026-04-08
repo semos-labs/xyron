@@ -15,11 +15,12 @@ pub const RedirectKind = enum {
     stdin, // < file
     stdout, // > file
     stderr, // 2> file
+    dup, // 2>&1, >&2, 1>&2 — fd duplication
 };
 
 pub const Redirect = struct {
     kind: RedirectKind,
-    path: []const u8,
+    path: []const u8, // for dup: the raw token value (e.g. "2>&1")
 };
 
 // ---------------------------------------------------------------------------

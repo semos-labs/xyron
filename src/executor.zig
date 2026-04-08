@@ -469,22 +469,41 @@ fn childExec(
 
 fn applyRedirects(redirects: []const ast.Redirect) void {
     for (redirects) |redir| {
-        const path_z = toZ(redir.path) orelse continue;
         switch (redir.kind) {
             .stdout => {
+                const path_z = toZ(redir.path) orelse continue;
                 const fd = posix.openZ(path_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch continue;
                 posix.dup2(fd, posix.STDOUT_FILENO) catch {};
                 posix.close(fd);
             },
             .stderr => {
+                const path_z = toZ(redir.path) orelse continue;
                 const fd = posix.openZ(path_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch continue;
                 posix.dup2(fd, posix.STDERR_FILENO) catch {};
                 posix.close(fd);
             },
             .stdin => {
+                const path_z = toZ(redir.path) orelse continue;
                 const fd = posix.openZ(path_z, .{ .ACCMODE = .RDONLY }, 0o0) catch continue;
                 posix.dup2(fd, posix.STDIN_FILENO) catch {};
                 posix.close(fd);
+            },
+            .dup => {
+                // Parse fd duplication: "2>&1", ">&2", "1>&2"
+                const val = redir.path;
+                var src_fd: posix.fd_t = posix.STDOUT_FILENO; // default for ">&N"
+                var pos: usize = 0;
+                if (pos < val.len and val[pos] >= '0' and val[pos] <= '9') {
+                    src_fd = @intCast(val[pos] - '0');
+                    pos += 1;
+                }
+                // Skip >&
+                if (pos < val.len and val[pos] == '>') pos += 1;
+                if (pos < val.len and val[pos] == '&') pos += 1;
+                if (pos < val.len and val[pos] >= '0' and val[pos] <= '9') {
+                    const dst_fd: posix.fd_t = @intCast(val[pos] - '0');
+                    posix.dup2(dst_fd, src_fd) catch {};
+                }
             },
         }
     }

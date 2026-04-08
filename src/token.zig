@@ -17,6 +17,7 @@ pub const TokenKind = enum {
     redirect_in,
     redirect_out,
     redirect_err,
+    redirect_dup, // 2>&1, >&2, 1>&2
     ampersand, // &
 };
 
@@ -58,14 +59,24 @@ pub fn tokenize(allocator: std.mem.Allocator, input: []const u8) ![]Token {
         }
 
         if (input[i] == '2' and i + 1 < input.len and input[i + 1] == '>' and !in_comparison_context) {
-            try tokens.append(allocator, .{ .kind = .redirect_err, .value = input[i .. i + 2] });
-            i += 2;
+            // 2>&1 — fd duplication
+            if (i + 3 < input.len and input[i + 2] == '&' and (input[i + 3] >= '0' and input[i + 3] <= '9')) {
+                try tokens.append(allocator, .{ .kind = .redirect_dup, .value = input[i .. i + 4] });
+                i += 4;
+            } else {
+                try tokens.append(allocator, .{ .kind = .redirect_err, .value = input[i .. i + 2] });
+                i += 2;
+            }
             continue;
         }
 
         if (input[i] == '>' and !in_comparison_context) {
-            // Check for >=
-            if (i + 1 < input.len and input[i + 1] == '=') {
+            // >&2 — fd duplication
+            if (i + 1 < input.len and input[i + 1] == '&' and i + 2 < input.len and (input[i + 2] >= '0' and input[i + 2] <= '9')) {
+                try tokens.append(allocator, .{ .kind = .redirect_dup, .value = input[i .. i + 3] });
+                i += 3;
+            } else if (i + 1 < input.len and input[i + 1] == '=') {
+                // Check for >=
                 try tokens.append(allocator, .{ .kind = .redirect_out, .value = input[i .. i + 2] });
                 i += 2;
             } else {
@@ -211,4 +222,28 @@ test "adjacent redirect" {
     defer freeTokens(std.testing.allocator, tokens);
     try std.testing.expectEqual(@as(usize, 3), tokens.len);
     try std.testing.expectEqual(TokenKind.redirect_out, tokens[1].kind);
+}
+
+test "fd dup redirect 2>&1" {
+    const tokens = try tokenize(std.testing.allocator, "cmd 2>&1");
+    defer freeTokens(std.testing.allocator, tokens);
+    try std.testing.expectEqual(@as(usize, 2), tokens.len);
+    try std.testing.expectEqual(TokenKind.redirect_dup, tokens[1].kind);
+    try std.testing.expectEqualStrings("2>&1", tokens[1].value);
+}
+
+test "fd dup redirect >&2" {
+    const tokens = try tokenize(std.testing.allocator, "cmd >&2");
+    defer freeTokens(std.testing.allocator, tokens);
+    try std.testing.expectEqual(@as(usize, 2), tokens.len);
+    try std.testing.expectEqual(TokenKind.redirect_dup, tokens[1].kind);
+    try std.testing.expectEqualStrings(">&2", tokens[1].value);
+}
+
+test "fd dup in pipeline" {
+    const tokens = try tokenize(std.testing.allocator, "cmd 2>&1 | grep foo");
+    defer freeTokens(std.testing.allocator, tokens);
+    try std.testing.expectEqual(TokenKind.redirect_dup, tokens[1].kind);
+    try std.testing.expectEqual(TokenKind.pipe, tokens[2].kind);
+    try std.testing.expectEqualStrings("grep", tokens[3].value);
 }
