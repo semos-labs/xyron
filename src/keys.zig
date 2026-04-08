@@ -195,13 +195,84 @@ fn parseEscapeSequence() Key {
         'H' => .home,
         'F' => .end_key,
         'Z' => .shift_tab,
-        '2' => parseBracketedPaste(),
-        '3' => blk: {
-            // Delete key: ESC [ 3 ~
-            var tilde: [1]u8 = undefined;
-            _ = posix.read(posix.STDIN_FILENO, &tilde) catch {};
-            break :blk .delete;
-        },
+        // Numeric CSI sequences: bracketed paste, delete, CSI u, etc.
+        '0'...'9' => parseCsiParams(cmd[0]),
+        else => .unknown,
+    };
+}
+
+/// Parse CSI sequences with numeric parameters: ESC [ <digits> [; <digits>] <final>
+/// Handles CSI u (fixterms/kitty keyboard protocol) and extended function keys.
+fn parseCsiParams(first_digit: u8) Key {
+    var param_buf: [16]u8 = undefined;
+    param_buf[0] = first_digit;
+    var len: usize = 1;
+
+    // Read until we hit a letter (final byte) or overflow
+    while (len < param_buf.len) {
+        var ch: [1]u8 = undefined;
+        const rc = c.read(posix.STDIN_FILENO, &ch, 1);
+        if (rc <= 0) return .unknown;
+        param_buf[len] = ch[0];
+        len += 1;
+        // Final byte is 0x40-0x7E (letters, ~, u, etc.)
+        if (ch[0] >= 0x40 and ch[0] <= 0x7E) break;
+    }
+    if (len == 0) return .unknown;
+
+    const final = param_buf[len - 1];
+    const params = param_buf[0 .. len - 1];
+
+    // CSI u: ESC [ keycode ; modifiers u
+    if (final == 'u') {
+        // Parse keycode and modifiers
+        var keycode: u32 = 0;
+        var modifiers: u32 = 0;
+        if (std.mem.indexOf(u8, params, ";")) |sep| {
+            keycode = parseNum(params[0..sep]);
+            modifiers = parseNum(params[sep + 1 ..]);
+        } else {
+            keycode = parseNum(params);
+        }
+        return mapCsiU(keycode, modifiers);
+    }
+
+    // CSI ~ sequences
+    if (final == '~') {
+        const code = parseNum(params);
+        return switch (code) {
+            3 => .delete,
+            200 => .paste_begin,
+            201 => .paste_end,
+            else => .unknown,
+        };
+    }
+
+    return .unknown;
+}
+
+fn parseNum(s: []const u8) u32 {
+    var n: u32 = 0;
+    for (s) |ch| {
+        if (ch < '0' or ch > '9') break;
+        n = n * 10 + (ch - '0');
+    }
+    return n;
+}
+
+/// Map CSI u keycode + modifiers to a Key.
+/// Modifier encoding: 1=none, 2=shift, 3=alt, 5=ctrl, etc.
+fn mapCsiU(keycode: u32, modifiers: u32) Key {
+    const ctrl = (modifiers > 0) and ((modifiers - 1) & 4 != 0);
+    const shift = (modifiers > 0) and ((modifiers - 1) & 1 != 0);
+    _ = shift;
+
+    return switch (keycode) {
+        32 => if (ctrl) .ctrl_space else .{ .char = ' ' },
+        9 => .tab,
+        13 => .enter,
+        27 => .escape,
+        127 => .backspace,
         else => .unknown,
     };
 }

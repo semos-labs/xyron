@@ -999,10 +999,44 @@ pub fn updateInline(
     lua_state: lua_api.LuaState,
     hl_ctx: anytype,
 ) void {
+    updateInlineOpts(ed, stdout, prompt_str, env, cmd_cache, help_cache, lua_state, hl_ctx, false);
+}
+
+/// Like updateInline but with force=true: show completions even on empty input.
+pub fn triggerInline(
+    ed: *const editor_mod.Editor,
+    stdout: std.fs.File,
+    prompt_str: []const u8,
+    env: *const environ_mod.Environ,
+    cmd_cache: *highlight.CommandCache,
+    help_cache: ?*help_mod.HelpCache,
+    lua_state: lua_api.LuaState,
+    hl_ctx: anytype,
+) void {
+    updateInlineOpts(ed, stdout, prompt_str, env, cmd_cache, help_cache, lua_state, hl_ctx, true);
+}
+
+fn updateInlineOpts(
+    ed: *const editor_mod.Editor,
+    stdout: std.fs.File,
+    prompt_str: []const u8,
+    env: *const environ_mod.Environ,
+    cmd_cache: *highlight.CommandCache,
+    help_cache: ?*help_mod.HelpCache,
+    lua_state: lua_api.LuaState,
+    hl_ctx: anytype,
+    force: bool,
+) void {
     var s = &inline_state;
 
-    // Dismiss if empty or cursor not at end
-    if (ed.len == 0 or ed.cursor != ed.len) {
+    // Cursor must be at end
+    if (ed.cursor != ed.len) {
+        if (s.active) dismissInline(stdout);
+        return;
+    }
+
+    // For as-you-type (not forced), skip empty input
+    if (!force and ed.len == 0) {
         if (s.active) dismissInline(stdout);
         return;
     }
@@ -1015,8 +1049,8 @@ pub fn updateInline(
         return;
     }
 
-    // Need at least 1 char of prefix for non-command positions
-    if (ctx.kind != .command and ctx.prefix.len == 0) {
+    // Need at least 1 char of prefix for non-command positions (unless forced)
+    if (!force and ctx.kind != .command and ctx.prefix.len == 0) {
         if (s.active) dismissInline(stdout);
         return;
     }

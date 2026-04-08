@@ -265,32 +265,32 @@ pub fn readLine(
             .tab, .ctrl_space => {
                 if (overlay.enabled) {
                     if (hl) |ctx| {
-                        if (complete_mod.inline_state.active) {
-                            // Accept selection (Tab doubles as accept when overlay is open)
+                        const ipc_mod = @import("ipc.zig");
+                        if (ipc_mod.attyx_connected) {
+                            // IPC mode: send completions to Attyx. Attyx handles
+                            // selection, cycling, and acceptance on its side.
+                            complete_mod.triggerInline(ed, stdout, prompt_str, ctx.env, ctx.cache, ctx.help_cache, prompt_lua, ctx);
+                            if (!complete_mod.inline_state.active) {
+                                refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
+                            }
+                        } else if (complete_mod.inline_state.active) {
+                            // Inline mode: accept current selection
                             if (complete_mod.acceptInline(ed, stdout)) {
                                 content_changed = true;
                             }
                         } else {
-                            // Trigger completion
-                            const ipc_mod = @import("ipc.zig");
-                            if (ipc_mod.attyx_connected) {
-                                complete_mod.updateInline(ed, stdout, prompt_str, ctx.env, ctx.cache, ctx.help_cache, prompt_lua, ctx);
-                                if (!complete_mod.inline_state.active) {
-                                    refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
-                                }
-                            } else {
-                                const result = complete_mod.runPicker(
-                                    ed, stdout, prompt_str, ctx.env, ctx.cache,
-                                    ctx.help_cache, prompt_lua, ctx,
-                                );
-                                if (result == .interrupted) {
-                                    stdout.writeAll("^C\r\n") catch {};
-                                    ed.clear();
-                                    if (hist) |h| h.resetNavigation();
-                                    return .interrupt;
-                                }
-                                content_changed = true;
+                            // No IPC, no active overlay: run picker
+                            const result = complete_mod.runPicker(
+                                ed, stdout, prompt_str, ctx.env, ctx.cache,
+                                ctx.help_cache, prompt_lua, ctx,
+                            );
+                            if (result == .interrupted) {
+                                stdout.writeAll("^C\r\n") catch {};
+                                ed.clear();
+                                if (hist) |h| h.resetNavigation();
+                                return .interrupt;
                             }
+                            content_changed = true;
                         }
                     }
                 }
