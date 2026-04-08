@@ -134,12 +134,16 @@ pub fn readKey() !Key {
 
 /// Read remaining UTF-8 continuation bytes and return as a utf8 key.
 fn readUtf8(lead: u8, expected_len: u3) Key {
+    return readUtf8FromFd(posix.STDIN_FILENO, lead, expected_len);
+}
+
+fn readUtf8FromFd(fd: posix.fd_t, lead: u8, expected_len: u3) Key {
     var bytes: [4]u8 = undefined;
     bytes[0] = lead;
     var i: usize = 1;
     while (i < expected_len) : (i += 1) {
         var buf: [1]u8 = undefined;
-        const rc = c.read(posix.STDIN_FILENO, &buf, 1);
+        const rc = c.read(fd, &buf, 1);
         if (rc <= 0) return .unknown;
         if (buf[0] & 0xC0 != 0x80) return .unknown; // not a continuation byte
         bytes[i] = buf[0];
@@ -154,8 +158,12 @@ var stashed_byte: ?u8 = null;
 /// After reading ESC (0x1b), try to read the rest of the sequence.
 /// Uses poll with a short timeout to detect bare ESC vs. sequence.
 fn parseEscapeSequence() Key {
+    return parseEscapeFromFd(posix.STDIN_FILENO);
+}
+
+fn parseEscapeFromFd(fd: posix.fd_t) Key {
     var fds = [_]posix.pollfd{.{
-        .fd = posix.STDIN_FILENO,
+        .fd = fd,
         .events = posix.POLL.IN,
         .revents = 0,
     }};
@@ -164,7 +172,7 @@ fn parseEscapeSequence() Key {
     if (ready == 0) return .escape;
 
     var buf: [1]u8 = undefined;
-    const n1 = posix.read(posix.STDIN_FILENO, &buf) catch return .escape;
+    const n1 = posix.read(fd, &buf) catch return .escape;
     if (n1 == 0) return .escape;
 
     if (buf[0] != '[') {
@@ -184,7 +192,7 @@ fn parseEscapeSequence() Key {
 
     // Read the command byte
     var cmd: [1]u8 = undefined;
-    const n2 = posix.read(posix.STDIN_FILENO, &cmd) catch return .escape;
+    const n2 = posix.read(fd, &cmd) catch return .escape;
     if (n2 == 0) return .escape;
 
     return switch (cmd[0]) {
@@ -196,7 +204,48 @@ fn parseEscapeSequence() Key {
         'F' => .end_key,
         'Z' => .shift_tab,
         // Numeric CSI sequences: bracketed paste, delete, CSI u, etc.
-        '0'...'9' => parseCsiParams(cmd[0]),
+        '0'...'9' => parseCsiParamsFromFd(fd, cmd[0]),
+        else => .unknown,
+    };
+}
+
+/// Read a key event from an arbitrary file descriptor.
+/// Unlike readKey(), does not poll IPC — suitable for TUI apps
+/// that open /dev/tty directly.
+/// Returns .resize on EINTR (SIGWINCH), null on EOF/error.
+pub fn readKeyFromFd(fd: posix.fd_t) ?Key {
+    var key_buf: [1]u8 = undefined;
+    const rc = c.read(fd, &key_buf, 1);
+    if (rc == -1) return .resize; // EINTR from SIGWINCH
+    if (rc <= 0) return null; // EOF
+
+    const byte = key_buf[0];
+    return switch (byte) {
+        0 => .ctrl_space,
+        1 => .ctrl_a,
+        2 => .ctrl_b,
+        3 => .ctrl_c,
+        4 => .ctrl_d,
+        5 => .ctrl_e,
+        6 => .ctrl_f,
+        8 => .backspace,
+        9 => .tab,
+        10, 13 => .enter,
+        11 => .ctrl_k,
+        12 => .ctrl_l,
+        14 => .ctrl_n,
+        16 => .ctrl_p,
+        18 => .ctrl_r,
+        20 => .ctrl_t,
+        21 => .ctrl_u,
+        23 => .ctrl_w,
+        25 => .ctrl_y,
+        27 => parseEscapeFromFd(fd),
+        127 => .backspace,
+        32...126 => .{ .char = byte },
+        0xC0...0xDF => readUtf8FromFd(fd, byte, 2),
+        0xE0...0xEF => readUtf8FromFd(fd, byte, 3),
+        0xF0...0xF7 => readUtf8FromFd(fd, byte, 4),
         else => .unknown,
     };
 }
@@ -204,6 +253,10 @@ fn parseEscapeSequence() Key {
 /// Parse CSI sequences with numeric parameters: ESC [ <digits> [; <digits>] <final>
 /// Handles CSI u (fixterms/kitty keyboard protocol) and extended function keys.
 fn parseCsiParams(first_digit: u8) Key {
+    return parseCsiParamsFromFd(posix.STDIN_FILENO, first_digit);
+}
+
+fn parseCsiParamsFromFd(fd: posix.fd_t, first_digit: u8) Key {
     var param_buf: [16]u8 = undefined;
     param_buf[0] = first_digit;
     var len: usize = 1;
@@ -211,7 +264,7 @@ fn parseCsiParams(first_digit: u8) Key {
     // Read until we hit a letter (final byte) or overflow
     while (len < param_buf.len) {
         var ch: [1]u8 = undefined;
-        const rc = c.read(posix.STDIN_FILENO, &ch, 1);
+        const rc = c.read(fd, &ch, 1);
         if (rc <= 0) return .unknown;
         param_buf[len] = ch[0];
         len += 1;
