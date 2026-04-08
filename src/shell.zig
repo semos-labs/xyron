@@ -118,6 +118,7 @@ pub const Shell = struct {
     }
 
     pub fn deinit(self: *Shell) void {
+        self.project_state.deinit();
         self.project_arena.deinit();
         self.cmd_cache.deinit();
         lua_api.deinit(self.lua);

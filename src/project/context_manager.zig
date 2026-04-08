@@ -136,6 +136,13 @@ pub const SessionProjectState = struct {
         };
     }
 
+    pub fn deinit(self: *SessionProjectState) void {
+        for (self.applied_keys.keys()) |key| {
+            self.allocator.free(key);
+        }
+        self.applied_keys.deinit();
+    }
+
     /// Check if the project config (xyron.toml or secrets.gpg) has been modified
     /// since the last resolution. Used to detect edits without a directory change.
     pub fn projectConfigChanged(self: *const SessionProjectState) bool {
