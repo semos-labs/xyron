@@ -564,6 +564,9 @@ pub const Shell = struct {
         // Apply env overlay to the shell session
         self.project_state.applyOverlay(&self.env, &result);
 
+        // Snapshot secrets mtime after overlay is applied (not during resolution)
+        self.project_state.snapshotSecretsMtime();
+
         // Update Lua-accessible project info cache
         updateProjectInfoCache(&result.next);
 
@@ -711,8 +714,11 @@ fn buildSystemEnvFromShell(allocator: std.mem.Allocator, env: *const environ_mod
 
     var iter = env.map.iterator();
     while (iter.next()) |entry| {
-        keys.append(allocator, entry.key_ptr.*) catch {};
-        vals.append(allocator, entry.value_ptr.*) catch {};
+        // Dupe into arena so keys/values survive EnvMap modifications during overlay apply
+        const k = allocator.dupe(u8, entry.key_ptr.*) catch continue;
+        const v = allocator.dupe(u8, entry.value_ptr.*) catch continue;
+        keys.append(allocator, k) catch {};
+        vals.append(allocator, v) catch {};
     }
 
     return .{

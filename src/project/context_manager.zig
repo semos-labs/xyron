@@ -33,8 +33,9 @@ const PersistentProjectInfo = struct {
     project_root_len: usize = 0,
     fingerprint: u64 = 0,
     status: ctx.ProjectStatus = .no_project,
-    /// Modification time of xyron.toml used to detect config changes between commands.
+    /// Modification times used to detect config changes between commands.
     manifest_mtime: i128 = 0,
+    secrets_mtime: i128 = 0,
 
     fn projectId(self: *const PersistentProjectInfo) ?[]const u8 {
         if (self.project_id_len == 0) return null;
@@ -78,7 +79,9 @@ const PersistentProjectInfo = struct {
     /// Check if the project config files have changed since last snapshot.
     fn configChanged(self: *const PersistentProjectInfo) bool {
         if (self.status == .no_project) return false;
-        return self.statManifestMtime() != self.manifest_mtime;
+        if (self.statManifestMtime() != self.manifest_mtime) return true;
+        if (statSecretsMtime() != self.secrets_mtime) return true;
+        return false;
     }
 
     /// Build a lightweight ActiveContext for transition detection (no arena pointers).
@@ -101,6 +104,19 @@ fn statFileMtime(path: []const u8) i128 {
     return stat.mtime;
 }
 
+/// Stat secrets.gpg and return its mtime. Uses stack buffers.
+fn statSecretsMtime() i128 {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (std.posix.getenv("XDG_DATA_HOME")) |dh| {
+        const p = std.fmt.bufPrint(&path_buf, "{s}/xyron/secrets.gpg", .{dh}) catch return 0;
+        return statFileMtime(p);
+    } else if (std.posix.getenv("HOME")) |home| {
+        const p = std.fmt.bufPrint(&path_buf, "{s}/.local/share/xyron/secrets.gpg", .{home}) catch return 0;
+        return statFileMtime(p);
+    }
+    return 0;
+}
+
 /// Persistent state for a shell session's project context.
 /// Lives on the Shell struct — one per session.
 pub const SessionProjectState = struct {
@@ -120,10 +136,15 @@ pub const SessionProjectState = struct {
         };
     }
 
-    /// Check if the project config (xyron.toml) has been modified since
-    /// the last resolution. Used to detect edits without a directory change.
+    /// Check if the project config (xyron.toml or secrets.gpg) has been modified
+    /// since the last resolution. Used to detect edits without a directory change.
     pub fn projectConfigChanged(self: *const SessionProjectState) bool {
         return self.persistent.configChanged();
+    }
+
+    /// Snapshot the current secrets.gpg mtime. Call after overlay is applied.
+    pub fn snapshotSecretsMtime(self: *SessionProjectState) void {
+        self.persistent.secrets_mtime = statSecretsMtime();
     }
 
     /// Handle a directory change. Resolves the project at `new_cwd`,
