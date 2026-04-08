@@ -1049,6 +1049,12 @@ fn updateInlineOpts(
         return;
     }
 
+    // Dismiss for bare . or .. (relative path navigation, not completable)
+    if (std.mem.eql(u8, ctx.prefix, ".") or std.mem.eql(u8, ctx.prefix, "..")) {
+        if (s.active) dismissInline(stdout);
+        return;
+    }
+
     // Need at least 1 char of prefix for non-command positions (unless forced)
     if (!force and ctx.kind != .command and ctx.prefix.len == 0) {
         if (s.active) dismissInline(stdout);

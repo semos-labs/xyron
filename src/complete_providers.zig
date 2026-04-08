@@ -28,10 +28,15 @@ pub fn gather(
 ) void {
     switch (ctx.kind) {
         .command => {
-            provideBuiltins(out, ctx.prefix);
-            provideAliases(out, ctx.prefix);
-            provideLuaCommands(out, ctx.prefix);
-            providePathCommands(out, ctx.prefix, env, cmd_cache);
+            // If the prefix looks like a path, provide filesystem completions
+            if (isPathPrefix(ctx.prefix)) {
+                provideFilesystem(out, ctx.prefix, env);
+            } else {
+                provideBuiltins(out, ctx.prefix);
+                provideAliases(out, ctx.prefix);
+                provideLuaCommands(out, ctx.prefix);
+                providePathCommands(out, ctx.prefix, env, cmd_cache);
+            }
         },
         .argument => {
             // Command-specific providers first (git branches, docker containers, etc.)
@@ -55,6 +60,15 @@ pub fn gather(
         },
         .none => {},
     }
+}
+
+/// Returns true if the prefix looks like a filesystem path (starts with /, ./, ../, or ~).
+fn isPathPrefix(prefix: []const u8) bool {
+    if (prefix.len == 0) return false;
+    if (prefix[0] == '/' or prefix[0] == '~') return true;
+    if (prefix.len >= 2 and prefix[0] == '.' and prefix[1] == '/') return true;
+    if (prefix.len >= 3 and prefix[0] == '.' and prefix[1] == '.' and prefix[2] == '/') return true;
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +302,21 @@ fn scanDirectory(out: *complete.CandidateBuffer, dir_path: []const u8, prefix: [
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "isPathPrefix detects paths" {
+    try std.testing.expect(isPathPrefix("./"));
+    try std.testing.expect(isPathPrefix("./foo"));
+    try std.testing.expect(isPathPrefix("../"));
+    try std.testing.expect(isPathPrefix("../bar"));
+    try std.testing.expect(isPathPrefix("/usr"));
+    try std.testing.expect(isPathPrefix("~/"));
+    try std.testing.expect(isPathPrefix("~/.config"));
+    try std.testing.expect(!isPathPrefix(""));
+    try std.testing.expect(!isPathPrefix("ls"));
+    try std.testing.expect(!isPathPrefix("git"));
+    try std.testing.expect(!isPathPrefix("."));
+    try std.testing.expect(!isPathPrefix(".."));
+}
 
 test "provideBuiltins adds all candidates regardless of prefix" {
     var buf = complete.CandidateBuffer{};
