@@ -1,7 +1,7 @@
 .{
     .fingerprint = 0x6ad340c896f21a2,
     .name = .xyron,
-    .version = "0.1.5",
+    .version = "0.1.7",
     .dependencies = .{
         .lua = .{
             .url = "https://www.lua.org/ftp/lua-5.5.0.tar.gz",
