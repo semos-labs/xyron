@@ -7,6 +7,7 @@
 const std = @import("std");
 const core = @import("core.zig");
 const style = @import("../style.zig");
+const Screen = @import("Screen.zig");
 
 const Rect = core.Rect;
 const Element = core.Element;
@@ -86,6 +87,40 @@ pub const Box = struct {
         return pos;
     }
 
+    pub fn draw(self: *const Box, scr: *Screen, rect: Rect) void {
+        if (rect.w < 2 or rect.h < 2) return;
+        const inner_w = rect.w - 2;
+        const border_style: Screen.Style = if (self.border_color) |c| .{ .fg = c } else .{};
+
+        // Top edge
+        _ = scr.write(rect.y, rect.x, style.box.top_left, border_style);
+        if (self.title.len > 0 and inner_w >= 4) {
+            _ = scr.write(rect.y, rect.x + 1, style.box.horizontal, border_style);
+            _ = scr.write(rect.y, rect.x + 2, " ", border_style);
+            const title_style: Screen.Style = if (self.title_color) |c| .{ .fg = c, .bold = true } else .{ .bold = true };
+            const title_max: u16 = @intCast(@min(self.title.len, inner_w -| 4));
+            const tw = scr.write(rect.y, rect.x + 3, self.title[0..title_max], title_style);
+            _ = scr.write(rect.y, rect.x + 3 + tw, " ", border_style);
+            scr.hline(rect.y, rect.x + 4 + tw, inner_w -| (tw + 4), border_style);
+        } else {
+            scr.hline(rect.y, rect.x + 1, inner_w, border_style);
+        }
+        _ = scr.write(rect.y, rect.x + rect.w - 1, style.box.top_right, border_style);
+
+        // Middle rows
+        var r: u16 = 1;
+        while (r < rect.h -| 1) : (r += 1) {
+            _ = scr.write(rect.y + r, rect.x, style.box.vertical, border_style);
+            if (self.fill) scr.pad(rect.y + r, rect.x + 1, inner_w, .{});
+            _ = scr.write(rect.y + r, rect.x + rect.w - 1, style.box.vertical, border_style);
+        }
+
+        // Bottom edge
+        _ = scr.write(rect.y + rect.h - 1, rect.x, style.box.bottom_left, border_style);
+        scr.hline(rect.y + rect.h - 1, rect.x + 1, inner_w, border_style);
+        _ = scr.write(rect.y + rect.h - 1, rect.x + rect.w - 1, style.box.bottom_right, border_style);
+    }
+
     pub fn element(self: *const Box) Element {
         return Element.from(self);
     }
@@ -117,6 +152,14 @@ pub const Separator = struct {
         return pos;
     }
 
+    pub fn draw(self: *const Separator, scr: *Screen, rect: Rect) void {
+        if (rect.w == 0 or rect.h == 0) return;
+        var s: Screen.Style = .{};
+        if (self.is_dim) s.dim = true;
+        if (self.color) |c| s.fg = c;
+        scr.hline(rect.y, rect.x, rect.w, s);
+    }
+
     pub fn element(self: *const Separator) Element {
         return Element.from(self);
     }
@@ -134,13 +177,17 @@ pub const StatusBar = struct {
 
     items: []const Item,
     bg_color: ?style.Color = null,
+    /// When true, renders with dim text on transparent background
+    /// instead of inverse (solid) background.
+    transparent: bool = false,
 
     pub fn render(self: *const StatusBar, buf: []u8, rect: Rect) usize {
         if (rect.w == 0 or rect.h == 0) return 0;
 
         var pos: usize = 0;
         pos += style.moveTo(buf[pos..], rect.y, rect.x);
-        pos += style.inverse(buf[pos..]);
+        if (!self.transparent) pos += style.inverse(buf[pos..]);
+        if (self.transparent) pos += style.dim(buf[pos..]);
 
         var vis: u16 = 0;
         for (self.items) |item| {
@@ -153,11 +200,13 @@ pub const StatusBar = struct {
             }
 
             // Bold key
+            if (self.transparent) pos += style.reset(buf[pos..]);
             pos += style.bold(buf[pos..]);
             const key_w = @min(item.key.len, rect.w -| vis);
             pos += core.clipText(buf[pos..], item.key, @intCast(key_w));
             vis += @intCast(key_w);
             pos += style.unbold(buf[pos..]);
+            if (self.transparent) pos += style.dim(buf[pos..]);
 
             // Space + label
             if (vis < rect.w) {
@@ -174,6 +223,45 @@ pub const StatusBar = struct {
         pos += style.reset(buf[pos..]);
 
         return pos;
+    }
+
+    pub fn draw(self: *const StatusBar, scr: *Screen, rect: Rect) void {
+        if (rect.w == 0 or rect.h == 0) return;
+
+        const base: Screen.Style = if (self.transparent)
+            .{ .dim = true }
+        else
+            .{ .inverse = true };
+        const key_style: Screen.Style = if (self.transparent)
+            .{ .bold = true }
+        else
+            .{ .inverse = true, .bold = true };
+        var col = rect.x;
+
+        for (self.items) |item| {
+            if (col - rect.x >= rect.w) break;
+
+            // Space before item
+            if (col > rect.x and col - rect.x + 1 < rect.w) {
+                scr.pad(rect.y, col, 2, base);
+                col += 2;
+            }
+
+            // Bold key
+            const kw: u16 = @intCast(@min(item.key.len, rect.x + rect.w - col));
+            col += scr.write(rect.y, col, item.key[0..kw], key_style);
+
+            // Space + label
+            if (col < rect.x + rect.w) {
+                scr.pad(rect.y, col, 1, base);
+                col += 1;
+            }
+            const lw: u16 = @intCast(@min(item.label.len, rect.x + rect.w -| col));
+            col += scr.write(rect.y, col, item.label[0..lw], base);
+        }
+
+        // Fill remaining
+        scr.pad(rect.y, col, rect.x + rect.w -| col, base);
     }
 
     pub fn element(self: *const StatusBar) Element {

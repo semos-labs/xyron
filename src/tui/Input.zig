@@ -9,6 +9,7 @@ const core = @import("core.zig");
 const style = @import("../style.zig");
 const keys = @import("../keys.zig");
 
+const Screen = @import("Screen.zig");
 const Rect = core.Rect;
 const Element = core.Element;
 const Action = core.Action;
@@ -121,6 +122,55 @@ pub fn render(self: *const Self, buf: []u8, rect: Rect) usize {
     }
 
     return pos;
+}
+
+/// Render into a Screen (double-buffered, flicker-free).
+pub fn draw(self: *const Self, scr: *Screen, rect: Rect) void {
+    if (rect.w == 0 or rect.h == 0) return;
+
+    var col = rect.x;
+    const max_w = rect.w;
+
+    // Prompt
+    if (self.prompt.len > 0) {
+        var prompt_style = Screen.Style{};
+        if (self.prompt_color) |c_color| {
+            prompt_style.fg = c_color;
+            if (self.focused) { prompt_style.bold = true; } else { prompt_style.dim = true; }
+        } else {
+            if (self.focused) { prompt_style.bold = true; } else { prompt_style.dim = true; }
+        }
+        const pw: u16 = @intCast(@min(self.prompt.len, max_w));
+        col += scr.write(rect.y, col, self.prompt[0..pw], prompt_style);
+    }
+
+    const vis_start = col - rect.x;
+    const text = self.value();
+
+    if (text.len == 0 and self.placeholder.len > 0 and !self.focused) {
+        const ph_w: u16 = @intCast(@min(self.placeholder.len, max_w -| vis_start));
+        col += scr.write(rect.y, col, self.placeholder[0..ph_w], .{ .dim = true });
+    } else {
+        const text_area = max_w -| vis_start;
+        const scroll_off = self.scrollOffset(text_area);
+        const end = @min(text.len, scroll_off + text_area);
+        const visible_text = text[scroll_off..end];
+
+        const text_style: Screen.Style = if (self.focused) .{ .bold = true } else .{};
+        col += scr.write(rect.y, col, visible_text, text_style);
+    }
+
+    // Pad remaining
+    scr.pad(rect.y, col, rect.x + rect.w - col, .{});
+
+    // Position cursor
+    if (self.focused) {
+        const text_area = max_w -| @as(u16, @intCast(@min(self.prompt.len, max_w)));
+        const scroll_off = self.scrollOffset(text_area);
+        const cursor_col = rect.x + @as(u16, @intCast(@min(self.prompt.len, max_w))) +
+            @as(u16, @intCast(self.cursor -| scroll_off));
+        scr.setCursor(rect.y, cursor_col);
+    }
 }
 
 /// Calculate horizontal scroll offset so the cursor stays visible.

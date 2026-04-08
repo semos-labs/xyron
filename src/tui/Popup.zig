@@ -8,6 +8,7 @@ const std = @import("std");
 const core = @import("core.zig");
 const style = @import("../style.zig");
 const BoxComponent = @import("Box.zig");
+const Screen = @import("Screen.zig");
 
 const Rect = core.Rect;
 const Element = core.Element;
@@ -65,6 +66,26 @@ pub fn render(self: *const Self, buf: []u8, screen: Rect) usize {
     pos += box.render(buf[pos..], popup_rect);
 
     return pos;
+}
+
+/// Draw the popup frame to a Screen (double-buffered).
+pub fn draw(self: *const Self, scr: *Screen, screen: Rect) void {
+    const popup_rect = self.rect(screen);
+    if (popup_rect.w < 2 or popup_rect.h < 2) return;
+
+    // Clear popup area
+    if (self.clear_background) {
+        scr.fill(popup_rect, .{});
+    }
+
+    // Draw box border
+    const box = BoxComponent.Box{
+        .title = self.title,
+        .border_color = self.border_color,
+        .title_color = self.title_color,
+        .fill = true,
+    };
+    box.draw(scr, popup_rect);
 }
 
 pub fn element(self: *const Self) Element {

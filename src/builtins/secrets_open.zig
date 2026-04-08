@@ -14,6 +14,7 @@ const keys = @import("../keys.zig");
 const Result = @import("mod.zig").BuiltinResult;
 
 const Key = keys.Key;
+const Screen = tui.Screen;
 
 pub fn run(args: []const []const u8, _: std.fs.File, stderr: std.fs.File) Result {
     var store = secrets_mod.SecretsStore.init();
@@ -65,7 +66,14 @@ pub fn run(args: []const []const u8, _: std.fs.File, stderr: std.fs.File) Result
     state.search_input.prompt = "/ ";
     state.search_input.prompt_color = .yellow;
 
-    state.render(tty);
+    // Double-buffered screen
+    var screen = Screen.init(
+        @intCast(@min(state.ts.cols, Screen.max_cols)),
+        @intCast(@min(state.ts.rows, Screen.max_rows)),
+    );
+
+    state.draw(&screen);
+    screen.flush(tty);
 
     // Event loop
     while (true) {
@@ -73,18 +81,25 @@ pub fn run(args: []const []const u8, _: std.fs.File, stderr: std.fs.File) Result
 
         if (key == .resize) {
             state.ts = getTermSize(tty_fd);
-            state.render(tty);
+            screen.resize(
+                @intCast(@min(state.ts.cols, Screen.max_cols)),
+                @intCast(@min(state.ts.rows, Screen.max_rows)),
+            );
+            state.draw(&screen);
+            screen.flush(tty);
             continue;
         }
 
         if (state.searching) {
             state.handleSearchKey(key);
         } else {
-            const done = state.handleNormalKey(key, tty, tty_fd);
+            const done = state.handleNormalKey(key, tty, tty_fd, &screen);
             if (done) break;
         }
 
-        state.render(tty);
+        screen.beginFrame();
+        state.draw(&screen);
+        screen.flush(tty);
     }
 
     if (store.modified) store.save() catch {};
@@ -173,7 +188,7 @@ const State = struct {
         }
     }
 
-    fn handleNormalKey(self: *State, key: Key, tty: std.fs.File, tty_fd: posix.fd_t) bool {
+    fn handleNormalKey(self: *State, key: Key, tty: std.fs.File, tty_fd: posix.fd_t, screen: *Screen) bool {
         const total = self.filteredCount();
         switch (key) {
             .up, .ctrl_p => {
@@ -192,13 +207,13 @@ const State = struct {
                 'a' => {
                     const kind: secrets_mod.SecretKind = if (self.local_only) .local else .env;
                     const dir = if (self.local_only) self.cwd else "";
-                    if (addSecretModal(tty, tty_fd, self.store, kind, dir, self.ts)) {
+                    if (addSecretModal(tty, tty_fd, self.store, kind, dir, self.ts, screen)) {
                         self.store.save() catch {};
                     }
                 },
                 'e' => {
                     if (self.resolveIndex(self.cursor)) |real_idx| {
-                        if (editSecretModal(tty, tty_fd, self.store, real_idx, self.ts)) {
+                        if (editSecretModal(tty, tty_fd, self.store, real_idx, self.ts, screen)) {
                             self.store.save() catch {};
                         }
                     }
@@ -219,111 +234,77 @@ const State = struct {
     }
 
     // -------------------------------------------------------------------
-    // Rendering
+    // Drawing (Screen-based, double-buffered)
     // -------------------------------------------------------------------
 
-    fn render(self: *const State, tty: std.fs.File) void {
-        var buf: [32768]u8 = undefined;
-        var pos: usize = 0;
-        const cols: u16 = @intCast(@min(self.ts.cols, 1000));
-        const rows: u16 = @intCast(@min(self.ts.rows, 500));
+    fn draw(self: *const State, scr: *Screen) void {
+        const cols = scr.width;
+        const rows = scr.height;
         const filter = self.search_input.value();
         const total = self.filteredCount();
         const show_search = self.searching or filter.len > 0;
 
-        pos += style.hideCursor(buf[pos..]);
-        pos += style.home(buf[pos..]);
-
         // Layout
-        const screen = tui.Rect.fromSize(cols, rows);
-        const header_rows: u32 = if (show_search) 3 else 2; // title + [search] + separator
+        const scr_rect = tui.Rect.fromSize(cols, rows);
         var layout: [4]tui.Rect = undefined;
         if (show_search) {
-            _ = screen.splitRows(&.{
+            _ = scr_rect.splitRows(&.{
                 tui.Size{ .fixed = 1 }, // title
                 tui.Size{ .fixed = 1 }, // search
                 tui.Size{ .flex = 1 },  // list
                 tui.Size{ .fixed = 1 }, // status
             }, &layout);
         } else {
-            _ = screen.splitRows(&.{
+            _ = scr_rect.splitRows(&.{
                 tui.Size{ .fixed = 1 },  // title
-                tui.Size{ .flex = 1 },   // list (separator takes first row)
+                tui.Size{ .flex = 1 },   // list
                 tui.Size{ .fixed = 1 },  // status
             }, layout[0..3]);
-            // Shift: title=0, list=1 (with separator), status=2
             layout[3] = layout[2]; // status
             layout[2] = layout[1]; // list
         }
-        _ = header_rows;
 
         // Title bar
-        pos += self.renderTitle(buf[pos..], layout[0], total);
+        self.drawTitle(scr, layout[0], total);
 
         // Search bar
         if (show_search) {
-            pos += self.search_input.render(buf[pos..], layout[1]);
+            self.search_input.draw(scr, layout[1]);
         }
 
-        // Separator + list area
-        const list_area = if (show_search) layout[2] else layout[2];
-        pos += self.renderSeparatorAndList(buf[pos..], list_area, total);
+        // Separator + list
+        self.drawSeparatorAndList(scr, layout[2], total);
 
         // Status bar
-        const status_rect = if (show_search) layout[3] else layout[3];
-        pos += self.renderStatusBar(buf[pos..], status_rect);
-
-        // Cursor for search
-        if (self.searching) {
-            const search_rect = layout[1];
-            pos += style.showCursor(buf[pos..]);
-            // The Input component positions the cursor at the end of render,
-            // but we rendered other things after. Re-position it.
-            const prompt_w: u16 = @intCast(@min(self.search_input.prompt.len, cols));
-            const cursor_col = search_rect.x + prompt_w + @as(u16, @intCast(self.search_input.cursor));
-            pos += style.moveTo(buf[pos..], search_rect.y, cursor_col);
-        }
-
-        tty.writeAll(buf[0..pos]) catch {};
+        self.drawStatusBar(scr, if (show_search) layout[3] else layout[3]);
     }
 
-    fn renderTitle(self: *const State, buf: []u8, rect: tui.Rect, total: usize) usize {
-        var pos: usize = 0;
-        pos += style.moveTo(buf[pos..], rect.y, rect.x);
-        pos += style.dim(buf[pos..]);
-
+    fn drawTitle(self: *const State, scr: *Screen, rect: tui.Rect, total: usize) void {
         const title = if (self.local_only) "  Secrets (local)" else "  Secrets";
-        pos += tui.clipText(buf[pos..], title, rect.w);
-        const vis: u16 = @intCast(@min(title.len, rect.w));
+        const dim_style: Screen.Style = .{ .dim = true };
+        var col = rect.x;
+        col += scr.write(rect.y, col, title, dim_style);
 
         // Right-aligned count
         var cnt_buf: [32]u8 = undefined;
         const cnt_str = std.fmt.bufPrint(&cnt_buf, "{d} entries  ", .{total}) catch "";
         const cnt_w: u16 = @intCast(cnt_str.len);
-        if (vis + cnt_w < rect.w) {
-            pos += tui.pad(buf[pos..], rect.w - vis - cnt_w);
-            pos += tui.clipText(buf[pos..], cnt_str, cnt_w);
+        if (col + cnt_w < rect.x + rect.w) {
+            scr.pad(rect.y, col, rect.x + rect.w - col - cnt_w, dim_style);
+            _ = scr.write(rect.y, rect.x + rect.w - cnt_w, cnt_str, dim_style);
         } else {
-            pos += tui.pad(buf[pos..], rect.w -| vis);
+            scr.pad(rect.y, col, rect.x + rect.w -| col, dim_style);
         }
-
-        pos += style.reset(buf[pos..]);
-        return pos;
     }
 
-    fn renderSeparatorAndList(self: *const State, buf: []u8, rect: tui.Rect, total: usize) usize {
-        if (rect.h == 0 or rect.w == 0) return 0;
-        var pos: usize = 0;
+    fn drawSeparatorAndList(self: *const State, scr: *Screen, rect: tui.Rect, total: usize) void {
+        if (rect.h == 0 or rect.w == 0) return;
 
-        // Separator (first row of area)
-        pos += style.moveTo(buf[pos..], rect.y, rect.x);
-        pos += style.dim(buf[pos..]);
-        pos += style.hline(buf[pos..], rect.w);
-        pos += style.reset(buf[pos..]);
+        // Separator
+        scr.hline(rect.y, rect.x, rect.w, .{ .dim = true });
 
-        if (rect.h <= 1) return pos;
+        if (rect.h <= 1) return;
 
-        // List area below separator
         const list_rect = tui.Rect{
             .x = rect.x,
             .y = rect.y + 1,
@@ -337,31 +318,18 @@ const State = struct {
         const content_w: u16 = if (has_scrollbar) list_rect.w -| 1 else list_rect.w;
 
         if (total == 0) {
-            pos += self.renderEmpty(buf[pos..], list_rect);
+            self.drawEmpty(scr, list_rect);
         } else {
-            pos += self.renderEntries(buf[pos..], list_rect, content_w, vis_end);
-        }
-
-        // Pad remaining rows
-        const rendered = if (total > 0) vis_end - self.scroll else 0;
-        var row: u16 = @intCast(rendered);
-        // Account for detail lines
-        if (total > 0 and self.cursor >= self.scroll and self.cursor < vis_end) row += 1;
-        while (row < max_vis) : (row += 1) {
-            pos += style.moveTo(buf[pos..], list_rect.y + row, list_rect.x);
-            pos += tui.pad(buf[pos..], content_w);
+            self.drawEntries(scr, list_rect, content_w, vis_end);
         }
 
         // Scrollbar
         if (has_scrollbar) {
-            pos += tui.renderScrollbar(buf[pos..], list_rect.y, list_rect.x + list_rect.w - 1, max_vis, total, self.scroll);
+            self.drawScrollbar(scr, list_rect, max_vis, total);
         }
-
-        return pos;
     }
 
-    fn renderEntries(self: *const State, buf: []u8, list_rect: tui.Rect, content_w: u16, vis_end: usize) usize {
-        var pos: usize = 0;
+    fn drawEntries(self: *const State, scr: *Screen, list_rect: tui.Rect, content_w: u16, vis_end: usize) void {
         const filter = self.search_input.value();
         var vi: usize = 0;
         var row: u16 = 0;
@@ -374,125 +342,133 @@ const State = struct {
             if (vi >= vis_end) break;
 
             const is_sel = vi == self.cursor;
-            pos += style.moveTo(buf[pos..], list_rect.y + row, list_rect.x);
+            var col = list_rect.x;
 
             // Arrow
             if (is_sel) {
-                pos += style.colored(buf[pos..], .cyan, " > ");
+                col += scr.write(list_rect.y + row, col, " > ", .{ .fg = .cyan });
             } else {
-                pos += style.cp(buf[pos..], "   ");
+                scr.pad(list_rect.y + row, col, 3, .{});
+                col += 3;
             }
 
             // Kind badge
-            switch (sec.kind) {
-                .env => pos += style.colored(buf[pos..], .green, style.box.bullet),
-                .local => pos += style.colored(buf[pos..], .blue, style.box.bullet),
-                .password => pos += style.colored(buf[pos..], .yellow, style.box.bullet),
-            }
-            pos += style.cp(buf[pos..], " ");
+            const badge_color: style.Color = switch (sec.kind) {
+                .env => .green,
+                .local => .blue,
+                .password => .yellow,
+            };
+            col += scr.write(list_rect.y + row, col, style.box.bullet, .{ .fg = badge_color });
+            scr.pad(list_rect.y + row, col, 1, .{});
+            col += 1;
 
             // Name
             const name = sec.nameSlice();
             const max_name: u16 = 24;
             const name_w: u16 = @intCast(@min(name.len, max_name));
-            if (is_sel) pos += style.bold(buf[pos..]);
-            pos += tui.clipText(buf[pos..], name, name_w);
-            pos += style.reset(buf[pos..]);
-
-            var vis: u16 = 5 + name_w; // "   " + bullet + " " + name
+            const name_style: Screen.Style = if (is_sel) .{ .bold = true } else .{};
+            col += scr.write(list_rect.y + row, col, name[0..name_w], name_style);
 
             // Value
             const val = sec.valueSlice();
             if (val.len > 0) {
-                pos += style.cp(buf[pos..], "  ");
-                vis += 2;
+                scr.pad(list_rect.y + row, col, 2, .{});
+                col += 2;
                 if (self.show_values) {
-                    pos += style.dim(buf[pos..]);
-                    const max_val: u16 = if (content_w > vis + 20) content_w - vis - 16 else 16;
+                    const max_val: u16 = if (content_w > col - list_rect.x + 20) content_w - (col - list_rect.x) - 16 else 16;
                     const val_w: u16 = @intCast(@min(val.len, max_val));
-                    pos += tui.clipText(buf[pos..], val, val_w);
-                    if (val.len > max_val) pos += style.cp(buf[pos..], style.box.ellipsis);
-                    vis += val_w;
-                    pos += style.reset(buf[pos..]);
+                    col += scr.write(list_rect.y + row, col, val[0..val_w], .{ .dim = true });
+                    if (val.len > max_val) col += scr.write(list_rect.y + row, col, style.box.ellipsis, .{ .dim = true });
                 } else {
-                    pos += style.dimText(buf[pos..], "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2");
-                    vis += 8;
+                    col += scr.write(list_rect.y + row, col, "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2", .{ .dim = true });
                 }
             }
 
             // Description (right-aligned)
             const desc = sec.descSlice();
-            if (desc.len > 0 and vis + desc.len + 2 < content_w) {
-                const gap = content_w - vis - @as(u16, @intCast(desc.len));
-                pos += tui.pad(buf[pos..], gap);
-                pos += style.dimText(buf[pos..], desc);
-                vis = content_w;
+            const desc_w: u16 = @intCast(desc.len);
+            if (desc.len > 0 and col + desc_w + 2 < list_rect.x + content_w) {
+                scr.pad(list_rect.y + row, col, list_rect.x + content_w - col - desc_w, .{});
+                _ = scr.write(list_rect.y + row, list_rect.x + content_w - desc_w, desc, .{ .dim = true });
+            } else {
+                scr.pad(list_rect.y + row, col, list_rect.x + content_w -| col, .{});
             }
-            pos += tui.pad(buf[pos..], content_w -| vis);
 
             row += 1;
 
             // Detail line for selected
             if (is_sel and row < list_rect.h) {
-                pos += style.moveTo(buf[pos..], list_rect.y + row, list_rect.x);
-                pos += style.cp(buf[pos..], "     ");
-                pos += style.dim(buf[pos..]);
+                scr.pad(list_rect.y + row, list_rect.x, 5, .{});
+                var dcol = list_rect.x + 5;
                 switch (sec.kind) {
-                    .env => pos += style.cp(buf[pos..], "env"),
+                    .env => dcol += scr.write(list_rect.y + row, dcol, "env", .{ .dim = true }),
                     .local => {
-                        pos += style.cp(buf[pos..], "local ");
-                        pos += style.fg(buf[pos..], .cyan);
+                        dcol += scr.write(list_rect.y + row, dcol, "local ", .{ .dim = true });
                         const dir = sec.dirSlice();
                         const dir_max: u16 = if (content_w > 20) content_w - 20 else content_w;
-                        pos += tui.clipText(buf[pos..], dir, dir_max);
+                        dcol += scr.write(list_rect.y + row, dcol, dir[0..@min(dir.len, dir_max)], .{ .dim = true, .fg = .cyan });
                     },
-                    .password => pos += style.cp(buf[pos..], "password"),
+                    .password => dcol += scr.write(list_rect.y + row, dcol, "password", .{ .dim = true }),
                 }
-                pos += style.reset(buf[pos..]);
-                pos += tui.pad(buf[pos..], content_w -| 15);
+                scr.pad(list_rect.y + row, dcol, list_rect.x + content_w -| dcol, .{});
                 row += 1;
             }
 
             vi += 1;
         }
-        return pos;
+
+        // Clear remaining rows
+        while (row < list_rect.h) : (row += 1) {
+            scr.pad(list_rect.y + row, list_rect.x, content_w, .{});
+        }
     }
 
-    fn renderEmpty(self: *const State, buf: []u8, rect: tui.Rect) usize {
+    fn drawEmpty(self: *const State, scr: *Screen, rect: tui.Rect) void {
         _ = self;
-        var pos: usize = 0;
-        // Clear rows and center message
         const msg = "No secrets stored";
-        const hint = "Press  a  to add your first secret";
         const mid = rect.h / 2;
+        scr.fill(rect, .{});
+
+        // Centered message
+        const msg_w: u16 = @intCast(msg.len);
+        const pad_l = (rect.w -| msg_w) / 2;
+        _ = scr.write(rect.y + mid, rect.x + pad_l, msg, .{ .dim = true });
+
+        // Hint
+        if (mid + 2 < rect.h) {
+            const hint_row = rect.y + mid + 2;
+            const hint_text = "Press  a  to add your first secret";
+            const hint_w: u16 = @intCast(hint_text.len);
+            const hpad = (rect.w -| hint_w) / 2;
+            var col = rect.x + hpad;
+            col += scr.write(hint_row, col, "Press ", .{ .dim = true });
+            col += scr.write(hint_row, col, "a", .{ .fg = .cyan, .bold = true });
+            _ = scr.write(hint_row, col, " to add your first secret", .{ .dim = true });
+        }
+    }
+
+    fn drawScrollbar(self: *const State, scr: *Screen, rect: tui.Rect, visible: u16, total: usize) void {
+        if (total <= visible) return;
+        const col = rect.x + rect.w - 1;
+        const thumb_h = @max(1, (@as(u32, visible) * visible) / @as(u32, @intCast(total)));
+        const max_offset = total - visible;
+        const track_space = visible - @as(u16, @intCast(thumb_h));
+        const thumb_top: u16 = if (max_offset > 0)
+            @intCast((@as(u32, @intCast(self.scroll)) * track_space) / @as(u32, @intCast(max_offset)))
+        else
+            0;
 
         var row: u16 = 0;
-        while (row < rect.h) : (row += 1) {
-            pos += style.moveTo(buf[pos..], rect.y + row, rect.x);
-            if (row == mid) {
-                const pad_l = (rect.w -| @as(u16, @intCast(msg.len))) / 2;
-                pos += tui.pad(buf[pos..], pad_l);
-                pos += style.dimText(buf[pos..], msg);
-                pos += tui.pad(buf[pos..], rect.w -| pad_l -| @as(u16, @intCast(msg.len)));
-            } else if (row == mid + 2) {
-                const pad_l = (rect.w -| @as(u16, @intCast(hint.len))) / 2;
-                pos += tui.pad(buf[pos..], pad_l);
-                pos += style.dim(buf[pos..]);
-                pos += style.cp(buf[pos..], "Press ");
-                pos += style.reset(buf[pos..]);
-                pos += style.boldColored(buf[pos..], .cyan, "a");
-                pos += style.dim(buf[pos..]);
-                pos += style.cp(buf[pos..], " to add your first secret");
-                pos += style.reset(buf[pos..]);
-                pos += tui.pad(buf[pos..], rect.w -| pad_l -| @as(u16, @intCast(hint.len)));
-            } else {
-                pos += tui.pad(buf[pos..], rect.w);
-            }
+        while (row < visible) : (row += 1) {
+            const ch = if (row >= thumb_top and row < thumb_top + @as(u16, @intCast(thumb_h)))
+                style.box.scrollbar_thumb
+            else
+                style.box.scrollbar_track;
+            _ = scr.write(rect.y + row, col, ch, .{ .dim = true });
         }
-        return pos;
     }
 
-    fn renderStatusBar(self: *const State, buf: []u8, rect: tui.Rect) usize {
+    fn drawStatusBar(self: *const State, scr: *Screen, rect: tui.Rect) void {
         const items_show = [_]tui.StatusBar.Item{
             .{ .key = "q", .label = "quit" },
             .{ .key = "/", .label = "search" },
@@ -511,8 +487,9 @@ const State = struct {
         };
         const bar = tui.StatusBar{
             .items = if (self.show_values) &items_show else &items_hide,
+            .transparent = true,
         };
-        return bar.render(buf, rect);
+        bar.draw(scr, rect);
     }
 };
 
@@ -522,7 +499,7 @@ const State = struct {
 
 const FieldIdx = enum(u2) { name = 0, value = 1, desc = 2 };
 
-fn addSecretModal(tty: std.fs.File, tty_fd: posix.fd_t, store: *secrets_mod.SecretsStore, kind: secrets_mod.SecretKind, dir: []const u8, ts: TermSize) bool {
+fn addSecretModal(tty: std.fs.File, tty_fd: posix.fd_t, store: *secrets_mod.SecretsStore, kind: secrets_mod.SecretKind, dir: []const u8, ts: TermSize, scr: *Screen) bool {
     var fields: [3]tui.Input = .{ .{}, .{}, .{} };
     const labels = [3][]const u8{ "Name", "Value", "Description" };
     const placeholders = [3][]const u8{ "SECRET_NAME", "secret value", "optional description" };
@@ -531,12 +508,12 @@ fn addSecretModal(tty: std.fs.File, tty_fd: posix.fd_t, store: *secrets_mod.Secr
     fields[@intFromEnum(active)].focused = true;
 
     while (true) {
-        renderModal(tty, "Add Secret", &labels, &fields, active, ts);
+        drawModal(scr, tty,"Add Secret", &labels, &fields, active, ts);
         const key = keys.readKeyFromFd(tty_fd) orelse return false;
         switch (key) {
-            .up => {
+            .up, .shift_tab => {
                 fields[@intFromEnum(active)].focused = false;
-                active = if (@intFromEnum(active) > 0) @enumFromInt(@intFromEnum(active) - 1) else active;
+                active = if (@intFromEnum(active) > 0) @enumFromInt(@intFromEnum(active) - 1) else .desc;
                 fields[@intFromEnum(active)].focused = true;
             },
             .down, .tab => {
@@ -556,7 +533,7 @@ fn addSecretModal(tty: std.fs.File, tty_fd: posix.fd_t, store: *secrets_mod.Secr
     }
 }
 
-fn editSecretModal(tty: std.fs.File, tty_fd: posix.fd_t, store: *secrets_mod.SecretsStore, idx: usize, ts: TermSize) bool {
+fn editSecretModal(tty: std.fs.File, tty_fd: posix.fd_t, store: *secrets_mod.SecretsStore, idx: usize, ts: TermSize, scr: *Screen) bool {
     if (idx >= store.count) return false;
     const sec = &store.secrets[idx];
 
@@ -570,12 +547,12 @@ fn editSecretModal(tty: std.fs.File, tty_fd: posix.fd_t, store: *secrets_mod.Sec
     fields[@intFromEnum(active)].focused = true;
 
     while (true) {
-        renderModal(tty, "Edit Secret", &labels, &fields, active, ts);
+        drawModal(scr, tty,"Edit Secret", &labels, &fields, active, ts);
         const key = keys.readKeyFromFd(tty_fd) orelse return false;
         switch (key) {
-            .up => {
+            .up, .shift_tab => {
                 fields[@intFromEnum(active)].focused = false;
-                active = if (@intFromEnum(active) > 0) @enumFromInt(@intFromEnum(active) - 1) else active;
+                active = if (@intFromEnum(active) > 0) @enumFromInt(@intFromEnum(active) - 1) else .desc;
                 fields[@intFromEnum(active)].focused = true;
             },
             .down, .tab => {
@@ -599,14 +576,12 @@ fn editSecretModal(tty: std.fs.File, tty_fd: posix.fd_t, store: *secrets_mod.Sec
     }
 }
 
-fn renderModal(tty: std.fs.File, title: []const u8, labels: *const [3][]const u8, fields: *const [3]tui.Input, active: FieldIdx, ts: TermSize) void {
-    var buf: [8192]u8 = undefined;
-    var pos: usize = 0;
-    const cols: u16 = @intCast(@min(ts.cols, 1000));
-    const rows: u16 = @intCast(@min(ts.rows, 500));
-    const screen = tui.Rect.fromSize(cols, rows);
+fn drawModal(scr: *Screen, tty: std.fs.File, title: []const u8, labels: *const [3][]const u8, fields: *const [3]tui.Input, active: FieldIdx, ts: TermSize) void {
+    const cols: u16 = @intCast(@min(ts.cols, Screen.max_cols));
+    const rows: u16 = @intCast(@min(ts.rows, Screen.max_rows));
+    const scr_rect = tui.Rect.fromSize(cols, rows);
 
-    // Popup frame
+    // Draw the popup frame
     const popup = tui.Popup{
         .title = title,
         .width = .{ .fixed = @min(56, cols -| 4) },
@@ -614,12 +589,12 @@ fn renderModal(tty: std.fs.File, title: []const u8, labels: *const [3][]const u8
         .border_color = .bright_black,
         .title_color = .white,
     };
-    pos += popup.render(buf[pos..], screen);
+    popup.draw(scr, scr_rect);
 
     // Content inside popup
-    const content = popup.contentRect(screen);
+    const content = popup.contentRect(scr_rect);
     if (content.w < 4 or content.h < 5) {
-        tty.writeAll(buf[0..pos]) catch {};
+        scr.flush(tty);
         return;
     }
 
@@ -628,68 +603,46 @@ fn renderModal(tty: std.fs.File, title: []const u8, labels: *const [3][]const u8
     for (labels) |l| max_label = @max(max_label, @as(u16, @intCast(l.len)));
 
     // Field rows (with 1 row gap at top)
-    var cursor_row: u16 = 0;
-    var cursor_col: u16 = 0;
-
     for (0..3) |fi| {
         const field_y = content.y + 1 + @as(u16, @intCast(fi));
         const is_active = @intFromEnum(active) == fi;
         const label = labels[fi];
 
-        pos += style.moveTo(buf[pos..], field_y, content.x);
-
-        // Label (right-aligned within max_label width)
+        // Label (right-aligned)
         const lpad = max_label - @as(u16, @intCast(label.len));
-        pos += tui.pad(buf[pos..], lpad);
-        if (is_active) {
-            pos += style.fg(buf[pos..], .cyan);
-        } else {
-            pos += style.fg(buf[pos..], .white);
-        }
-        pos += tui.clipText(buf[pos..], label, @intCast(label.len));
-        pos += style.reset(buf[pos..]);
-        pos += style.cp(buf[pos..], "  ");
+        scr.pad(field_y, content.x, lpad, .{});
+        const label_style: Screen.Style = if (is_active) .{ .fg = .cyan } else .{ .fg = .white };
+        _ = scr.write(field_y, content.x + lpad, label, label_style);
+        scr.pad(field_y, content.x + max_label, 2, .{});
 
         // Input field
         const field_x = content.x + max_label + 2;
         const field_w = content.w -| max_label -| 2;
-        const field_rect = tui.Rect{
+        fields[fi].draw(scr, tui.Rect{
             .x = field_x,
             .y = field_y,
             .w = field_w,
             .h = 1,
-        };
-        pos += fields[fi].render(buf[pos..], field_rect);
-
-        if (is_active) {
-            cursor_row = field_y;
-            cursor_col = field_x + @as(u16, @intCast(fields[fi].cursor));
-        }
+        });
     }
 
     // Help row
-    const help_y = content.y + content.h - 1;
     const help_bar = tui.StatusBar{
         .items = &.{
             .{ .key = "Tab", .label = "next" },
             .{ .key = "Enter", .label = "save" },
             .{ .key = "Esc", .label = "cancel" },
         },
+        .transparent = true,
     };
-    pos += help_bar.render(buf[pos..], tui.Rect{
+    help_bar.draw(scr, tui.Rect{
         .x = content.x,
-        .y = help_y,
+        .y = content.y + content.h - 1,
         .w = content.w,
         .h = 1,
     });
 
-    // Position cursor at active field
-    if (cursor_row > 0) {
-        pos += style.showCursor(buf[pos..]);
-        pos += style.moveTo(buf[pos..], cursor_row, cursor_col);
-    }
-
-    tty.writeAll(buf[0..pos]) catch {};
+    scr.flush(tty);
 }
 
 // ---------------------------------------------------------------------------

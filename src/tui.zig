@@ -46,6 +46,9 @@ pub const clipTextUnicode = @import("tui/core.zig").clipTextUnicode;
 pub const displayWidth = @import("tui/core.zig").displayWidth;
 pub const unicode = @import("tui/core.zig").unicode;
 
+// Screen (double-buffered rendering)
+pub const Screen = @import("tui/Screen.zig");
+
 // Components
 pub const Text = @import("tui/Text.zig");
 pub const Input = @import("tui/Input.zig");
@@ -63,6 +66,7 @@ pub const StatusBar = @import("tui/Box.zig").StatusBar;
 test {
     _ = @import("tui/core.zig");
     _ = @import("tui/unicode.zig");
+    _ = @import("tui/Screen.zig");
     _ = @import("tui/Text.zig");
     _ = @import("tui/Box.zig");
     _ = @import("tui/Input.zig");
