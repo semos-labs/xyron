@@ -33,10 +33,17 @@ const PersistentProjectInfo = struct {
     project_root_len: usize = 0,
     fingerprint: u64 = 0,
     status: ctx.ProjectStatus = .no_project,
+    /// Modification time of xyron.toml used to detect config changes between commands.
+    manifest_mtime: i128 = 0,
 
     fn projectId(self: *const PersistentProjectInfo) ?[]const u8 {
         if (self.project_id_len == 0) return null;
         return self.project_id_buf[0..self.project_id_len];
+    }
+
+    fn projectRoot(self: *const PersistentProjectInfo) ?[]const u8 {
+        if (self.project_root_len == 0) return null;
+        return self.project_root_buf[0..self.project_root_len];
     }
 
     fn setFrom(self: *PersistentProjectInfo, active: *const ctx.ActiveContext) void {
@@ -56,6 +63,22 @@ const PersistentProjectInfo = struct {
         } else {
             self.project_root_len = 0;
         }
+        // Snapshot current manifest mtime
+        self.manifest_mtime = self.statManifestMtime();
+    }
+
+    /// Stat xyron.toml in the project root and return its mtime.
+    fn statManifestMtime(self: *const PersistentProjectInfo) i128 {
+        const root = self.projectRoot() orelse return 0;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const manifest_path = std.fmt.bufPrint(&buf, "{s}/xyron.toml", .{root}) catch return 0;
+        return statFileMtime(manifest_path);
+    }
+
+    /// Check if the project config files have changed since last snapshot.
+    fn configChanged(self: *const PersistentProjectInfo) bool {
+        if (self.status == .no_project) return false;
+        return self.statManifestMtime() != self.manifest_mtime;
     }
 
     /// Build a lightweight ActiveContext for transition detection (no arena pointers).
@@ -68,6 +91,15 @@ const PersistentProjectInfo = struct {
         return ac;
     }
 };
+
+/// Stat a file and return its mtime, or 0 if unavailable.
+fn statFileMtime(path: []const u8) i128 {
+    if (path.len == 0) return 0;
+    const file = std.fs.cwd().openFile(path, .{}) catch return 0;
+    defer file.close();
+    const stat = file.stat() catch return 0;
+    return stat.mtime;
+}
 
 /// Persistent state for a shell session's project context.
 /// Lives on the Shell struct — one per session.
@@ -86,6 +118,12 @@ pub const SessionProjectState = struct {
             .applied_keys = std.StringArrayHashMap([]const u8).init(allocator),
             .allocator = allocator,
         };
+    }
+
+    /// Check if the project config (xyron.toml) has been modified since
+    /// the last resolution. Used to detect edits without a directory change.
+    pub fn projectConfigChanged(self: *const SessionProjectState) bool {
+        return self.persistent.configChanged();
     }
 
     /// Handle a directory change. Resolves the project at `new_cwd`,

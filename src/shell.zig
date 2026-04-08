@@ -543,6 +543,9 @@ pub const Shell = struct {
             self.attyx.cwdChanged(cwd_before, cwd_after);
             lua_hooks.fireCwdChange(self.lua, cwd_before, cwd_after, types.timestampMs());
             self.handleProjectChange(cwd_after, stdout);
+        } else if (self.project_state.projectConfigChanged()) {
+            // Config file (xyron.toml) was modified — re-resolve project env
+            self.handleProjectChange(cwd_after, stdout);
         }
     }
 
