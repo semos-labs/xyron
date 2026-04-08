@@ -1,7 +1,8 @@
 // fz.zig — Fuzzy finder with full-screen TUI and inline modes.
 //
-// Full-screen (default): alternate screen buffer, bottom-up layout,
+// Full-screen (default): alternate screen, bottom-up layout,
 // status bar, multi-select, match highlighting, file type colors.
+// Uses Screen for flicker-free double-buffered rendering.
 //
 // Inline (--inline or embedded): renders below current line,
 // no alternate screen. For use in pipelines or embedding.
@@ -18,30 +19,29 @@ const posix = std.posix;
 const c = std.c;
 const fuzzy_mod = @import("../fuzzy.zig");
 const style = @import("../style.zig");
+const tui = @import("../tui.zig");
+const keys = @import("../keys.zig");
 const Result = @import("mod.zig").BuiltinResult;
+
+const Screen = tui.Screen;
+const Key = keys.Key;
 
 const MAX_ITEMS: usize = 8192;
 const MAX_LINE: usize = 512;
-const MAX_FILTER: usize = 256;
 
 const Options = struct {
     multi: bool = false,
     inline_mode: bool = false,
     preview: bool = false,
-    preview_cmd: ?[]const u8 = null, // custom preview command ({} = selected item)
+    preview_cmd: ?[]const u8 = null,
 };
 
 pub fn run(args: []const []const u8, stdout: std.fs.File) Result {
     const opts = parseOptions(args);
-
     var items: ItemList = .{};
     collectFiles(".", &items, 0);
-
     if (items.count == 0) return .{ .exit_code = 1 };
-
-    if (runInteractive(&items, opts, stdout)) {
-        return .{};
-    }
+    if (runInteractive(&items, opts, stdout)) return .{};
     return .{ .exit_code = 130 };
 }
 
@@ -51,8 +51,6 @@ pub fn runFromPipe(args: []const []const u8) void {
     const stdin = std.fs.File{ .handle = posix.STDIN_FILENO };
 
     var items: ItemList = .{};
-
-    // Read piped input
     var read_buf: [524288]u8 = undefined;
     var total: usize = 0;
     while (total < read_buf.len) {
@@ -60,19 +58,14 @@ pub fn runFromPipe(args: []const []const u8) void {
         if (n == 0) break;
         total += n;
     }
-
     var iter = std.mem.splitScalar(u8, read_buf[0..total], '\n');
     while (iter.next()) |line| {
         const trimmed = std.mem.trimRight(u8, line, "\r");
         if (trimmed.len == 0) continue;
         items.add(trimmed);
     }
-
     if (items.count == 0) std.process.exit(1);
-
-    if (runInteractive(&items, opts, stdout)) {
-        std.process.exit(0);
-    }
+    if (runInteractive(&items, opts, stdout)) std.process.exit(0);
     std.process.exit(130);
 }
 
@@ -99,33 +92,37 @@ const ItemList = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Interactive picker (both modes)
+// Interactive picker
 // ---------------------------------------------------------------------------
 
 fn runInteractive(items: *const ItemList, opts: Options, stdout: std.fs.File) bool {
-    // Open /dev/tty for interactive I/O (stdout might be piped)
     const tty_fd = posix.openZ("/dev/tty", .{ .ACCMODE = .RDWR }, 0) catch return false;
     defer posix.close(tty_fd);
     const tty = std.fs.File{ .handle = tty_fd };
 
-    // Raw mode on tty
-    var orig: std.c.termios = undefined;
-    _ = std.c.tcgetattr(tty_fd, &orig);
+    var orig: c.termios = undefined;
+    _ = c.tcgetattr(tty_fd, &orig);
     var raw = orig;
     raw.lflag.ECHO = false;
     raw.lflag.ICANON = false;
     raw.lflag.ISIG = false;
     raw.cc[@intFromEnum(posix.V.MIN)] = 1;
     raw.cc[@intFromEnum(posix.V.TIME)] = 0;
-    _ = std.c.tcsetattr(tty_fd, .NOW, &raw);
-    defer _ = std.c.tcsetattr(tty_fd, .NOW, &orig);
+    _ = c.tcsetattr(tty_fd, .NOW, &raw);
+    defer _ = c.tcsetattr(tty_fd, .NOW, &orig);
 
     const ts = getTermSize(tty_fd);
     const use_tui = !opts.inline_mode;
 
-    // Alternate screen for TUI mode
     var alt_screen_active = false;
-    if (use_tui) { tty.writeAll("\x1b[?1049h\x1b[?25h") catch {}; alt_screen_active = true; }
+    if (use_tui) {
+        var ebuf: [64]u8 = undefined;
+        var ep: usize = 0;
+        ep += style.altScreenOn(ebuf[ep..]);
+        ep += style.showCursor(ebuf[ep..]);
+        tty.writeAll(ebuf[0..ep]) catch {};
+        alt_screen_active = true;
+    }
     defer if (alt_screen_active) tty.writeAll("\x1b[?1049l") catch {};
 
     var state = PickerState{
@@ -133,29 +130,52 @@ fn runInteractive(items: *const ItemList, opts: Options, stdout: std.fs.File) bo
         .term_rows = ts.rows,
         .term_cols = ts.cols,
         .multi = opts.multi,
-        .preview = opts.preview and use_tui, // preview only in TUI mode
+        .preview = opts.preview and use_tui,
         .preview_cmd = opts.preview_cmd,
         .tui = use_tui,
     };
-
+    state.input.prompt = "> ";
+    state.input.prompt_color = .cyan;
+    state.input.focused = true;
     state.score();
-    state.render(tty);
+
+    // Screen for TUI mode
+    var screen: Screen = undefined;
+    if (use_tui) {
+        screen = Screen.init(
+            @intCast(@min(ts.cols, Screen.max_cols)),
+            @intCast(@min(ts.rows, Screen.max_rows)),
+        );
+        state.drawTui(&screen);
+        screen.flush(tty);
+    } else {
+        state.renderInline(tty);
+    }
 
     while (true) {
-        var key_buf: [1]u8 = undefined;
-        const rc = c.read(tty_fd, &key_buf, 1);
-        if (rc <= 0) break;
+        const key = keys.readKeyFromFd(tty_fd) orelse break;
 
-        switch (key_buf[0]) {
-            10, 13 => { // Enter
-                // Exit alternate screen BEFORE writing result,
-                // otherwise the output gets erased by screen restore.
-                if (alt_screen_active) {
-                    tty.writeAll("\x1b[?1049l") catch {};
-                    alt_screen_active = false;
-                }
+        if (key == .resize) {
+            const new_ts = getTermSize(tty_fd);
+            state.term_rows = new_ts.rows;
+            state.term_cols = new_ts.cols;
+            if (use_tui) {
+                screen.resize(
+                    @intCast(@min(new_ts.cols, Screen.max_cols)),
+                    @intCast(@min(new_ts.rows, Screen.max_rows)),
+                );
+                state.drawTui(&screen);
+                screen.flush(tty);
+            } else {
+                state.renderInline(tty);
+            }
+            continue;
+        }
+
+        switch (key) {
+            .enter => {
+                if (alt_screen_active) { tty.writeAll("\x1b[?1049l") catch {}; alt_screen_active = false; }
                 if (!use_tui) state.clearInline(tty);
-                // Output selected items
                 if (opts.multi and state.selected_count > 0) {
                     for (0..items.count) |i| {
                         if (state.selected_map[i]) {
@@ -172,56 +192,17 @@ fn runInteractive(items: *const ItemList, opts: Options, stdout: std.fs.File) bo
                 }
                 return true;
             },
-            27 => { // Escape sequence
-                var seq: [2]u8 = undefined;
-                const rc2 = c.read(tty_fd, &seq, 2);
-                if (rc2 == 2 and seq[0] == '[') {
-                    switch (seq[1]) {
-                        'A' => state.moveUp(), // Up
-                        'B' => state.moveDown(), // Down
-                        'Z' => state.toggleSelect(), // Shift-Tab
-                        else => {},
-                    }
-                } else if (rc2 <= 0) {
-                    // Plain Escape
-                    if (!use_tui) state.clearInline(tty);
-                    return false;
-                }
-            },
-            3 => { // Ctrl+C
+            .escape, .ctrl_c => {
                 if (!use_tui) state.clearInline(tty);
                 return false;
             },
-            9 => state.toggleSelect(), // Tab — toggle multi-select
-            21 => { // Ctrl+U — clear filter
-                state.filter_len = 0;
-                state.cursor = 0;
-                state.scroll = 0;
-                state.score();
-            },
-            23 => { // Ctrl+W — delete word backward
-                if (state.filter_len > 0) {
-                    var end = state.filter_len;
-                    while (end > 0 and state.filter[end - 1] == ' ') : (end -= 1) {}
-                    while (end > 0 and state.filter[end - 1] != ' ' and state.filter[end - 1] != '/') : (end -= 1) {}
-                    state.filter_len = end;
-                    state.cursor = 0;
-                    state.scroll = 0;
-                    state.score();
-                }
-            },
-            127, 8 => { // Backspace
-                if (state.filter_len > 0) {
-                    state.filter_len -= 1;
-                    state.cursor = 0;
-                    state.scroll = 0;
-                    state.score();
-                }
-            },
-            else => |byte| {
-                if (byte >= 32 and byte < 127 and state.filter_len < MAX_FILTER) {
-                    state.filter[state.filter_len] = byte;
-                    state.filter_len += 1;
+            .up => state.moveUp(),
+            .down => state.moveDown(),
+            .tab => state.toggleSelect(),
+            .shift_tab => state.toggleSelect(),
+            else => {
+                const action = state.input.handleKey(key);
+                if (action == .changed) {
                     state.cursor = 0;
                     state.scroll = 0;
                     state.score();
@@ -229,7 +210,13 @@ fn runInteractive(items: *const ItemList, opts: Options, stdout: std.fs.File) bo
             },
         }
 
-        state.render(tty);
+        if (use_tui) {
+            screen.beginFrame();
+            state.drawTui(&screen);
+            screen.flush(tty);
+        } else {
+            state.renderInline(tty);
+        }
     }
 
     if (!use_tui) state.clearInline(tty);
@@ -242,8 +229,7 @@ fn runInteractive(items: *const ItemList, opts: Options, stdout: std.fs.File) bo
 
 const PickerState = struct {
     items: *const ItemList,
-    filter: [MAX_FILTER]u8 = undefined,
-    filter_len: usize = 0,
+    input: tui.Input = .{},
     scored_idx: [MAX_ITEMS]usize = undefined,
     scored_vals: [MAX_ITEMS]i32 = undefined,
     scored_positions: [MAX_ITEMS][fuzzy_mod.max_positions]u8 = undefined,
@@ -262,13 +248,13 @@ const PickerState = struct {
     rendered_lines: usize = 0,
 
     fn visibleRows(self: *const PickerState) usize {
-        if (self.tui) return if (self.term_rows > 3) self.term_rows - 2 else 1; // status + prompt
+        if (self.tui) return if (self.term_rows > 3) self.term_rows - 2 else 1;
         return @min(20, if (self.term_rows > 5) self.term_rows - 4 else 5);
     }
 
     fn score(self: *PickerState) void {
         self.scored_count = 0;
-        const f = self.filter[0..self.filter_len];
+        const f = self.input.value();
         for (0..self.items.count) |i| {
             const text = self.items.get(i);
             if (f.len == 0) {
@@ -300,7 +286,6 @@ const PickerState = struct {
 
     fn moveUp(self: *PickerState) void {
         if (self.tui) {
-            // TUI: up moves toward top of list (lower index visually at bottom)
             if (self.cursor + 1 < self.scored_count) self.cursor += 1;
             const vis = self.visibleRows();
             if (self.cursor >= self.scroll + vis) self.scroll = self.cursor - vis + 1;
@@ -334,23 +319,16 @@ const PickerState = struct {
         self.moveDown();
     }
 
-    fn render(self: *PickerState, tty: std.fs.File) void {
-        if (self.tui) self.renderTui(tty) else self.renderInline(tty);
-    }
+    // ----- TUI (full-screen) rendering via Screen -----
 
-    // ----- TUI (full-screen) rendering -----
-
-    fn renderTui(self: *PickerState, tty: std.fs.File) void {
-        var buf: [32768]u8 = undefined;
-        var pos: usize = 0;
-
-        pos += cp(buf[pos..], "\x1b[H\x1b[?25l");
-
+    fn drawTui(self: *const PickerState, scr: *Screen) void {
+        const rows = scr.height;
+        const cols = scr.width;
         const vis = self.visibleRows();
         const visible_end = @min(self.scroll + vis, self.scored_count);
-        const list_width = if (self.preview) self.term_cols / 2 else self.term_cols;
+        const list_width: u16 = if (self.preview) cols / 2 else cols;
 
-        // Load preview content if enabled
+        // Load preview
         var preview_lines: [64][]const u8 = undefined;
         var preview_count: usize = 0;
         var preview_buf: [4096]u8 = undefined;
@@ -360,87 +338,121 @@ const PickerState = struct {
         }
 
         const rendered = visible_end - self.scroll;
-        const empty = if (self.term_rows > rendered + 2) self.term_rows - rendered - 2 else 0;
+        const empty: u16 = if (rows > @as(u16, @intCast(rendered)) + 2) rows - @as(u16, @intCast(rendered)) - 2 else 0;
 
-        // Empty rows
+        // Empty rows at top (clear + preview)
+        var screen_row: u16 = 1;
         for (0..empty) |row_i| {
-            pos += cp(buf[pos..], "\x1b[2K");
+            scr.pad(screen_row, 1, list_width, .{});
             if (self.preview) {
-                // Draw preview separator + content
-                self.renderPreviewRow(&buf, &pos, list_width, row_i, &preview_lines, preview_count, empty);
+                self.drawPreviewCell(scr, screen_row, list_width, @intCast(row_i), &preview_lines, preview_count);
             }
-            pos += cp(buf[pos..], "\r\n");
+            screen_row += 1;
         }
 
-        // Items (bottom-up)
+        // Items (bottom-up: highest index at top)
         var ri: usize = visible_end;
-        var row_from_top: usize = empty;
         while (ri > self.scroll) {
             ri -= 1;
-            pos += cp(buf[pos..], "\x1b[2K");
             const item_idx = self.scored_idx[ri];
             const text = self.items.get(item_idx);
             const is_cursor = (ri == self.cursor);
             const is_selected = self.selected_map[item_idx];
 
+            var col: u16 = 1;
+
+            // Indicator
             if (is_cursor) {
-                pos += cp(buf[pos..], "\x1b[1;36m>\x1b[0m ");
+                col += scr.write(screen_row, col, ">", .{ .fg = .cyan, .bold = true });
+                scr.pad(screen_row, col, 1, .{});
+                col += 1;
             } else if (is_selected) {
-                pos += cp(buf[pos..], "\x1b[32m*\x1b[0m ");
+                col += scr.write(screen_row, col, "*", .{ .fg = .green });
+                scr.pad(screen_row, col, 1, .{});
+                col += 1;
             } else {
-                pos += cp(buf[pos..], "  ");
+                scr.pad(screen_row, col, 2, .{});
+                col += 2;
             }
 
-            const base = if (is_cursor) "\x1b[1;37m" else fileColor(text);
-            const hl = if (is_cursor) "\x1b[1;33m" else "\x1b[1;31m";
-            pos += cp(buf[pos..], base);
-            renderHighlightedText(
-                &buf, &pos, text,
-                list_width -| 4,
-                &self.scored_positions[ri],
-                self.scored_match_counts[ri],
-                base, hl,
-            );
-            pos += cp(buf[pos..], "\x1b[0m");
+            // Highlighted text with file color
+            const max_text: u16 = list_width -| 4;
+            col += self.drawHighlightedItem(scr, screen_row, col, text, max_text, ri, is_cursor);
+            scr.pad(screen_row, col, list_width -| (col - 1), .{});
 
+            // Preview column
             if (self.preview) {
-                self.renderPreviewRow(&buf, &pos, list_width, row_from_top, &preview_lines, preview_count, empty);
+                self.drawPreviewCell(scr, screen_row, list_width, @intCast(screen_row - 1), &preview_lines, preview_count);
             }
-            pos += cp(buf[pos..], "\r\n");
-            row_from_top += 1;
-
-            if (pos > buf.len - 1024) {
-                tty.writeAll(buf[0..pos]) catch {};
-                pos = 0;
-            }
+            screen_row += 1;
         }
 
-        // Status bar
-        pos += cp(buf[pos..], "\x1b[2K\x1b[2m");
-        const status = std.fmt.bufPrint(buf[pos..], "  {d}/{d}", .{ self.scored_count, self.items.count }) catch "";
-        pos += status.len;
-        if (self.multi) {
-            const sel = std.fmt.bufPrint(buf[pos..], " ({d})", .{self.selected_count}) catch "";
-            pos += sel.len;
-        }
-        pos += cp(buf[pos..], " ");
-        const sel_extra: usize = if (self.multi) 6 else 0;
-        const status_vis = status.len + sel_extra + 2;
-        var fi: usize = status_vis;
-        while (fi < self.term_cols) : (fi += 1) {
-            pos += cp(buf[pos..], "\xe2\x94\x80");
-        }
-        pos += cp(buf[pos..], "\x1b[0m\r\n");
+        // Status bar: "  N/M ────────"
+        self.drawStatus(scr, screen_row, cols);
+        screen_row += 1;
 
-        // Prompt
-        pos += cp(buf[pos..], "\x1b[2K\x1b[1;36m> \x1b[0m");
-        pos += cp(buf[pos..], self.filter[0..self.filter_len]);
-        pos += cp(buf[pos..], "\x1b[?25h");
-
-        tty.writeAll(buf[0..pos]) catch {};
+        // Prompt (bottom row)
+        self.input.draw(scr, tui.Rect{ .x = 1, .y = screen_row, .w = cols, .h = 1 });
     }
 
-    // ----- Inline rendering -----
+    fn drawHighlightedItem(self: *const PickerState, scr: *Screen, row: u16, start_col: u16, text: []const u8, max_w: u16, scored_i: usize, is_cursor: bool) u16 {
+        const len = @min(text.len, max_w);
+        const positions = &self.scored_positions[scored_i];
+        const match_count = self.scored_match_counts[scored_i];
+
+        const base_color: ?style.Color = if (is_cursor) .bright_white else fileColorEnum(text);
+        const hl_color: style.Color = if (is_cursor) .yellow else .red;
+        const base_bold = is_cursor;
+
+        var col = start_col;
+        for (0..len) |ci| {
+            var is_match = false;
+            for (0..match_count) |mi| {
+                if (positions[mi] == ci) { is_match = true; break; }
+            }
+            const s: Screen.Style = if (is_match)
+                .{ .fg = hl_color, .bold = true }
+            else
+                .{ .fg = base_color, .bold = base_bold };
+            scr.putChar(row, col, text[ci], s);
+            col += 1;
+        }
+        return col - start_col;
+    }
+
+    fn drawPreviewCell(self: *const PickerState, scr: *Screen, row: u16, list_width: u16, content_row: u16, preview_lines: *const [64][]const u8, preview_count: usize) void {
+        _ = self;
+        const sep_col = list_width + 1;
+        _ = scr.write(row, sep_col, style.box.vertical, .{ .dim = true });
+        scr.pad(row, sep_col + 1, 1, .{});
+        const preview_col = sep_col + 2;
+        const preview_w = scr.width -| preview_col + 1;
+        if (content_row < preview_count) {
+            const line = preview_lines[content_row];
+            const tw: u16 = @intCast(@min(line.len, preview_w));
+            _ = scr.write(row, preview_col, line[0..tw], .{ .dim = true });
+            scr.pad(row, preview_col + tw, preview_w -| tw, .{});
+        } else {
+            scr.pad(row, preview_col, preview_w, .{});
+        }
+    }
+
+    fn drawStatus(self: *const PickerState, scr: *Screen, row: u16, cols: u16) void {
+        var col: u16 = 1;
+        var cnt_buf: [32]u8 = undefined;
+        const cnt_str = std.fmt.bufPrint(&cnt_buf, "  {d}/{d}", .{ self.scored_count, self.items.count }) catch "";
+        col += scr.write(row, col, cnt_str, .{ .dim = true });
+        if (self.multi) {
+            var sel_buf: [16]u8 = undefined;
+            const sel_str = std.fmt.bufPrint(&sel_buf, " ({d})", .{self.selected_count}) catch "";
+            col += scr.write(row, col, sel_str, .{ .dim = true });
+        }
+        scr.pad(row, col, 1, .{ .dim = true });
+        col += 1;
+        scr.hline(row, col, cols -| col + 1, .{ .dim = true });
+    }
+
+    // ----- Inline rendering (raw ANSI, unchanged) -----
 
     fn renderInline(self: *PickerState, tty: std.fs.File) void {
         var buf: [8192]u8 = undefined;
@@ -450,7 +462,9 @@ const PickerState = struct {
 
         // Prompt
         pos += cp(buf[pos..], "\r\x1b[K\x1b[1;36m> \x1b[0m");
-        pos += cp(buf[pos..], self.filter[0..self.filter_len]);
+        const filter = self.input.value();
+        @memcpy(buf[pos..][0..filter.len], filter);
+        pos += filter.len;
         pos += cp(buf[pos..], "\x1b[2m");
         const cnt = std.fmt.bufPrint(buf[pos..], "  {d}/{d}", .{ self.scored_count, self.items.count }) catch "";
         pos += cnt.len;
@@ -487,7 +501,6 @@ const PickerState = struct {
             if (is_cursor) pos += cp(buf[pos..], " \x1b[0m");
         }
 
-        // Clear leftover
         var vi = visible_end - self.scroll;
         while (vi < self.rendered_lines) : (vi += 1) {
             pos += cp(buf[pos..], "\r\n\x1b[K");
@@ -495,40 +508,11 @@ const PickerState = struct {
         self.rendered_lines = visible_end - self.scroll;
 
         pos += cp(buf[pos..], "\x1b[u\x1b[?25h");
-        const cursor_col = 2 + self.filter_len;
+        const cursor_col = 2 + self.input.value().len;
         const cseq = std.fmt.bufPrint(buf[pos..], "\r\x1b[{d}C", .{cursor_col}) catch "";
         pos += cseq.len;
 
         tty.writeAll(buf[0..pos]) catch {};
-    }
-
-    /// Render the preview column for a given screen row.
-    fn renderPreviewRow(
-        self: *const PickerState,
-        buf: *[32768]u8,
-        pos: *usize,
-        list_width: usize,
-        row: usize,
-        preview_lines: *const [64][]const u8,
-        preview_count: usize,
-        _empty: usize,
-    ) void {
-        _ = _empty;
-        // Move to preview column
-        const col_seq = std.fmt.bufPrint(buf[pos.*..], "\x1b[{d}G", .{list_width + 1}) catch "";
-        pos.* += col_seq.len;
-        // Separator
-        pos.* += cp(buf[pos.*..], "\x1b[2m\xe2\x94\x82\x1b[0m ");
-        // Preview content
-        const preview_width = if (self.term_cols > list_width + 3) self.term_cols - list_width - 3 else 1;
-        if (row < preview_count) {
-            const line = preview_lines[row];
-            const tl = @min(line.len, preview_width);
-            pos.* += cp(buf[pos.*..], "\x1b[2m");
-            @memcpy(buf[pos.*..][0..tl], line[0..tl]);
-            pos.* += tl;
-            pos.* += cp(buf[pos.*..], "\x1b[0m");
-        }
     }
 
     fn clearInline(self: *PickerState, tty: std.fs.File) void {
@@ -562,7 +546,6 @@ fn collectFiles(dir_path: []const u8, items: *ItemList, depth: usize) void {
     var iter = dir.iterate();
     while (iter.next() catch null) |entry| {
         if (items.count >= MAX_ITEMS) return;
-        // Skip hidden files and common noise
         if (entry.name.len > 0 and entry.name[0] == '.') continue;
         if (std.mem.eql(u8, entry.name, "node_modules")) continue;
         if (std.mem.eql(u8, entry.name, "zig-cache")) continue;
@@ -593,7 +576,7 @@ fn collectFiles(dir_path: []const u8, items: *ItemList, depth: usize) void {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Render text with fuzzy match positions highlighted.
+/// Render highlighted text into a raw ANSI buffer (used by inline mode).
 fn renderHighlightedText(
     buf: []u8,
     pos: *usize,
@@ -608,7 +591,6 @@ fn renderHighlightedText(
     var in_highlight = false;
 
     for (0..len) |ci| {
-        // Check if this character position is a match
         var is_match = false;
         for (0..match_count) |mi| {
             if (positions[mi] == ci) { is_match = true; break; }
@@ -629,7 +611,23 @@ fn renderHighlightedText(
     if (in_highlight) pos.* += cp(buf[pos.*..], "\x1b[0m");
 }
 
-/// Load preview content for an item. Returns line count.
+fn fileColorEnum(path: []const u8) ?style.Color {
+    if (path.len > 0 and path[path.len - 1] == '/') return .blue;
+    if (std.mem.endsWith(u8, path, ".zig")) return .yellow;
+    if (std.mem.endsWith(u8, path, ".lua")) return .magenta;
+    if (std.mem.endsWith(u8, path, ".md")) return .cyan;
+    if (std.mem.endsWith(u8, path, ".json") or std.mem.endsWith(u8, path, ".toml") or
+        std.mem.endsWith(u8, path, ".yaml") or std.mem.endsWith(u8, path, ".yml")) return .green;
+    if (std.mem.endsWith(u8, path, ".sh") or std.mem.endsWith(u8, path, ".bash") or
+        std.mem.endsWith(u8, path, ".py") or std.mem.endsWith(u8, path, ".js") or
+        std.mem.endsWith(u8, path, ".jsx")) return .yellow;
+    if (std.mem.endsWith(u8, path, ".rs") or std.mem.endsWith(u8, path, ".html")) return .red;
+    if (std.mem.endsWith(u8, path, ".go") or std.mem.endsWith(u8, path, ".ts") or
+        std.mem.endsWith(u8, path, ".tsx")) return .cyan;
+    if (std.mem.endsWith(u8, path, ".css") or std.mem.endsWith(u8, path, ".scss")) return .magenta;
+    return .white;
+}
+
 fn loadPreview(
     item: []const u8,
     custom_cmd: ?[]const u8,
@@ -637,19 +635,8 @@ fn loadPreview(
     lines: *[64][]const u8,
 ) usize {
     if (custom_cmd) |cmd_template| {
-        // Custom preview: replace {} with item path
         var cmd_buf: [1024]u8 = undefined;
         var cl: usize = 0;
-        for (cmd_template) |ch| {
-            if (ch == '{' and cl + 1 < cmd_template.len) {
-                // Check for {}
-                const rest = cmd_template[cl..];
-                _ = rest;
-            }
-            if (cl < cmd_buf.len) { cmd_buf[cl] = ch; cl += 1; }
-        }
-        // Simple replacement
-        cl = 0;
         var i: usize = 0;
         while (i < cmd_template.len) {
             if (i + 1 < cmd_template.len and cmd_template[i] == '{' and cmd_template[i + 1] == '}') {
@@ -665,23 +652,16 @@ fn loadPreview(
         return runPreviewCmd(cmd_buf[0..cl], preview_buf, lines);
     }
 
-    // Default: try to read file content
     const file = std.fs.cwd().openFile(item, .{}) catch return 0;
     defer file.close();
-
     const n = file.read(preview_buf) catch return 0;
     if (n == 0) return 0;
 
-    // Check if binary (has null bytes in first 512 bytes)
     const check = @min(n, 512);
     for (preview_buf[0..check]) |ch| {
-        if (ch == 0) {
-            lines[0] = "[binary file]";
-            return 1;
-        }
+        if (ch == 0) { lines[0] = "[binary file]"; return 1; }
     }
 
-    // Split into lines
     var count: usize = 0;
     var line_iter = std.mem.splitScalar(u8, preview_buf[0..n], '\n');
     while (line_iter.next()) |line| {
@@ -720,24 +700,6 @@ fn runPreviewCmd(cmd: []const u8, preview_buf: *[4096]u8, lines: *[64][]const u8
         count += 1;
     }
     return count;
-}
-
-fn fileColor(path: []const u8) []const u8 {
-    if (path.len > 0 and path[path.len - 1] == '/') return "\x1b[1;34m"; // directory
-    if (std.mem.endsWith(u8, path, ".zig")) return "\x1b[33m"; // zig
-    if (std.mem.endsWith(u8, path, ".lua")) return "\x1b[35m"; // lua
-    if (std.mem.endsWith(u8, path, ".md")) return "\x1b[36m"; // markdown
-    if (std.mem.endsWith(u8, path, ".json")) return "\x1b[32m"; // json
-    if (std.mem.endsWith(u8, path, ".toml") or std.mem.endsWith(u8, path, ".yaml") or std.mem.endsWith(u8, path, ".yml")) return "\x1b[32m";
-    if (std.mem.endsWith(u8, path, ".sh") or std.mem.endsWith(u8, path, ".bash")) return "\x1b[33m";
-    if (std.mem.endsWith(u8, path, ".py")) return "\x1b[33m";
-    if (std.mem.endsWith(u8, path, ".rs")) return "\x1b[31m"; // rust
-    if (std.mem.endsWith(u8, path, ".go")) return "\x1b[36m"; // go
-    if (std.mem.endsWith(u8, path, ".ts") or std.mem.endsWith(u8, path, ".tsx")) return "\x1b[34m"; // typescript
-    if (std.mem.endsWith(u8, path, ".js") or std.mem.endsWith(u8, path, ".jsx")) return "\x1b[33m"; // javascript
-    if (std.mem.endsWith(u8, path, ".css") or std.mem.endsWith(u8, path, ".scss")) return "\x1b[35m";
-    if (std.mem.endsWith(u8, path, ".html")) return "\x1b[31m";
-    return "\x1b[37m";
 }
 
 fn parseOptions(args: []const []const u8) Options {
@@ -781,18 +743,10 @@ fn printHelp() void {
         \\
         \\Keys:
         \\  Up/Down                   Navigate
-        \\  Tab                       Toggle selection (multi-select mode)
+        \\  Tab / Shift-Tab           Toggle selection (multi-select mode)
         \\  Enter                     Confirm selection
         \\  Escape / Ctrl+C           Cancel
         \\  Type to filter            Fuzzy search
-        \\
-        \\Examples:
-        \\  fz                        Fuzzy find files
-        \\  fz -p                     Find files with preview
-        \\  fz --multi                Multi-select files
-        \\  ls | fz                   Pick from ls output
-        \\  cat urls.txt | fz         Pick a URL
-        \\  fz --preview-cmd "head -20 {}"   Custom preview
         \\
     ) catch {};
 }
