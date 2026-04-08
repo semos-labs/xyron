@@ -1069,10 +1069,10 @@ fn updateInlineOpts(
         return;
     }
 
-    // Don't show if the only candidate exactly matches what's typed
-    if (s.scored_count == 1) {
-        const only = s.all.items[s.scored_indices[0]].textSlice();
-        if (std.mem.eql(u8, only, ctx.prefix)) {
+    // Don't show if the top candidate exactly matches what's typed
+    {
+        const top = s.all.items[s.scored_indices[0]].textSlice();
+        if (std.mem.eql(u8, top, ctx.prefix)) {
             if (s.active) dismissInline(stdout);
             return;
         }

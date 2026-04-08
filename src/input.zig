@@ -152,11 +152,20 @@ pub fn readLine(
                 continue;
             },
             .enter => {
-                // If overlay is active, accept the selection
+                // If overlay is active, accept the selection — unless typed
+                // text already matches the selected candidate exactly (just
+                // dismiss and execute instead of re-inserting with a space).
                 if (complete_mod.inline_state.active and complete_mod.inline_state.scored_count > 0) {
-                    _ = complete_mod.acceptInline(ed, stdout);
-                    refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
-                    continue;
+                    const s = &complete_mod.inline_state;
+                    const candidate_text = s.all.items[s.scored_indices[s.selected]].textSlice();
+                    const typed = ed.content()[s.word_start..ed.cursor];
+                    if (std.mem.eql(u8, candidate_text, typed)) {
+                        complete_mod.dismissInline(stdout);
+                    } else {
+                        _ = complete_mod.acceptInline(ed, stdout);
+                        refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
+                        continue;
+                    }
                 }
                 ed.mode = .insert;
                 {
@@ -262,24 +271,63 @@ pub fn readLine(
         // Insert mode (or vim disabled)
         var content_changed = false;
         switch (key) {
-            .tab, .ctrl_space => {
+            .ctrl_space => {
+                // Ctrl+Space: trigger/show completion overlay
                 if (overlay.enabled) {
                     if (hl) |ctx| {
                         const ipc_mod = @import("ipc.zig");
                         if (ipc_mod.attyx_connected) {
-                            // IPC mode: send completions to Attyx. Attyx handles
-                            // selection, cycling, and acceptance on its side.
                             complete_mod.triggerInline(ed, stdout, prompt_str, ctx.env, ctx.cache, ctx.help_cache, prompt_lua, ctx);
                             if (!complete_mod.inline_state.active) {
                                 refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
                             }
+                        } else if (!complete_mod.inline_state.active) {
+                            // No IPC, no active overlay: run picker
+                            const result = complete_mod.runPicker(
+                                ed, stdout, prompt_str, ctx.env, ctx.cache,
+                                ctx.help_cache, prompt_lua, ctx,
+                            );
+                            if (result == .interrupted) {
+                                stdout.writeAll("^C\r\n") catch {};
+                                ed.clear();
+                                if (hist) |h| h.resetNavigation();
+                                return .interrupt;
+                            }
+                            content_changed = true;
+                        }
+                    }
+                }
+                if (!content_changed) continue;
+            },
+            .tab => {
+                // Tab: complete (accept selection if overlay active,
+                // otherwise trigger and auto-accept single match)
+                if (overlay.enabled) {
+                    if (hl) |ctx| {
+                        const ipc_mod = @import("ipc.zig");
+                        if (ipc_mod.attyx_connected) {
+                            if (complete_mod.inline_state.active) {
+                                // Accept current selection
+                                if (complete_mod.acceptInline(ed, stdout)) {
+                                    content_changed = true;
+                                }
+                            } else {
+                                // Trigger and auto-accept if single match
+                                complete_mod.triggerInline(ed, stdout, prompt_str, ctx.env, ctx.cache, ctx.help_cache, prompt_lua, ctx);
+                                if (complete_mod.inline_state.active and complete_mod.inline_state.scored_count == 1) {
+                                    if (complete_mod.acceptInline(ed, stdout)) {
+                                        content_changed = true;
+                                    }
+                                }
+                                if (!complete_mod.inline_state.active and !content_changed) {
+                                    refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
+                                }
+                            }
                         } else if (complete_mod.inline_state.active) {
-                            // Inline mode: accept current selection
                             if (complete_mod.acceptInline(ed, stdout)) {
                                 content_changed = true;
                             }
                         } else {
-                            // No IPC, no active overlay: run picker
                             const result = complete_mod.runPicker(
                                 ed, stdout, prompt_str, ctx.env, ctx.cache,
                                 ctx.help_cache, prompt_lua, ctx,
