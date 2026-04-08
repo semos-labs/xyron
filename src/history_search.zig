@@ -2,6 +2,7 @@
 //
 // Alternate-screen TUI matching the history explorer design language.
 // Fuzzy search, deduped entries, duration + relative time display.
+// Uses Screen for flicker-free double-buffered rendering.
 
 const std = @import("std");
 const posix = std.posix;
@@ -10,7 +11,11 @@ const fuzzy = @import("fuzzy.zig");
 const history_db_mod = @import("history_db.zig");
 const prompt_mod = @import("prompt.zig");
 const style = @import("style.zig");
+const tui = @import("tui.zig");
+const keys = @import("keys.zig");
 
+const Screen = tui.Screen;
+const Key = keys.Key;
 const MAX_ENTRIES: usize = 200;
 
 const Entry = struct {
@@ -47,7 +52,7 @@ pub fn run(
     defer posix.close(tty_fd);
     const tty = std.fs.File{ .handle = tty_fd };
 
-    // Raw mode on tty
+    // Raw mode
     var orig: c.termios = undefined;
     _ = c.tcgetattr(tty_fd, &orig);
     var raw = orig;
@@ -60,111 +65,319 @@ pub fn run(
     defer _ = c.tcsetattr(tty_fd, .NOW, &orig);
 
     // Alternate screen
-    tty.writeAll("\x1b[?1049h\x1b[?25h") catch {};
+    {
+        var ebuf: [64]u8 = undefined;
+        var ep: usize = 0;
+        ep += style.altScreenOn(ebuf[ep..]);
+        ep += style.showCursor(ebuf[ep..]);
+        tty.writeAll(ebuf[0..ep]) catch {};
+    }
     var alt_active = true;
-    defer if (alt_active) tty.writeAll("\x1b[?25h\x1b[?1049l") catch {};
+    defer if (alt_active) {
+        var xbuf: [64]u8 = undefined;
+        var xp: usize = 0;
+        xp += style.showCursor(xbuf[xp..]);
+        xp += style.altScreenOff(xbuf[xp..]);
+        tty.writeAll(xbuf[0..xp]) catch {};
+    };
 
     // State
-    var filter: [128]u8 = undefined;
-    var filter_len: usize = 0;
-    var scored_idx: [MAX_ENTRIES]usize = undefined;
-    var scored_vals: [MAX_ENTRIES]i32 = undefined;
-    var scored_count: usize = 0;
-    var selected: usize = 0;
-    var scroll: usize = 0;
+    var state = State{
+        .entries = &entries,
+        .total = total,
+    };
+    state.input.prompt = "> ";
+    state.input.prompt_color = .yellow;
+    state.input.focused = true;
+    state.input.placeholder = "search...";
+    state.rescore();
+
     var ts = getTermSize(tty_fd);
+    var screen = Screen.init(
+        @intCast(@min(ts.cols, Screen.max_cols)),
+        @intCast(@min(ts.rows, Screen.max_rows)),
+    );
 
-    scoreEntries(&entries, total, filter[0..0], &scored_idx, &scored_vals, &scored_count);
-    render(tty, &entries, &scored_idx, scored_count, selected, scroll, filter[0..filter_len], ts);
+    state.draw(&screen);
+    screen.flush(tty);
 
+    // Event loop
     while (true) {
-        var key_buf: [1]u8 = undefined;
-        const rc = c.read(tty_fd, &key_buf, 1);
-        if (rc == -1) {
-            // EINTR from SIGWINCH — resize
+        const key = keys.readKeyFromFd(tty_fd) orelse break;
+
+        if (key == .resize) {
             ts = getTermSize(tty_fd);
-            render(tty, &entries, &scored_idx, scored_count, selected, scroll, filter[0..filter_len], ts);
+            screen.resize(
+                @intCast(@min(ts.cols, Screen.max_cols)),
+                @intCast(@min(ts.rows, Screen.max_rows)),
+            );
+            state.draw(&screen);
+            screen.flush(tty);
             continue;
         }
-        if (rc <= 0) break;
 
-        const max_vis = visibleRows(ts);
-
-        switch (key_buf[0]) {
-            10, 13 => { // Enter — select
-                if (alt_active) { tty.writeAll("\x1b[?25h\x1b[?1049l") catch {}; alt_active = false; }
-                if (scored_count > 0) {
-                    const idx = scored_idx[selected];
+        switch (key) {
+            .enter, .right => {
+                // Select current entry
+                if (alt_active) {
+                    var xbuf: [64]u8 = undefined;
+                    var xp: usize = 0;
+                    xp += style.showCursor(xbuf[xp..]);
+                    xp += style.altScreenOff(xbuf[xp..]);
+                    tty.writeAll(xbuf[0..xp]) catch {};
+                    alt_active = false;
+                }
+                if (state.scored_count > 0) {
+                    const idx = state.scored_idx[state.selected];
                     return .{ .selected = entries[idx].rawSlice() };
                 }
                 return .cancelled;
             },
-            27 => { // Escape / arrows
-                var seq: [2]u8 = undefined;
-                const rc2 = c.read(tty_fd, &seq, 2);
-                if (rc2 == 2 and seq[0] == '[') {
-                    switch (seq[1]) {
-                        'C' => { // Right arrow — select
-                            if (alt_active) { tty.writeAll("\x1b[?25h\x1b[?1049l") catch {}; alt_active = false; }
-                            if (scored_count > 0) {
-                                const idx2 = scored_idx[selected];
-                                return .{ .selected = entries[idx2].rawSlice() };
-                            }
-                            return .cancelled;
-                        },
-                        'A' => { // Up
-                            if (selected > 0) selected -= 1;
-                            if (selected < scroll) scroll = selected;
-                        },
-                        'B' => { // Down
-                            if (scored_count > 0 and selected + 1 < scored_count) selected += 1;
-                            if (selected >= scroll + max_vis) scroll = selected - max_vis + 1;
-                        },
-                        else => {},
-                    }
-                } else if (rc2 <= 0) break; // plain Escape
+            .escape, .ctrl_c, .ctrl_r => break,
+            .up, .ctrl_p => {
+                if (state.selected > 0) state.selected -= 1;
+                state.clampScroll(&screen);
             },
-            3, 18 => break, // Ctrl+C, Ctrl+R again = cancel
-            16 => { // Ctrl+P — up
-                if (selected > 0) selected -= 1;
-                if (selected < scroll) scroll = selected;
+            .down, .ctrl_n => {
+                if (state.scored_count > 0 and state.selected + 1 < state.scored_count)
+                    state.selected += 1;
+                state.clampScroll(&screen);
             },
-            14 => { // Ctrl+N — down
-                if (scored_count > 0 and selected + 1 < scored_count) selected += 1;
-                if (selected >= scroll + max_vis) scroll = selected - max_vis + 1;
-            },
-            21 => { // Ctrl+U — clear
-                filter_len = 0;
-                rescore(&entries, total, filter[0..filter_len], &scored_idx, &scored_vals, &scored_count, &selected, &scroll);
-            },
-            23 => { // Ctrl+W — delete word
-                while (filter_len > 0 and filter[filter_len - 1] == ' ') filter_len -= 1;
-                while (filter_len > 0 and filter[filter_len - 1] != ' ') filter_len -= 1;
-                rescore(&entries, total, filter[0..filter_len], &scored_idx, &scored_vals, &scored_count, &selected, &scroll);
-            },
-            127, 8 => { // Backspace
-                if (filter_len > 0) {
-                    filter_len -= 1;
-                    rescore(&entries, total, filter[0..filter_len], &scored_idx, &scored_vals, &scored_count, &selected, &scroll);
-                }
-            },
-            else => |ch| {
-                if (ch >= 32 and ch < 127 and filter_len < 128) {
-                    filter[filter_len] = ch;
-                    filter_len += 1;
-                    rescore(&entries, total, filter[0..filter_len], &scored_idx, &scored_vals, &scored_count, &selected, &scroll);
-                }
+            else => {
+                const action = state.input.handleKey(key);
+                if (action == .changed) state.rescore();
             },
         }
 
-        render(tty, &entries, &scored_idx, scored_count, selected, scroll, filter[0..filter_len], ts);
+        screen.beginFrame();
+        state.draw(&screen);
+        screen.flush(tty);
     }
 
     return .cancelled;
 }
 
 // ---------------------------------------------------------------------------
-// Loading / scoring
+// State
+// ---------------------------------------------------------------------------
+
+const State = struct {
+    entries: *const [MAX_ENTRIES]Entry,
+    total: usize,
+    input: tui.Input = .{},
+    scored_idx: [MAX_ENTRIES]usize = undefined,
+    scored_vals: [MAX_ENTRIES]i32 = undefined,
+    scored_count: usize = 0,
+    selected: usize = 0,
+    scroll: usize = 0,
+
+    fn rescore(self: *State) void {
+        const filter = self.input.value();
+        self.scored_count = 0;
+        for (0..self.total) |i| {
+            const text = self.entries[i].rawSlice();
+            if (filter.len == 0) {
+                self.scored_idx[self.scored_count] = i;
+                self.scored_vals[self.scored_count] = 0;
+                self.scored_count += 1;
+            } else {
+                const s = fuzzy.score(text, filter);
+                if (s.matched) {
+                    var pos = self.scored_count;
+                    while (pos > 0 and self.scored_vals[pos - 1] < s.value) {
+                        self.scored_idx[pos] = self.scored_idx[pos - 1];
+                        self.scored_vals[pos] = self.scored_vals[pos - 1];
+                        pos -= 1;
+                    }
+                    self.scored_idx[pos] = i;
+                    self.scored_vals[pos] = s.value;
+                    self.scored_count += 1;
+                }
+            }
+        }
+        self.selected = 0;
+        self.scroll = 0;
+    }
+
+    fn listHeight(self: *const State, scr: *const Screen) u16 {
+        _ = self;
+        // title + filter + separator = 3, status = 1
+        return if (scr.height > 4) scr.height - 4 else 1;
+    }
+
+    fn clampScroll(self: *State, scr: *const Screen) void {
+        const vis = self.listHeight(scr);
+        if (self.selected < self.scroll) self.scroll = self.selected;
+        if (self.selected >= self.scroll + vis) self.scroll = self.selected - vis + 1;
+    }
+
+    // -------------------------------------------------------------------
+    // Drawing
+    // -------------------------------------------------------------------
+
+    fn draw(self: *const State, scr: *Screen) void {
+        const scr_rect = tui.Rect.fromSize(scr.width, scr.height);
+        var layout: [4]tui.Rect = undefined;
+        _ = scr_rect.splitRows(&.{
+            tui.Size{ .fixed = 1 }, // title
+            tui.Size{ .fixed = 1 }, // filter
+            tui.Size{ .flex = 1 },  // list (separator + entries)
+            tui.Size{ .fixed = 1 }, // status
+        }, &layout);
+
+        self.drawTitle(scr, layout[0]);
+        self.input.draw(scr, layout[1]);
+        self.drawList(scr, layout[2]);
+        self.drawStatusBar(scr, layout[3]);
+    }
+
+    fn drawTitle(self: *const State, scr: *Screen, rect: tui.Rect) void {
+        const title = "  History Search";
+        const dim_s: Screen.Style = .{ .dim = true };
+        var col = rect.x;
+        col += scr.write(rect.y, col, title, dim_s);
+
+        var cnt_buf: [32]u8 = undefined;
+        const cnt_str = std.fmt.bufPrint(&cnt_buf, "{d} matches  ", .{self.scored_count}) catch "";
+        const cnt_w: u16 = @intCast(cnt_str.len);
+        if (col + cnt_w < rect.x + rect.w) {
+            scr.pad(rect.y, col, rect.x + rect.w - col - cnt_w, dim_s);
+            _ = scr.write(rect.y, rect.x + rect.w - cnt_w, cnt_str, dim_s);
+        } else {
+            scr.pad(rect.y, col, rect.x + rect.w -| col, dim_s);
+        }
+    }
+
+    fn drawList(self: *const State, scr: *Screen, rect: tui.Rect) void {
+        if (rect.h == 0 or rect.w == 0) return;
+
+        // Separator (first row)
+        scr.hline(rect.y, rect.x, rect.w, .{ .dim = true });
+
+        if (rect.h <= 1) return;
+        const list_rect = tui.Rect{
+            .x = rect.x,
+            .y = rect.y + 1,
+            .w = rect.w,
+            .h = rect.h - 1,
+        };
+
+        const max_vis = list_rect.h;
+        const vis_end = @min(self.scroll + max_vis, self.scored_count);
+        const has_scrollbar = self.scored_count > max_vis and max_vis > 2;
+        const content_w: u16 = if (has_scrollbar) list_rect.w -| 1 else list_rect.w;
+
+        if (self.scored_count == 0) {
+            scr.fill(list_rect, .{});
+            const msg = if (self.input.value().len > 0) "No matches" else "No history";
+            const msg_w: u16 = @intCast(msg.len);
+            const mid = list_rect.h / 2;
+            _ = scr.write(list_rect.y + mid, list_rect.x + (list_rect.w -| msg_w) / 2, msg, .{ .dim = true });
+        } else {
+            var row: u16 = 0;
+            for (self.scroll..vis_end) |vi| {
+                const idx = self.scored_idx[vi];
+                const e = &self.entries[idx];
+                const is_sel = vi == self.selected;
+                self.drawEntry(scr, list_rect.y + row, list_rect.x, content_w, e, is_sel);
+                row += 1;
+            }
+            // Clear remaining rows
+            while (row < max_vis) : (row += 1) {
+                scr.pad(list_rect.y + row, list_rect.x, content_w, .{});
+            }
+        }
+
+        // Scrollbar
+        if (has_scrollbar) {
+            const col = list_rect.x + list_rect.w - 1;
+            const thumb_h = @max(1, (@as(u32, max_vis) * max_vis) / @as(u32, @intCast(self.scored_count)));
+            const max_off = self.scored_count - max_vis;
+            const track_space = max_vis - @as(u16, @intCast(thumb_h));
+            const thumb_top: u16 = if (max_off > 0)
+                @intCast((@as(u32, @intCast(self.scroll)) * track_space) / @as(u32, @intCast(max_off)))
+            else
+                0;
+            var sr: u16 = 0;
+            while (sr < max_vis) : (sr += 1) {
+                const ch = if (sr >= thumb_top and sr < thumb_top + @as(u16, @intCast(thumb_h)))
+                    style.box.scrollbar_thumb
+                else
+                    style.box.scrollbar_track;
+                _ = scr.write(list_rect.y + sr, col, ch, .{ .dim = true });
+            }
+        }
+    }
+
+    fn drawEntry(self: *const State, scr: *Screen, row: u16, x: u16, w: u16, e: *const Entry, is_sel: bool) void {
+        _ = self;
+        var col = x;
+
+        // Arrow
+        if (is_sel) {
+            col += scr.write(row, col, " > ", .{ .fg = .cyan });
+        } else {
+            scr.pad(row, col, 3, .{});
+            col += 3;
+        }
+
+        // Status icon
+        if (e.exit_code == 0) {
+            col += scr.write(row, col, style.box.bullet, .{ .fg = .green });
+        } else {
+            col += scr.write(row, col, style.box.cross, .{ .fg = .red });
+        }
+        scr.pad(row, col, 1, .{});
+        col += 1;
+
+        // Command text
+        const cmd = e.rawSlice();
+        const right_w: u16 = 20;
+        const max_cmd: u16 = if (w > right_w + 6) w - right_w - 6 else 20;
+        const disp_len: u16 = @intCast(@min(cmd.len, max_cmd));
+        const name_style: Screen.Style = if (is_sel) .{ .bold = true } else .{};
+        col += scr.write(row, col, cmd[0..disp_len], name_style);
+        if (cmd.len > max_cmd) col += scr.write(row, col, style.box.ellipsis, .{});
+
+        // Right-align: duration + time
+        const age = relativeTime(e.started_at);
+        var right_parts_w: u16 = @intCast(age.len);
+        var dur_str: []const u8 = "";
+        if (e.duration_ms >= 100) {
+            var dur_buf: [16]u8 = undefined;
+            dur_str = prompt_mod.formatDuration(&dur_buf, e.duration_ms);
+            right_parts_w += @as(u16, @intCast(dur_str.len)) + 2;
+        }
+
+        const end = x + w;
+        if (col + right_parts_w < end) {
+            scr.pad(row, col, end - col - right_parts_w, .{});
+            col = end - right_parts_w;
+        }
+
+        if (dur_str.len > 0) {
+            col += scr.write(row, col, dur_str, .{ .fg = .yellow });
+            scr.pad(row, col, 2, .{});
+            col += 2;
+        }
+        _ = scr.write(row, col, age, .{ .dim = true });
+    }
+
+    fn drawStatusBar(_: *const State, scr: *Screen, rect: tui.Rect) void {
+        const bar = tui.StatusBar{
+            .items = &.{
+                .{ .key = "Enter", .label = "select" },
+                .{ .key = "Esc", .label = "cancel" },
+                .{ .key = "^W", .label = "del word" },
+            },
+            .transparent = true,
+        };
+        bar.draw(scr, rect);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Loading
 // ---------------------------------------------------------------------------
 
 fn loadEntries(db: *history_db_mod.HistoryDb, entries: *[MAX_ENTRIES]Entry) usize {
@@ -195,240 +408,6 @@ fn loadEntries(db: *history_db_mod.HistoryDb, entries: *[MAX_ENTRIES]Entry) usiz
     return deduped;
 }
 
-fn scoreEntries(
-    entries: *const [MAX_ENTRIES]Entry,
-    total: usize,
-    filter: []const u8,
-    idx: *[MAX_ENTRIES]usize,
-    vals: *[MAX_ENTRIES]i32,
-    count: *usize,
-) void {
-    count.* = 0;
-    for (0..total) |i| {
-        const text = entries[i].rawSlice();
-        if (filter.len == 0) {
-            idx[count.*] = i;
-            vals[count.*] = 0;
-            count.* += 1;
-        } else {
-            const s = fuzzy.score(text, filter);
-            if (s.matched) {
-                var pos = count.*;
-                while (pos > 0 and vals[pos - 1] < s.value) {
-                    idx[pos] = idx[pos - 1];
-                    vals[pos] = vals[pos - 1];
-                    pos -= 1;
-                }
-                idx[pos] = i;
-                vals[pos] = s.value;
-                count.* += 1;
-            }
-        }
-    }
-}
-
-fn rescore(
-    entries: *const [MAX_ENTRIES]Entry,
-    total: usize,
-    filter: []const u8,
-    idx: *[MAX_ENTRIES]usize,
-    vals: *[MAX_ENTRIES]i32,
-    count: *usize,
-    selected: *usize,
-    scroll: *usize,
-) void {
-    scoreEntries(entries, total, filter, idx, vals, count);
-    selected.* = 0;
-    scroll.* = 0;
-}
-
-// ---------------------------------------------------------------------------
-// Rendering
-// ---------------------------------------------------------------------------
-
-const TermSize = struct { rows: usize, cols: usize };
-
-fn visibleRows(ts: TermSize) usize {
-    const header = 3; // title + filter + separator
-    const footer = 2; // empty + status bar
-    return if (ts.rows > header + footer) ts.rows - header - footer else 1;
-}
-
-fn render(
-    tty: std.fs.File,
-    entries: *const [MAX_ENTRIES]Entry,
-    scored_idx: *const [MAX_ENTRIES]usize,
-    count: usize,
-    selected: usize,
-    scroll: usize,
-    filter: []const u8,
-    ts: TermSize,
-) void {
-    var buf: [65536]u8 = undefined;
-    var pos: usize = 0;
-    const cols = ts.cols;
-    const rows = ts.rows;
-
-    pos += style.home(buf[pos..]);
-
-    // ── Title bar ──
-    pos += style.dim(buf[pos..]);
-    pos += cp(buf[pos..], "  History Search");
-    const tw: usize = 16;
-    var count_buf: [32]u8 = undefined;
-    const count_str = std.fmt.bufPrint(&count_buf, "{d} matches", .{count}) catch "";
-    const count_pad = if (cols > tw + count_str.len + 4) cols - tw - count_str.len - 4 else 1;
-    { var p: usize = 0; while (p < count_pad and pos < buf.len) : (p += 1) { buf[pos] = ' '; pos += 1; } }
-    pos += cp(buf[pos..], count_str);
-    pos += cp(buf[pos..], "  ");
-    pos += style.reset(buf[pos..]);
-    pos += style.clearLine(buf[pos..]);
-    pos += style.crlf(buf[pos..]);
-
-    // ── Filter bar ──
-    pos += cp(buf[pos..], "  ");
-    pos += style.colored(buf[pos..], .yellow, "> ");
-    if (filter.len > 0) {
-        pos += style.boldText(buf[pos..], filter);
-    } else {
-        pos += style.dimText(buf[pos..], "search...");
-    }
-    pos += style.clearLine(buf[pos..]);
-    pos += style.crlf(buf[pos..]);
-
-    // ── Separator ──
-    pos += style.dim(buf[pos..]);
-    pos += style.hline(buf[pos..], cols);
-    pos += style.reset(buf[pos..]);
-    pos += style.crlf(buf[pos..]);
-
-    // ── Entries ──
-    const max_vis = visibleRows(ts);
-    const vis_end = @min(scroll + max_vis, count);
-
-    var empty_rows_used: usize = 0;
-    if (count == 0) {
-        const empty_row = rows / 2;
-        { var er: usize = 3; while (er < empty_row and pos < buf.len - 20) : (er += 1) {
-            pos += style.clearLine(buf[pos..]);
-            pos += style.crlf(buf[pos..]);
-            empty_rows_used += 1;
-        }}
-        const msg = if (filter.len > 0) "No matches" else "No history";
-        const pad_l = if (cols > msg.len) (cols - msg.len) / 2 else 0;
-        { var pl: usize = 0; while (pl < pad_l and pos < buf.len) : (pl += 1) { buf[pos] = ' '; pos += 1; } }
-        pos += style.dimText(buf[pos..], msg);
-        pos += style.clearLine(buf[pos..]);
-        pos += style.crlf(buf[pos..]);
-        empty_rows_used += 1;
-    } else {
-        for (scroll..vis_end) |vi| {
-            const idx = scored_idx[vi];
-            const e = &entries[idx];
-            const is_sel = vi == selected;
-
-            // Arrow
-            if (is_sel) {
-                pos += style.colored(buf[pos..], .cyan, " > ");
-            } else {
-                pos += cp(buf[pos..], "   ");
-            }
-
-            // Status icon
-            if (e.exit_code == 0) {
-                pos += style.colored(buf[pos..], .green, style.box.bullet);
-                pos += cp(buf[pos..], " ");
-            } else {
-                pos += style.colored(buf[pos..], .red, style.box.cross);
-                pos += cp(buf[pos..], " ");
-            }
-
-            // Command text
-            const cmd = e.rawSlice();
-            const right_w: usize = 20;
-            const max_cmd = if (cols > right_w + 6) cols - right_w - 6 else 20;
-            const disp_len = @min(cmd.len, max_cmd);
-
-            if (is_sel) pos += style.bold(buf[pos..]);
-            pos += cp(buf[pos..], cmd[0..disp_len]);
-            if (cmd.len > max_cmd) pos += cp(buf[pos..], style.box.ellipsis);
-            pos += style.reset(buf[pos..]);
-
-            // Right-align: duration + time
-            const age = relativeTime(e.started_at);
-            var rw: usize = age.len;
-            var has_dur = false;
-            var dur_str: []const u8 = "";
-            if (e.duration_ms >= 100) {
-                var dur_buf: [16]u8 = undefined;
-                dur_str = prompt_mod.formatDuration(&dur_buf, e.duration_ms);
-                rw += dur_str.len + 2;
-                has_dur = true;
-            }
-
-            const cmd_vis = disp_len + @as(usize, if (cmd.len > max_cmd) 1 else 0);
-            const used = 5 + cmd_vis;
-            if (cols > used + rw + 2) {
-                const gap = cols - used - rw - 2;
-                { var g: usize = 0; while (g < gap and pos < buf.len) : (g += 1) { buf[pos] = ' '; pos += 1; } }
-            }
-
-            if (has_dur) {
-                pos += style.colored(buf[pos..], .yellow, dur_str);
-                pos += cp(buf[pos..], "  ");
-            }
-            pos += style.dimText(buf[pos..], age);
-            pos += style.clearLine(buf[pos..]);
-            pos += style.crlf(buf[pos..]);
-        }
-    }
-
-    // Pad remaining
-    const used_rows = 3 + (vis_end - scroll) + empty_rows_used;
-    { var r: usize = used_rows; while (r + 2 < rows and pos < buf.len - 10) : (r += 1) {
-        pos += style.clearLine(buf[pos..]);
-        pos += style.crlf(buf[pos..]);
-    }}
-
-    // ── Scrollbar ──
-    if (count > max_vis and max_vis > 2) {
-        const bar_h = @max(1, max_vis * max_vis / count);
-        const bar_pos = if (count > max_vis) scroll * (max_vis - bar_h) / (count - max_vis) else 0;
-        for (0..max_vis) |ri| {
-            const row = 4 + ri;
-            const in_bar = ri >= bar_pos and ri < bar_pos + bar_h;
-            pos += style.moveTo(buf[pos..], row, cols);
-            pos += style.dimText(buf[pos..], if (in_bar) style.box.scrollbar_thumb else style.box.scrollbar_track);
-        }
-    }
-
-    // ── Status bar ──
-    pos += style.moveTo(buf[pos..], rows, 1);
-    pos += style.dim(buf[pos..]);
-    pos += cp(buf[pos..], "  ");
-    pos += style.unbold(buf[pos..]);
-    pos += style.bold(buf[pos..]);
-    pos += cp(buf[pos..], "Enter");
-    pos += style.unbold(buf[pos..]);
-    pos += cp(buf[pos..], " select  ");
-    pos += style.bold(buf[pos..]);
-    pos += cp(buf[pos..], "Esc");
-    pos += style.unbold(buf[pos..]);
-    pos += cp(buf[pos..], " cancel  ");
-    pos += style.bold(buf[pos..]);
-    pos += cp(buf[pos..], "^W");
-    pos += style.unbold(buf[pos..]);
-    pos += cp(buf[pos..], " del word");
-    pos += style.reset(buf[pos..]);
-    pos += style.clearLine(buf[pos..]);
-
-    // Cursor in filter
-    const cursor_col = 5 + filter.len;
-    pos += style.moveTo(buf[pos..], 2, cursor_col);
-
-    tty.writeAll(buf[0..pos]) catch {};
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -445,13 +424,9 @@ fn relativeTime(started_ms: i64) []const u8 {
     return std.fmt.bufPrint(&relative_buf, "{d}w ago", .{@divTrunc(age_s, 604800)}) catch "?";
 }
 
+const TermSize = struct { rows: usize, cols: usize };
+
 fn getTermSize(fd: posix.fd_t) TermSize {
     const ts = style.getTermSize(fd);
     return .{ .rows = ts.rows, .cols = ts.cols };
-}
-
-fn cp(dest: []u8, src: []const u8) usize {
-    const n = @min(src.len, dest.len);
-    @memcpy(dest[0..n], src[0..n]);
-    return n;
 }
