@@ -201,7 +201,6 @@ Everything lives in `~/.config/xyron/config.lua`. Full LSP autocomplete via auto
 -- Settings
 xyron.config.completion(true)
 xyron.config.vim_mode(true)
--- xyron.config.block_ui(true)
 
 -- Aliases
 xyron.alias("ll", "ls -la")

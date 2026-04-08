@@ -159,17 +159,8 @@ pub fn readLine(
                     continue;
                 }
                 ed.mode = .insert;
-                const block_ui_mod = @import("block_ui.zig");
-                if (block_ui_mod.enabled) {
-                    // Block mode: erase prompt lines — command will appear in block title
-                    if (prompt_extra_lines > 0) {
-                        var erase_buf: [64]u8 = undefined;
-                        const en = std.fmt.bufPrint(&erase_buf, "\x1b[{d}A", .{prompt_extra_lines}) catch "";
-                        stdout.writeAll(en) catch {};
-                    }
-                    stdout.writeAll("\r\x1b[J") catch {}; // clear from cursor to end of screen
-                } else {
-                    // Classic mode: move to first prompt line, clear from there,
+                {
+                    // Move to first prompt line, clear from there,
                     // re-render prompt + content, then newline
                     var clr_buf: [8192]u8 = undefined;
                     var clr_pos: usize = 0;
@@ -194,18 +185,7 @@ pub fn readLine(
             .ctrl_c => {
                 complete_mod.dismissInline(stdout);
                 ed.mode = .insert;
-                const block_ui_mod = @import("block_ui.zig");
-                if (block_ui_mod.enabled) {
-                    // Block mode: erase prompt lines, don't leave ^C in scrollback
-                    if (prompt_extra_lines > 0) {
-                        var erase_buf: [64]u8 = undefined;
-                        const en = std.fmt.bufPrint(&erase_buf, "\x1b[{d}A", .{prompt_extra_lines}) catch "";
-                        stdout.writeAll(en) catch {};
-                    }
-                    stdout.writeAll("\r\x1b[J") catch {};
-                } else {
-                    stdout.writeAll("^C\r\n") catch {};
-                }
+                stdout.writeAll("^C\r\n") catch {};
                 ed.clear();
                 if (hist) |h| h.resetNavigation();
                 return .interrupt;
@@ -304,18 +284,7 @@ pub fn readLine(
                                     ctx.help_cache, prompt_lua, ctx,
                                 );
                                 if (result == .interrupted) {
-                                    // Propagate ^C as interrupt
-                                    const block_ui_mod2 = @import("block_ui.zig");
-                                    if (block_ui_mod2.enabled) {
-                                        if (prompt_extra_lines > 0) {
-                                            var erase_buf2: [64]u8 = undefined;
-                                            const en2 = std.fmt.bufPrint(&erase_buf2, "\x1b[{d}A", .{prompt_extra_lines}) catch "";
-                                            stdout.writeAll(en2) catch {};
-                                        }
-                                        stdout.writeAll("\r\x1b[J") catch {};
-                                    } else {
-                                        stdout.writeAll("^C\r\n") catch {};
-                                    }
+                                    stdout.writeAll("^C\r\n") catch {};
                                     ed.clear();
                                     if (hist) |h| h.resetNavigation();
                                     return .interrupt;

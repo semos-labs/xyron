@@ -129,7 +129,6 @@ pub fn build(b: *std.Build) void {
         "src/json_parser.zig",
         "src/migrate.zig",
         "src/block.zig",
-        "src/block_ui.zig",
         "src/history_search.zig",
         "src/project_test.zig",
         "src/cmd_completions.zig",

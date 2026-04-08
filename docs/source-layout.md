@@ -53,7 +53,6 @@ src/
   sqlite.zig            Thin SQLite C wrapper
   jobs.zig              Job tracking (running/stopped/completed, WNOHANG reap)
   block.zig             Command block model (lifecycle, output association)
-  block_ui.zig          Block rendering, output capture, overlay restoration
   aliases.zig           Alias registry
   attyx.zig             Attyx event emission (OSC 7339 on stderr)
   attyx_bridge.zig      Native Attyx UI bridge (picker, popup, inspect)

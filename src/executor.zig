@@ -12,7 +12,6 @@ const environ_mod = @import("environ.zig");
 const planner_mod = @import("planner.zig");
 const types = @import("types.zig");
 const builtins = @import("builtins.zig");
-const block_ui = @import("block_ui.zig");
 const attyx_mod = @import("attyx.zig");
 const history_db_mod = @import("history_db.zig");
 const jobs_mod = @import("jobs.zig");
@@ -121,26 +120,9 @@ pub fn executeGroup(
                 var output = cap_buf[0..cap_total];
                 while (output.len > 0 and output[output.len - 1] == '\n') output = output[0 .. output.len - 1];
 
-                block_ui.last_duration_ms = types.timestampMs() - start;
-
-                if (block_ui.enabled) {
-                    // Block mode: render with borders
-                    var cmd_disp: [256]u8 = undefined;
-                    var cmd_len: usize = 0;
-                    for (step.argv, 0..) |arg, ai| {
-                        if (ai > 0 and cmd_len < cmd_disp.len) { cmd_disp[cmd_len] = ' '; cmd_len += 1; }
-                        const n = @min(arg.len, cmd_disp.len - cmd_len);
-                        @memcpy(cmd_disp[cmd_len..][0..n], arg[0..n]);
-                        cmd_len += n;
-                    }
-                    block_ui.renderBlock(stdout, cmd_disp[0..cmd_len], output, result.exit_code);
-                } else {
-                    // Non-block: print raw, store for overlay restoration
-                    if (output.len > 0) {
-                        stdout.writeAll(output) catch {};
-                        stdout.writeAll("\n") catch {};
-                    }
-                    block_ui.storeOutputOnly(exec_plan.raw_input, output, result.exit_code);
+                if (output.len > 0) {
+                    stdout.writeAll(output) catch {};
+                    stdout.writeAll("\n") catch {};
                 }
 
                 const dur = types.timestampMs() - start;
@@ -159,63 +141,6 @@ pub fn executeGroup(
             ax.stepFinished(exec_plan, step, result.exit_code, dur);
             ax.groupFinished(exec_plan, result.exit_code, dur);
             return .{ .exit_code = result.exit_code, .duration_ms = dur, .should_exit = result.should_exit };
-        }
-    }
-
-    // Block UI: capture output and render bordered block.
-    // Single external commands use /bin/sh. Pipelines and commands with
-    // builtins use forkPipeline with stdout captured to a pipe.
-    if (block_ui.enabled and !exec_plan.background and exec_plan.steps.len >= 1) {
-        const last_step = &exec_plan.steps[exec_plan.steps.len - 1];
-        if (!block_ui.isPassthrough(last_step.argv)) {
-            // Check if any step is a builtin (can't delegate to /bin/sh)
-            var has_builtin = false;
-            for (exec_plan.steps) |*s| {
-                if (s.argv.len > 0 and (builtins.isBuiltin(s.argv[0]) or std.mem.eql(u8, s.argv[0], "json"))) {
-                    has_builtin = true;
-                    break;
-                }
-            }
-
-            // Check if last step is a pipe builtin that renders its own table.
-            // If so, skip block UI capture — let it render directly.
-            const last_is_pipe_builtin = if (last_step.argv.len > 0) isPipeBuiltin(last_step.argv[0]) else false;
-
-            if (last_is_pipe_builtin) {
-                // Pipeline ends with where/select/sort/csv/json — skip block capture,
-                // use regular forkPipeline. Last command renders table to terminal.
-            } else if (exec_plan.steps.len == 1 and !has_builtin) {
-                // Single external command — use /bin/sh path
-                const step0 = &exec_plan.steps[0];
-                ax.stepStarted(exec_plan, step0);
-                block_ui.last_duration_ms = types.timestampMs() - start;
-                const code = block_ui.runAndRender(exec_plan.raw_input, exec_plan.steps, stdout);
-                const dur = types.timestampMs() - start;
-                ax.stepFinished(exec_plan, step0, code, dur);
-                ax.groupFinished(exec_plan, code, dur);
-                return .{ .exit_code = code, .duration_ms = dur };
-            } else {
-                // Pipeline or has builtins — fork pipeline with stdout capture
-                block_ui.last_duration_ms = types.timestampMs() - start;
-                const code = block_ui.forkAndRender(exec_plan, ax, env, stdout);
-                const dur = types.timestampMs() - start;
-                ax.groupFinished(exec_plan, code, dur);
-                return .{ .exit_code = code, .duration_ms = dur };
-            }
-        }
-    }
-
-    // Non-block mode: capture single external commands for overlay restoration
-    if (!block_ui.enabled and !exec_plan.background and exec_plan.steps.len == 1) {
-        const step0 = &exec_plan.steps[0];
-        if (step0.argv.len > 0 and !block_ui.isPassthrough(step0.argv) and !isPipeBuiltin(step0.argv[0])) {
-            ax.stepStarted(exec_plan, step0);
-            block_ui.last_duration_ms = types.timestampMs() - start;
-            const code = block_ui.runCaptureAndPrintRaw(exec_plan.raw_input, exec_plan.steps, stdout);
-            const dur = types.timestampMs() - start;
-            ax.stepFinished(exec_plan, step0, code, dur);
-            ax.groupFinished(exec_plan, code, dur);
-            return .{ .exit_code = code, .duration_ms = dur };
         }
     }
 

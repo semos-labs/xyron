@@ -42,10 +42,6 @@ xyron.config = {}
 ---@param enabled boolean
 function xyron.config.vim_mode(enabled) end
 
---- Enable or disable block UI (structured output rendering).
----@param enabled boolean
-function xyron.config.block_ui(enabled) end
-
 --- Enable or disable tab completion.
 ---@param enabled boolean
 function xyron.config.completion(enabled) end
@@ -53,10 +49,6 @@ function xyron.config.completion(enabled) end
 --- @deprecated Use xyron.config.vim_mode instead
 ---@param enabled boolean
 function xyron.vim_mode(enabled) end
-
---- @deprecated Use xyron.config.block_ui instead
----@param enabled boolean
-function xyron.block_ui(enabled) end
 
 --- @deprecated Use xyron.config.completion instead
 ---@param enabled boolean

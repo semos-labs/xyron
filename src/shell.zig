@@ -208,15 +208,9 @@ pub const Shell = struct {
             self.reapAndNotify(stdout);
             if (self.ipc_enabled) ipc.poll();
 
-            // Re-render blocks on terminal resize
+            // Re-render on terminal resize
             if (winch_pending) {
                 winch_pending = false;
-                const block_ui_mod = @import("block_ui.zig");
-                if (block_ui_mod.enabled) {
-                    block_ui_mod.reRenderVisible(stdout);
-                    // Update cursor estimate after re-render
-                    input.cursor_row_estimate = overlay.getTermSize().rows;
-                }
                 input.prompt_fresh = true;
             }
 
@@ -293,23 +287,9 @@ pub const Shell = struct {
                         // Refresh git info in the background for the next prompt
                         git_info_mod.requestRefresh();
                         // Estimate cursor row after command execution.
-                        // In block UI mode, use the saved block line count for accuracy.
-                        // Otherwise assume the output filled the screen.
                         const trimmed_cmd = std.mem.trim(u8, line, " \t\r\n");
-                        const block_ui_mod = @import("block_ui.zig");
                         if (std.mem.eql(u8, trimmed_cmd, "clear") or std.mem.eql(u8, trimmed_cmd, "reset")) {
                             input.cursor_row_estimate = 1 + input.prompt_extra_lines;
-                        } else if (block_ui_mod.enabled and block_ui_mod.saved_block_lines > 0) {
-                            // Block rendered: previous row + block lines + prompt lines
-                            const new_row = input.cursor_row_estimate + block_ui_mod.saved_block_lines + 1 + input.prompt_extra_lines;
-                            const term_rows = overlay.getTermSize().rows;
-                            input.cursor_row_estimate = @min(new_row, term_rows);
-                        } else if (block_ui_mod.storedOutputLines() > 0) {
-                            // Non-block: use stored output line count
-                            const out_lines = block_ui_mod.storedOutputLines();
-                            const new_row = input.cursor_row_estimate + out_lines + 1 + input.prompt_extra_lines;
-                            const term_rows = overlay.getTermSize().rows;
-                            input.cursor_row_estimate = @min(new_row, term_rows);
                         } else {
                             input.cursor_row_estimate = overlay.getTermSize().rows;
                         }
@@ -498,6 +478,15 @@ pub const Shell = struct {
         }
 
         if (result.stopped) {
+            // TUI apps may leave terminal in a dirty state (alternate screen,
+            // scroll regions, mouse tracking, etc.). Reset before redrawing.
+            stdout.writeAll(
+                "\x1b[?1049l" ++ // exit alternate screen (no-op if not active)
+                "\x1b[r" ++ // reset scroll region
+                "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" ++ // disable mouse modes
+                "\x1b[?25h" // show cursor
+            ) catch {};
+
             // Block interrupted (Ctrl+Z)
             if (self.blocks.findById(block_id)) |blk| blk.interrupt();
             const job_id = self.job_table.createJob(
@@ -626,87 +615,33 @@ pub const Shell = struct {
         const stdout = std.fs.File.stdout();
         const start = types.timestampMs();
 
-        const block_ui_mod = @import("block_ui.zig");
-        if (block_ui_mod.enabled and !block_ui_mod.isPassthrough(&.{cmd})) {
-            // Block UI: capture output
-            var sh_buf: [4096]u8 = undefined;
-            const sh_cmd = std.fmt.bufPrintZ(&sh_buf, "{s}", .{cmd}) catch {
-                self.last_exit_code = 127;
-                return;
-            };
-            var child = std.process.Child.init(
-                &.{ "/bin/sh", "-c", sh_cmd },
-                std.heap.page_allocator,
-            );
-            child.stdin_behavior = .Inherit;
-            child.stdout_behavior = .Pipe;
-            child.stderr_behavior = .Pipe;
+        var sh_buf: [4096]u8 = undefined;
+        const sh_cmd = std.fmt.bufPrintZ(&sh_buf, "{s}", .{cmd}) catch {
+            self.last_exit_code = 127;
+            return;
+        };
+        var child = std.process.Child.init(
+            &.{ "/bin/sh", "-c", sh_cmd },
+            std.heap.page_allocator,
+        );
+        child.stdin_behavior = .Inherit;
+        child.stdout_behavior = .Inherit;
+        child.stderr_behavior = .Inherit;
 
-            child.spawn() catch {
-                block_ui_mod.renderBlock(stdout, raw, "xyron: failed to run via sh", 127);
-                self.last_exit_code = 127;
-                return;
-            };
-
-            var out_buf: [65536]u8 = undefined;
-            var total: usize = 0;
-            if (child.stdout) |f| {
-                while (total < out_buf.len) {
-                    const n = f.read(out_buf[total..]) catch break;
-                    if (n == 0) break;
-                    total += n;
-                }
-            }
-            if (child.stderr) |f| {
-                while (total < out_buf.len) {
-                    const n = f.read(out_buf[total..]) catch break;
-                    if (n == 0) break;
-                    total += n;
-                }
-            }
-
-            const term_result = child.wait() catch {
-                block_ui_mod.renderBlock(stdout, raw, "xyron: wait failed", 127);
-                self.last_exit_code = 127;
-                return;
-            };
-            const code: u8 = switch (term_result) { .Exited => |c| c, else => 1 };
-
-            var output = out_buf[0..total];
-            while (output.len > 0 and output[output.len - 1] == '\n') output = output[0 .. output.len - 1];
-
-            block_ui_mod.renderBlock(stdout, raw, output, code);
-            self.last_exit_code = code;
-        } else {
-            // Non-block: run directly
-            var sh_buf: [4096]u8 = undefined;
-            const sh_cmd = std.fmt.bufPrintZ(&sh_buf, "{s}", .{cmd}) catch {
-                self.last_exit_code = 127;
-                return;
-            };
-            var child = std.process.Child.init(
-                &.{ "/bin/sh", "-c", sh_cmd },
-                std.heap.page_allocator,
-            );
-            child.stdin_behavior = .Inherit;
-            child.stdout_behavior = .Inherit;
-            child.stderr_behavior = .Inherit;
-
-            term.suspendRawMode();
-            child.spawn() catch {
-                term.enableRawMode() catch {};
-                stdout.writeAll("xyron: failed to run via sh\n") catch {};
-                self.last_exit_code = 127;
-                return;
-            };
-            const term_result = child.wait() catch {
-                term.enableRawMode() catch {};
-                self.last_exit_code = 127;
-                return;
-            };
+        term.suspendRawMode();
+        child.spawn() catch {
             term.enableRawMode() catch {};
-            self.last_exit_code = switch (term_result) { .Exited => |c| c, else => 1 };
-        }
+            stdout.writeAll("xyron: failed to run via sh\n") catch {};
+            self.last_exit_code = 127;
+            return;
+        };
+        const term_result = child.wait() catch {
+            term.enableRawMode() catch {};
+            self.last_exit_code = 127;
+            return;
+        };
+        term.enableRawMode() catch {};
+        self.last_exit_code = switch (term_result) { .Exited => |c| c, else => 1 };
 
         self.last_duration_ms = types.timestampMs() - start;
         _ = self.history_db.recordCommand(raw, "", self.last_exit_code, self.last_duration_ms, types.timestampMs(), false, &.{});

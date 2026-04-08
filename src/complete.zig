@@ -765,31 +765,6 @@ fn renderPicker(
             stdout.writeAll(cbuf[0..cpos]) catch {};
         }
 
-        // Phase 2: restore block content at cleared positions
-        {
-            const block_ui = @import("block_ui.zig");
-            if (block_ui.enabled and block_ui.saved_block_lines > 0) {
-                var rbuf: [64]u8 = undefined;
-                const pe2 = @import("input.zig").prompt_extra_lines;
-                stdout.writeAll("\x1b[s") catch {};
-                const seq = std.fmt.bufPrint(&rbuf, "\x1b[{d}A\r", .{prev + pe2}) catch "";
-                stdout.writeAll(seq) catch {};
-                const start = if (block_ui.saved_block_lines > prev) block_ui.saved_block_lines - prev else 0;
-                block_ui.restoreBlockRange(stdout, start, freed);
-                stdout.writeAll("\x1b[u") catch {};
-            } else if (block_ui.storedOutputLines() > 0) {
-                // Non-block: restore raw output
-                var rbuf2: [64]u8 = undefined;
-                const pe3 = @import("input.zig").prompt_extra_lines;
-                stdout.writeAll("\x1b[s") catch {};
-                const seq2 = std.fmt.bufPrint(&rbuf2, "\x1b[{d}A\r", .{prev + pe3}) catch "";
-                stdout.writeAll(seq2) catch {};
-                const total = block_ui.storedOutputLines();
-                const start2 = if (total > prev) total - prev else 0;
-                block_ui.restoreRawRange(stdout, start2, freed);
-                stdout.writeAll("\x1b[u") catch {};
-            }
-        }
 
         // Re-save cursor for candidate rendering below
         pos += cp(buf[pos..], "\x1b[s");
@@ -911,60 +886,6 @@ fn clearPickerLines(stdout: std.fs.File, lines: usize, direction: overlay.Direct
     pos += cp(buf[pos..], "\x1b[u");
     stdout.writeAll(buf[0..pos]) catch {};
 
-    // Restore content for "below" direction
-    if (direction == .below) {
-        const block_ui = @import("block_ui.zig");
-        // Content below the prompt = tail of stored output
-        const total_stored = if (block_ui.enabled) block_ui.saved_block_lines else block_ui.storedOutputLines();
-        if (total_stored > 0) {
-            var rbuf: [64]u8 = undefined;
-            stdout.writeAll("\x1b[s") catch {};
-            // Overlay was 'lines' rows below the prompt. The content at those
-            // rows corresponds to stored output lines after the prompt position.
-            for (0..lines) |_| stdout.writeAll("\r\n") catch {};
-            // Move back up to start of overlay area
-            const seq3 = std.fmt.bufPrint(&rbuf, "\x1b[{d}A\r", .{lines}) catch "";
-            stdout.writeAll(seq3) catch {};
-            // The stored output ends where the prompt starts. The lines below
-            // the prompt were the LAST 'lines' of output before the prompt.
-            // But we don't know exactly which lines... approximate: restore last lines.
-            if (block_ui.enabled) {
-                const start = if (block_ui.saved_block_lines > lines) block_ui.saved_block_lines - lines else 0;
-                block_ui.restoreBlockRange(stdout, start, lines);
-            } else if (block_ui.storedOutputLines() > 0) {
-                const out_lines = block_ui.storedOutputLines();
-                const start = if (out_lines > lines) out_lines - lines else 0;
-                block_ui.restoreRawRange(stdout, start, lines);
-            }
-            stdout.writeAll("\x1b[u") catch {};
-        }
-    }
-
-    // Restore content for "above" (after cursor is back on prompt)
-    if (direction == .above) {
-        const block_ui = @import("block_ui.zig");
-        const pe2 = @import("input.zig").prompt_extra_lines;
-        if (block_ui.enabled and block_ui.saved_block_lines > 0) {
-            // Block mode: restore with borders
-            var rbuf: [64]u8 = undefined;
-            stdout.writeAll("\x1b[s") catch {};
-            const seq2 = std.fmt.bufPrint(&rbuf, "\x1b[{d}A\r", .{lines + pe2}) catch "";
-            stdout.writeAll(seq2) catch {};
-            const start = if (block_ui.saved_block_lines > lines) block_ui.saved_block_lines - lines else 0;
-            block_ui.restoreBlockRange(stdout, start, lines);
-            stdout.writeAll("\x1b[u") catch {};
-        } else if (block_ui.storedOutputLines() > 0) {
-            // Non-block mode: restore raw output lines
-            var rbuf: [64]u8 = undefined;
-            stdout.writeAll("\x1b[s") catch {};
-            const seq2 = std.fmt.bufPrint(&rbuf, "\x1b[{d}A\r", .{lines + pe2}) catch "";
-            stdout.writeAll(seq2) catch {};
-            const total = block_ui.storedOutputLines();
-            const start = if (total > lines) total - lines else 0;
-            block_ui.restoreRawRange(stdout, start, lines);
-            stdout.writeAll("\x1b[u") catch {};
-        }
-    }
 }
 
 fn insertCandidate(ed: *editor_mod.Editor, word_start: usize, word_end: usize, c: *const Candidate) void {

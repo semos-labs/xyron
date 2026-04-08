@@ -57,15 +57,13 @@ pub fn init(env: *environ_mod.Environ, attyx_enabled: bool) LuaState {
     registerFn(L, "configure", apiPromptConfigure);
     registerFn(L, "init", apiPromptInit);
     c.lua_setfield(L, -2, "prompt");
-    // xyron.config = { vim_mode = fn, block_ui = fn, completion = fn }
-    c.lua_createtable(L, 0, 3);
+    // xyron.config = { vim_mode = fn, completion = fn }
+    c.lua_createtable(L, 0, 2);
     registerFn(L, "vim_mode", apiVimMode);
-    registerFn(L, "block_ui", apiBlockUi);
     registerFn(L, "completion", apiCompletion);
     c.lua_setfield(L, -2, "config");
     // Keep old top-level names working for backward compat
     registerFn(L, "vim_mode", apiVimMode);
-    registerFn(L, "block_ui", apiBlockUi);
     registerFn(L, "completion", apiCompletion);
     registerFn(L, "alias", apiAlias);
     registerFn(L, "history_query", apiHistoryQuery);
@@ -492,15 +490,6 @@ var global_hdb: ?*history_db_mod.HistoryDb = null;
 
 pub fn setHistoryDb(hdb: *history_db_mod.HistoryDb) void {
     global_hdb = hdb;
-}
-
-/// xyron.block_ui(enabled) — enable/disable block UI
-fn apiBlockUi(L: ?*c.lua_State) callconv(.c) c_int {
-    const state = L orelse return 0;
-    if (c.lua_type(state, 1) == c.LUA_TBOOLEAN) {
-        @import("block_ui.zig").enabled = c.lua_toboolean(state, 1) != 0;
-    }
-    return 0;
 }
 
 /// xyron.overlay(enabled) — enable/disable floating overlay for completions
