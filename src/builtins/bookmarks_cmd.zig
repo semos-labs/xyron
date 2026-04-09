@@ -111,6 +111,63 @@ fn runEdit(args: []const []const u8, stderr: std.fs.File) Result {
     return editWithEditor(&bm, stderr);
 }
 
+fn renameModal(scr: *Screen, tty: std.fs.File, tty_fd: posix.fd_t, bm: *const bookmarks.Bookmark) void {
+    var name_input = tui.Input{};
+    name_input.prompt = "Name: ";
+    name_input.prompt_color = .cyan;
+    name_input.focused = true;
+    name_input.setValue(bm.nameSlice());
+
+    var error_msg: []const u8 = "";
+
+    while (true) {
+        // Draw popup
+        const popup = tui.Popup{
+            .title = "Rename",
+            .width = .{ .fixed = @min(50, scr.width -| 4) },
+            .height = .{ .fixed = 6 },
+            .border_color = .bright_black,
+            .title_color = .white,
+        };
+        const scr_rect = tui.Rect.fromSize(scr.width, scr.height);
+        popup.draw(scr, scr_rect);
+        const content = popup.contentRect(scr_rect);
+        if (content.w >= 4 and content.h >= 3) {
+            name_input.draw(scr, tui.Rect{ .x = content.x, .y = content.y + 1, .w = content.w, .h = 1 });
+            if (error_msg.len > 0) {
+                _ = scr.write(content.y + 3, content.x, error_msg, .{ .fg = .red });
+                scr.pad(content.y + 3, content.x + @as(u16, @intCast(error_msg.len)), content.w -| @as(u16, @intCast(error_msg.len)), .{});
+            } else {
+                const help = tui.StatusBar{ .items = &.{
+                    .{ .key = "Enter", .label = "save" },
+                    .{ .key = "Esc", .label = "cancel" },
+                }, .transparent = true };
+                help.draw(scr, tui.Rect{ .x = content.x, .y = content.y + 3, .w = content.w, .h = 1 });
+            }
+        }
+        scr.flush(tty);
+
+        const key = keys.readKeyFromFd(tty_fd) orelse return;
+        switch (key) {
+            .escape, .ctrl_c => return,
+            .enter => {
+                const name = name_input.value();
+                if (name.len == 0) { error_msg = "Name required"; continue; }
+                if (std.mem.eql(u8, name, bm.nameSlice())) return; // unchanged
+                if (!bookmarks.isValidName(name)) { error_msg = "Invalid name"; continue; }
+                if (bookmarks.nameConflicts(name)) { error_msg = "Conflicts with existing command"; continue; }
+                if (bookmarks.findByName(name) != null) { error_msg = "Name already taken"; continue; }
+                if (bookmarks.rename(bm.id, name)) return;
+                error_msg = "Failed to rename";
+            },
+            else => {
+                error_msg = "";
+                _ = name_input.handleKey(key);
+            },
+        }
+    }
+}
+
 fn editWithEditor(bm: *const bookmarks.Bookmark, stderr: std.fs.File) Result {
     const editor = std.posix.getenv("EDITOR") orelse std.posix.getenv("VISUAL") orelse "vi";
 
@@ -244,48 +301,48 @@ fn runTui(_: std.fs.File, stderr: std.fs.File) Result {
                     state.cursor += 1;
                 state.clampScroll(&screen);
             },
-            .char => |ch| switch (ch) {
-                'q' => break,
-                'x' => {
-                    if (state.filter.originalIndex(state.cursor)) |idx| {
-                        _ = bookmarks.removeById(all_bookmarks[idx].id);
-                        count = bookmarks.loadAll(&all_bookmarks);
-                        state.count = count;
-                        for (0..count) |i| name_texts[i] = all_bookmarks[i].nameSlice();
-                        state.rescore();
-                        if (state.cursor > 0 and state.cursor >= state.filter.count) state.cursor -= 1;
+            .ctrl_x => {
+                if (state.filter.originalIndex(state.cursor)) |idx| {
+                    _ = bookmarks.removeById(all_bookmarks[idx].id);
+                    count = bookmarks.loadAll(&all_bookmarks);
+                    state.count = count;
+                    for (0..count) |i| name_texts[i] = all_bookmarks[i].nameSlice();
+                    state.rescore();
+                    if (state.cursor > 0 and state.cursor >= state.filter.count) state.cursor -= 1;
+                }
+            },
+            .ctrl_r => {
+                if (state.filter.originalIndex(state.cursor)) |idx| {
+                    renameModal(&screen, tty, tty_fd, &all_bookmarks[idx]);
+                    count = bookmarks.loadAll(&all_bookmarks);
+                    state.count = count;
+                    for (0..count) |i| name_texts[i] = all_bookmarks[i].nameSlice();
+                    state.rescore();
+                }
+            },
+            .ctrl_g => {
+                if (state.filter.originalIndex(state.cursor)) |idx| {
+                    {
+                        var xbuf: [64]u8 = undefined;
+                        var xp: usize = 0;
+                        xp += style.altScreenOff(xbuf[xp..]);
+                        tty.writeAll(xbuf[0..xp]) catch {};
                     }
-                },
-                'e' => {
-                    if (state.filter.originalIndex(state.cursor)) |idx| {
-                        // Exit alt screen, run editor, re-enter
-                        {
-                            var xbuf: [64]u8 = undefined;
-                            var xp: usize = 0;
-                            xp += style.altScreenOff(xbuf[xp..]);
-                            tty.writeAll(xbuf[0..xp]) catch {};
-                        }
-                        _ = c.tcsetattr(tty_fd, .NOW, &orig);
-                        _ = editWithEditor(&all_bookmarks[idx], stderr);
-                        _ = c.tcsetattr(tty_fd, .NOW, &raw);
-                        {
-                            var ebuf: [64]u8 = undefined;
-                            var ep: usize = 0;
-                            ep += style.altScreenOn(ebuf[ep..]);
-                            tty.writeAll(ebuf[0..ep]) catch {};
-                        }
-                        // Reload
-                        count = bookmarks.loadAll(&all_bookmarks);
-                        state.count = count;
-                        for (0..count) |i| name_texts[i] = all_bookmarks[i].nameSlice();
-                        screen.resize(@intCast(@min(ts.cols, Screen.max_cols)), @intCast(@min(ts.rows, Screen.max_rows)));
-                        state.rescore();
+                    _ = c.tcsetattr(tty_fd, .NOW, &orig);
+                    _ = editWithEditor(&all_bookmarks[idx], stderr);
+                    _ = c.tcsetattr(tty_fd, .NOW, &raw);
+                    {
+                        var ebuf: [64]u8 = undefined;
+                        var ep: usize = 0;
+                        ep += style.altScreenOn(ebuf[ep..]);
+                        tty.writeAll(ebuf[0..ep]) catch {};
                     }
-                },
-                else => {
-                    const action = state.input.handleKey(.{ .char = ch });
-                    if (action == .changed) state.rescore();
-                },
+                    count = bookmarks.loadAll(&all_bookmarks);
+                    state.count = count;
+                    for (0..count) |i| name_texts[i] = all_bookmarks[i].nameSlice();
+                    screen.resize(@intCast(@min(ts.cols, Screen.max_cols)), @intCast(@min(ts.rows, Screen.max_rows)));
+                    state.rescore();
+                }
             },
             else => {
                 const action = state.input.handleKey(key);
@@ -462,8 +519,9 @@ const State = struct {
         const bar = tui.StatusBar{
             .items = &.{
                 .{ .key = "Esc", .label = "close" },
-                .{ .key = "e", .label = "edit" },
-                .{ .key = "x", .label = "delete" },
+                .{ .key = "^R", .label = "rename" },
+                .{ .key = "^G", .label = "edit" },
+                .{ .key = "^X", .label = "delete" },
             },
             .transparent = true,
         };

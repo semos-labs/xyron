@@ -91,12 +91,8 @@ pub fn run(args: []const []const u8, _: std.fs.File, stderr: std.fs.File) Result
             continue;
         }
 
-        if (state.searching) {
-            state.handleSearchKey(key);
-        } else {
-            const done = state.handleNormalKey(key, tty, tty_fd, &screen);
-            if (done) break;
-        }
+        const done = state.handleKey(key, tty, tty_fd, &screen);
+        if (done) break;
 
         screen.beginFrame();
         state.draw(&screen);
@@ -117,7 +113,6 @@ const State = struct {
     cursor: usize = 0,
     scroll: usize = 0,
     show_values: bool = false,
-    searching: bool = false,
     search_input: tui.Input = .{},
     filter: tui.FuzzyFilter(secrets_mod.MAX_SECRETS) = tui.FuzzyFilter(secrets_mod.MAX_SECRETS).init(),
     ts: TermSize = .{ .rows = 24, .cols = 80 },
@@ -149,7 +144,7 @@ const State = struct {
 
     fn visibleRows(self: *const State) usize {
         // title + optional search + separator = 2-3 header rows, status = 1
-        const header: usize = if (self.searching or self.search_input.value().len > 0) 3 else 2;
+        const header: usize = 3; // title + filter + separator
         return if (self.ts.rows > header + 1) self.ts.rows - header - 1 else 1;
     }
 
@@ -160,34 +155,19 @@ const State = struct {
     }
 
     // -------------------------------------------------------------------
-    // Key handling
+    // Key handling — all hotkeys are Ctrl-prefixed, input always active
     // -------------------------------------------------------------------
 
-    fn handleSearchKey(self: *State, key: Key) void {
-        switch (key) {
-            .escape => {
-                self.searching = false;
-                self.search_input.clear();
-                self.rescore();
-            },
-            .enter => {
-                self.searching = false;
-            },
-            .ctrl_c => {
-                self.searching = false;
-                self.search_input.clear();
-                self.rescore();
-            },
-            else => {
-                const action = self.search_input.handleKey(key);
-                if (action == .changed) self.rescore();
-            },
-        }
-    }
-
-    fn handleNormalKey(self: *State, key: Key, tty: std.fs.File, tty_fd: posix.fd_t, screen: *Screen) bool {
+    fn handleKey(self: *State, key: Key, tty: std.fs.File, tty_fd: posix.fd_t, screen: *Screen) bool {
         const total = self.filter.count;
         switch (key) {
+            .escape => return true,
+            .ctrl_c => {
+                if (self.search_input.value().len > 0) {
+                    self.search_input.clear();
+                    self.rescore();
+                } else return true;
+            },
             .up, .ctrl_p => {
                 if (self.cursor > 0) self.cursor -= 1;
                 self.clampScroll();
@@ -196,43 +176,34 @@ const State = struct {
                 if (total > 0 and self.cursor + 1 < total) self.cursor += 1;
                 self.clampScroll();
             },
-            .escape => return true,
-            .ctrl_c => {
-                if (self.search_input.value().len > 0) {
-                    self.search_input.clear();
+            .ctrl_o => {
+                const default_kind: secrets_mod.SecretKind = if (self.local_only) .local else .env;
+                if (addSecretModal(tty, tty_fd, self.store, default_kind, self.cwd, self.ts, screen)) {
+                    self.store.save() catch {};
                     self.rescore();
-                } else return true;
+                }
             },
-            .char => |ch| switch (ch) {
-                'q' => return true,
-                '/' => { self.searching = true; self.search_input.focused = true; },
-                'v' => self.show_values = !self.show_values,
-                'a' => {
-                    const default_kind: secrets_mod.SecretKind = if (self.local_only) .local else .env;
-                    if (addSecretModal(tty, tty_fd, self.store, default_kind, self.cwd, self.ts, screen)) {
+            .ctrl_g => {
+                if (self.resolveIndex(self.cursor)) |real_idx| {
+                    if (editSecretModal(tty, tty_fd, self.store, real_idx, self.ts, screen)) {
                         self.store.save() catch {};
                         self.rescore();
                     }
-                },
-                'e' => {
-                    if (self.resolveIndex(self.cursor)) |real_idx| {
-                        if (editSecretModal(tty, tty_fd, self.store, real_idx, self.ts, screen)) {
-                            self.store.save() catch {};
-                            self.rescore();
-                        }
-                    }
-                },
-                'x' => {
-                    if (self.resolveIndex(self.cursor)) |real_idx| {
-                        self.store.remove(real_idx);
-                        self.store.save() catch {};
-                        self.rescore();
-                        if (self.cursor > 0 and self.cursor >= self.filter.count) self.cursor -= 1;
-                    }
-                },
-                else => {},
+                }
             },
-            else => {},
+            .ctrl_x => {
+                if (self.resolveIndex(self.cursor)) |real_idx| {
+                    self.store.remove(real_idx);
+                    self.store.save() catch {};
+                    self.rescore();
+                    if (self.cursor > 0 and self.cursor >= self.filter.count) self.cursor -= 1;
+                }
+            },
+            .ctrl_v => self.show_values = !self.show_values,
+            else => {
+                const action = self.search_input.handleKey(key);
+                if (action == .changed) self.rescore();
+            },
         }
         return false;
     }
@@ -242,45 +213,22 @@ const State = struct {
     // -------------------------------------------------------------------
 
     fn draw(self: *const State, scr: *Screen) void {
-        const cols = scr.width;
-        const rows = scr.height;
-        const filter = self.search_input.value();
         const total = self.filter.count;
-        const show_search = self.searching or filter.len > 0;
 
-        // Layout
-        const scr_rect = tui.Rect.fromSize(cols, rows);
+        // Layout — search bar always visible
+        const scr_rect = tui.Rect.fromSize(scr.width, scr.height);
         var layout: [4]tui.Rect = undefined;
-        if (show_search) {
-            _ = scr_rect.splitRows(&.{
-                tui.Size{ .fixed = 1 }, // title
-                tui.Size{ .fixed = 1 }, // search
-                tui.Size{ .flex = 1 },  // list
-                tui.Size{ .fixed = 1 }, // status
-            }, &layout);
-        } else {
-            _ = scr_rect.splitRows(&.{
-                tui.Size{ .fixed = 1 },  // title
-                tui.Size{ .flex = 1 },   // list
-                tui.Size{ .fixed = 1 },  // status
-            }, layout[0..3]);
-            layout[3] = layout[2]; // status
-            layout[2] = layout[1]; // list
-        }
+        _ = scr_rect.splitRows(&.{
+            tui.Size{ .fixed = 1 }, // title
+            tui.Size{ .fixed = 1 }, // search
+            tui.Size{ .flex = 1 },  // list
+            tui.Size{ .fixed = 1 }, // status
+        }, &layout);
 
-        // Title bar
         self.drawTitle(scr, layout[0], total);
-
-        // Search bar
-        if (show_search) {
-            self.search_input.draw(scr, layout[1]);
-        }
-
-        // Separator + list
+        self.search_input.draw(scr, layout[1]);
         self.drawSeparatorAndList(scr, layout[2], total);
-
-        // Status bar
-        self.drawStatusBar(scr, if (show_search) layout[3] else layout[3]);
+        self.drawStatusBar(scr, layout[3]);
     }
 
     fn drawTitle(self: *const State, scr: *Screen, rect: tui.Rect, total: usize) void {
@@ -480,20 +428,18 @@ const State = struct {
 
     fn drawStatusBar(self: *const State, scr: *Screen, rect: tui.Rect) void {
         const items_show = [_]tui.StatusBar.Item{
-            .{ .key = "q", .label = "quit" },
-            .{ .key = "/", .label = "search" },
-            .{ .key = "a", .label = "add" },
-            .{ .key = "e", .label = "edit" },
-            .{ .key = "v", .label = "hide" },
-            .{ .key = "x", .label = "delete" },
+            .{ .key = "Esc", .label = "quit" },
+            .{ .key = "^O", .label = "add" },
+            .{ .key = "^G", .label = "edit" },
+            .{ .key = "^V", .label = "hide" },
+            .{ .key = "^X", .label = "delete" },
         };
         const items_hide = [_]tui.StatusBar.Item{
-            .{ .key = "q", .label = "quit" },
-            .{ .key = "/", .label = "search" },
-            .{ .key = "a", .label = "add" },
-            .{ .key = "e", .label = "edit" },
-            .{ .key = "v", .label = "show" },
-            .{ .key = "x", .label = "delete" },
+            .{ .key = "Esc", .label = "quit" },
+            .{ .key = "^O", .label = "add" },
+            .{ .key = "^G", .label = "edit" },
+            .{ .key = "^V", .label = "show" },
+            .{ .key = "^X", .label = "delete" },
         };
         const bar = tui.StatusBar{
             .items = if (self.show_values) &items_show else &items_hide,

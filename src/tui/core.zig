@@ -296,6 +296,15 @@ pub fn renderScrollbar(buf: []u8, y: u16, col: u16, visible: u16, total: usize, 
 }
 
 // ---------------------------------------------------------------------------
+// Word separators — shared by editor.zig and tui/Input.zig
+// ---------------------------------------------------------------------------
+
+/// Characters that delimit words for ^W, Alt+B/F, etc.
+pub fn isWordSep(ch: u8) bool {
+    return ch == ' ' or ch == '\t' or ch == '/' or ch == '.' or ch == '-' or ch == '_' or ch == ':' or ch == '|';
+}
+
+// ---------------------------------------------------------------------------
 // Action — component key handling result
 // ---------------------------------------------------------------------------
 

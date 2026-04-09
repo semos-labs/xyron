@@ -44,7 +44,7 @@ pub const MAX_CANDIDATES: usize = 4096;
 pub const MAX_TEXT: usize = 256;
 pub const MAX_DESC: usize = 80;
 
-pub const CandidateKind = enum { builtin, lua_cmd, alias, external_cmd, file, directory, env_var, flag };
+pub const CandidateKind = enum { builtin, lua_cmd, alias, bookmark, external_cmd, file, directory, env_var, flag };
 
 pub const Candidate = struct {
     text: [MAX_TEXT]u8,
@@ -555,6 +555,7 @@ fn kindPriority(kind: CandidateKind) i32 {
         .builtin => 200,
         .lua_cmd => 180,
         .alias => 170,
+        .bookmark => 160,
         .external_cmd => 150,
         .flag => 80,
         .env_var => 40,
@@ -907,6 +908,7 @@ fn kindColor(kind: CandidateKind, selected: bool) []const u8 {
             .builtin => "\x1b[1;36m",
             .lua_cmd => "\x1b[1;35m",
             .alias => "\x1b[1;33m",
+            .bookmark => "\x1b[1;33m",
             .external_cmd => "\x1b[1;37m",
             .directory => "\x1b[1;34m",
             .file => "\x1b[1;37m",
@@ -918,6 +920,7 @@ fn kindColor(kind: CandidateKind, selected: bool) []const u8 {
         .builtin => "\x1b[36m",
         .lua_cmd => "\x1b[35m",
         .alias => "\x1b[33m", // yellow
+        .bookmark => "\x1b[33m", // yellow
         .external_cmd => "\x1b[32m",
         .directory => "\x1b[34m", // blue
         .file => "\x1b[37m", // default

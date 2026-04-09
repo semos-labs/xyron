@@ -42,6 +42,10 @@ pub const Key = union(enum) {
     ctrl_u, // kill to start of line
     ctrl_w, // kill word backward
     ctrl_y, // yank (paste kill buffer)
+    ctrl_g, // TUI: edit
+    ctrl_o, // TUI: add/open
+    ctrl_v, // TUI: toggle view
+    ctrl_x, // TUI: delete
     ctrl_space, // trigger completion
     escape,
     // Alt/Meta combos (ESC + key)
@@ -109,17 +113,21 @@ pub fn readKey() !Key {
         4 => .ctrl_d, // ^D — EOF / delete at cursor
         5 => .ctrl_e, // ^E — end
         6 => .ctrl_f, // ^F — right
+        7 => .ctrl_g, // ^G — TUI edit
         8 => .backspace, // ^H — backspace
         9 => .tab,
         10, 13 => .enter, // ^J / ^M
         11 => .ctrl_k, // ^K — kill to end
         12 => .ctrl_l, // ^L — clear screen
         14 => .ctrl_n, // ^N — down
+        15 => .ctrl_o, // ^O — TUI add/open
         16 => .ctrl_p, // ^P — up
         18 => .ctrl_r, // ^R — reverse search
         20 => .ctrl_t, // ^T — transpose
         21 => .ctrl_u, // ^U — kill to start
+        22 => .ctrl_v, // ^V — TUI toggle view
         23 => .ctrl_w, // ^W — kill word backward
+        24 => .ctrl_x, // ^X — TUI delete
         25 => .ctrl_y, // ^Y — yank
         27 => parseEscapeSequence(), // ESC
         127 => .backspace, // DEL
@@ -228,17 +236,21 @@ pub fn readKeyFromFd(fd: posix.fd_t) ?Key {
         4 => .ctrl_d,
         5 => .ctrl_e,
         6 => .ctrl_f,
+        7 => .ctrl_g,
         8 => .backspace,
         9 => .tab,
         10, 13 => .enter,
         11 => .ctrl_k,
         12 => .ctrl_l,
         14 => .ctrl_n,
+        15 => .ctrl_o,
         16 => .ctrl_p,
         18 => .ctrl_r,
         20 => .ctrl_t,
         21 => .ctrl_u,
+        22 => .ctrl_v,
         23 => .ctrl_w,
+        24 => .ctrl_x,
         25 => .ctrl_y,
         27 => parseEscapeFromFd(fd),
         127 => .backspace,

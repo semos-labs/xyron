@@ -162,6 +162,16 @@ pub fn add(name: []const u8, command: []const u8, description: []const u8) bool 
     return true;
 }
 
+pub fn rename(id: i64, new_name: []const u8) bool {
+    const db = db_ref orelse return false;
+    var stmt = db.prepare("UPDATE bookmarks SET name = ?1 WHERE id = ?2") catch return false;
+    defer stmt.deinit();
+    stmt.bindText(1, new_name);
+    stmt.bindInt(2, id);
+    _ = stmt.step() catch return false;
+    return true;
+}
+
 pub fn remove(name: []const u8) bool {
     const db = db_ref orelse return false;
     var stmt = db.prepare("DELETE FROM bookmarks WHERE name = ?1") catch return false;

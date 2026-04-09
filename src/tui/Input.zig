@@ -317,27 +317,23 @@ fn moveRight(self: *Self) void {
 
 fn moveWordLeft(self: *Self) void {
     var i = self.cursor;
-    // Skip spaces
-    while (i > 0 and self.buf[i - 1] == ' ') i -= 1;
-    // Skip word chars
-    while (i > 0 and self.buf[i - 1] != ' ') i -= 1;
+    while (i > 0 and core.isWordSep(self.buf[i - 1])) i -= 1;
+    while (i > 0 and !core.isWordSep(self.buf[i - 1])) i -= 1;
     self.cursor = i;
 }
 
 fn moveWordRight(self: *Self) void {
     var i = self.cursor;
-    // Skip word chars
-    while (i < self.len and self.buf[i] != ' ') i += 1;
-    // Skip spaces
-    while (i < self.len and self.buf[i] == ' ') i += 1;
+    while (i < self.len and !core.isWordSep(self.buf[i])) i += 1;
+    while (i < self.len and core.isWordSep(self.buf[i])) i += 1;
     self.cursor = i;
 }
 
 fn killWordBack(self: *Self) bool {
     if (self.cursor == 0) return false;
     var start = self.cursor;
-    while (start > 0 and self.buf[start - 1] == ' ') start -= 1;
-    while (start > 0 and self.buf[start - 1] != ' ') start -= 1;
+    while (start > 0 and core.isWordSep(self.buf[start - 1])) start -= 1;
+    while (start > 0 and !core.isWordSep(self.buf[start - 1])) start -= 1;
     self.saveKill(self.buf[start..self.cursor]);
     self.removeRange(start, self.cursor);
     self.cursor = start;
@@ -347,8 +343,8 @@ fn killWordBack(self: *Self) bool {
 fn killWordForward(self: *Self) bool {
     if (self.cursor >= self.len) return false;
     var end = self.cursor;
-    while (end < self.len and self.buf[end] == ' ') end += 1;
-    while (end < self.len and self.buf[end] != ' ') end += 1;
+    while (end < self.len and core.isWordSep(self.buf[end])) end += 1;
+    while (end < self.len and !core.isWordSep(self.buf[end])) end += 1;
     self.saveKill(self.buf[self.cursor..end]);
     self.removeRange(self.cursor, end);
     return true;

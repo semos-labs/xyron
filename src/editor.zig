@@ -602,9 +602,7 @@ pub const Editor = struct {
         return ch == ' ' or ch == '\t';
     }
 
-    fn isWordSep(ch: u8) bool {
-        return ch == ' ' or ch == '\t' or ch == '/' or ch == '.' or ch == '-' or ch == '_';
-    }
+    const isWordSep = @import("tui/core.zig").isWordSep;
 
     // ------------------------------------------------------------------
     // UTF-8 helpers

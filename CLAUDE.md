@@ -97,6 +97,7 @@ All built-in TUI tools (history explorer, fz, Ctrl+R, future tools) must share a
 - **Status bar**: `7m` inverse, key pills `1m` bold key + normal label
 - **Empty state**: centered `2m` dim message
 - **Cursor**: visible in search input, positioned at end of filter text
+- **Hotkeys**: all TUI hotkeys MUST use Ctrl-prefixed keys (`^B`, `^F`, `^D`, etc.) — never bare letters (`q`, `e`, `x`). The user must be able to type freely in the search/filter input at all times. Escape closes the TUI.
 - **Resize**: handle SIGWINCH (EINTR from `c.read`), re-query size, re-render
 - **Alternate screen**: `\x1b[?1049h` on entry, `\x1b[?1049l` on exit (before writing result)
 

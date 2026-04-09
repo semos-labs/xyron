@@ -42,6 +42,7 @@ pub const pad = @import("tui/core.zig").pad;
 pub const clipText = @import("tui/core.zig").clipText;
 pub const padLine = @import("tui/core.zig").padLine;
 pub const renderScrollbar = @import("tui/core.zig").renderScrollbar;
+pub const isWordSep = @import("tui/core.zig").isWordSep;
 pub const clipTextUnicode = @import("tui/core.zig").clipTextUnicode;
 pub const displayWidth = @import("tui/core.zig").displayWidth;
 pub const unicode = @import("tui/core.zig").unicode;

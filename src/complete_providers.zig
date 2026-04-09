@@ -16,6 +16,7 @@ const highlight = @import("highlight.zig");
 const complete = @import("complete.zig");
 const help_mod = @import("complete_help.zig");
 const aliases_mod = @import("aliases.zig");
+const bookmarks_mod = @import("bookmarks.zig");
 
 /// Gather candidates based on context.
 pub fn gather(
@@ -35,6 +36,7 @@ pub fn gather(
                 provideBuiltins(out, ctx.prefix);
                 provideAliases(out, ctx.prefix);
                 provideLuaCommands(out, ctx.prefix);
+                provideBookmarks(out);
                 providePathCommands(out, ctx.prefix, env, cmd_cache);
             }
         },
@@ -128,6 +130,14 @@ fn provideAliases(out: *complete.CandidateBuffer, prefix: []const u8) void {
 // ---------------------------------------------------------------------------
 // Lua command provider
 // ---------------------------------------------------------------------------
+
+fn provideBookmarks(out: *complete.CandidateBuffer) void {
+    var buf: [bookmarks_mod.MAX_BOOKMARKS]bookmarks_mod.Bookmark = undefined;
+    const count = bookmarks_mod.loadAll(&buf);
+    for (buf[0..count]) |*bm| {
+        out.addWithDesc(bm.nameSlice(), bm.commandSlice(), .bookmark);
+    }
+}
 
 fn provideLuaCommands(out: *complete.CandidateBuffer, prefix: []const u8) void {
     _ = prefix;
