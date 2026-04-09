@@ -359,7 +359,8 @@ pub fn readLine(
             },
             .right, .ctrl_f => {
                 if (complete_mod.inline_state.active) {
-                    complete_mod.dismissInline(stdout);
+                    _ = complete_mod.acceptInline(ed, stdout);
+                    content_changed = true;
                 } else if (ed.cursor == ed.len) {
                     if (getGhostSuggestion(ed)) |ghost| {
                         ed.setContent(ghost);
