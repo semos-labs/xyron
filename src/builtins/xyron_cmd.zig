@@ -63,6 +63,10 @@ pub fn run(args: []const []const u8, stdout: std.fs.File, stderr: std.fs.File, e
         stdout.writeAll("\x1b[2mreloading config...\x1b[0m\n") catch {};
         return .{};
     }
+    if (std.mem.eql(u8, args[0], "bookmarks") or std.mem.eql(u8, args[0], "bm")) {
+        const sub_args = if (args.len > 1) args[1..] else &[_][]const u8{};
+        return @import("bookmarks_cmd.zig").run(sub_args, stdout, stderr);
+    }
     if (std.mem.eql(u8, args[0], "doctor")) return doctor_cmd.run(stdout);
     if (std.mem.eql(u8, args[0], "context")) {
         const sub_args = if (args.len > 1) args[1..] else &[_][]const u8{};

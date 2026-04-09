@@ -60,6 +60,7 @@ fn provideXyron(out: *complete.CandidateBuffer, ctx: *const complete.CompletionC
             .{ .name = "context", .desc = "Show/explain context" },
             .{ .name = "project", .desc = "Project info" },
             .{ .name = "secrets", .desc = "Manage secrets" },
+            .{ .name = "bookmarks", .desc = "Manage bookmarks" },
         };
         for (subcmds) |cmd| {
             out.addWithDesc(cmd.name, cmd.desc, .builtin);
@@ -91,6 +92,20 @@ fn provideXyron(out: *complete.CandidateBuffer, ctx: *const complete.CompletionC
             .{ .name = "list", .desc = "List secrets" },
         };
         for (secrets_cmds) |cmd| {
+            out.addWithDesc(cmd.name, cmd.desc, .builtin);
+        }
+        return;
+    }
+
+    // "xyron bookmarks <TAB>" — complete bookmarks subcommands
+    if ((std.mem.eql(u8, subcmd, "bookmarks") or std.mem.eql(u8, subcmd, "bm")) and ctx.cmd_args_len == 1) {
+        const bm_cmds = [_]struct { name: []const u8, desc: []const u8 }{
+            .{ .name = "add", .desc = "Add a bookmark" },
+            .{ .name = "remove", .desc = "Remove a bookmark" },
+            .{ .name = "list", .desc = "List bookmarks" },
+            .{ .name = "edit", .desc = "Edit with $EDITOR" },
+        };
+        for (bm_cmds) |cmd| {
             out.addWithDesc(cmd.name, cmd.desc, .builtin);
         }
         return;

@@ -36,6 +36,12 @@ pub const HistoryDb = struct {
         if (self.db) |*d| d.close();
     }
 
+    /// Get the underlying SQLite database handle (for shared tables like bookmarks).
+    pub fn getDb(self: *HistoryDb) ?*sqlite.Db {
+        if (self.db != null) return &self.db.?;
+        return null;
+    }
+
     /// Record a completed command group.
     pub fn recordCommand(
         self: *HistoryDb,

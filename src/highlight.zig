@@ -11,6 +11,7 @@ const lua_commands = @import("lua_commands.zig");
 const lua_api = @import("lua_api.zig");
 const lua_eval = @import("lua_eval.zig");
 const aliases_mod = @import("aliases.zig");
+const bookmarks_mod = @import("bookmarks.zig");
 const path_search = @import("path_search.zig");
 const environ_mod = @import("environ.zig");
 
@@ -27,6 +28,7 @@ pub const TokenClass = enum {
     flag,
     argument,
     env_assignment,
+    bookmark_cmd,
     pipe,
     redirect,
     ampersand,
@@ -41,6 +43,7 @@ fn styleFor(class: TokenClass) []const u8 {
     return switch (class) {
         .builtin_cmd => "\x1b[1;36m", // bold cyan
         .lua_cmd => "\x1b[1;35m", // bold magenta
+        .bookmark_cmd => "\x1b[1;33m", // bold yellow
         .lua_code => "\x1b[35m", // magenta
         .valid_cmd => "\x1b[1;32m", // bold green
         .unknown_cmd => "\x1b[4;31m", // underline red
@@ -250,6 +253,7 @@ fn classifyWord(
         if (builtins.isBuiltin(word)) return .builtin_cmd;
         if (aliases_mod.isAlias(word)) return .valid_cmd;
         if (lua_commands.isLuaCommand(word)) return .lua_cmd;
+        if (bookmarks_mod.findByName(word) != null) return .bookmark_cmd;
         // Skip PATH lookup for words with / (paths)
         if (std.mem.indexOfScalar(u8, word, '/') != null) return .argument;
         if (cache.exists(word, env)) return .valid_cmd;

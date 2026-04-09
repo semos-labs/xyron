@@ -12,6 +12,7 @@ const history_db_mod = @import("history_db.zig");
 const prompt_mod = @import("prompt.zig");
 const style = @import("style.zig");
 const tui = @import("tui.zig");
+const bookmarks_mod = @import("bookmarks.zig");
 const keys = @import("keys.zig");
 
 const Screen = tui.Screen;
@@ -184,6 +185,14 @@ pub fn run(
             .ctrl_d => {
                 state.show_cwd_only = !state.show_cwd_only;
                 state.rescore();
+            },
+            .ctrl_b => {
+                // Bookmark selected command
+                if (state.filter.count > 0) {
+                    const idx = state.filter.buf[state.selected].index;
+                    const cmd = entries[idx].rawSlice();
+                    bookmarkModal(&screen, tty, tty_fd, cmd);
+                }
             },
             else => {
                 const action = state.input.handleKey(key);
@@ -440,6 +449,7 @@ const State = struct {
             .{ .key = "Enter", .label = select_label },
             .{ .key = "Esc", .label = "cancel" },
             .{ .key = "Tab", .label = "detail" },
+            .{ .key = "^B", .label = "bookmark" },
             .{ .key = "^F", .label = if (self.show_failed_only) "all" else "failed" },
             .{ .key = "^D", .label = if (self.show_cwd_only) "all dirs" else "this dir" },
         };
@@ -447,6 +457,83 @@ const State = struct {
         bar.draw(scr, rect);
     }
 };
+
+// ---------------------------------------------------------------------------
+// Bookmark modal — name the selected command
+// ---------------------------------------------------------------------------
+
+fn bookmarkModal(scr: *Screen, tty: std.fs.File, tty_fd: posix.fd_t, command: []const u8) void {
+    var name_input = tui.Input{};
+    name_input.prompt = "Name: ";
+    name_input.prompt_color = .cyan;
+    name_input.focused = true;
+    name_input.placeholder = "my-command";
+
+    var error_msg: []const u8 = "";
+
+    while (true) {
+        drawBookmarkModal(scr, tty, command, &name_input, error_msg);
+        const key = keys.readKeyFromFd(tty_fd) orelse return;
+        switch (key) {
+            .escape, .ctrl_c => return,
+            .enter => {
+                const name = name_input.value();
+                if (name.len == 0) { error_msg = "Name required"; continue; }
+                if (!bookmarks_mod.isValidName(name)) { error_msg = "Invalid name (letters, numbers, _ and -)"; continue; }
+                if (bookmarks_mod.nameConflicts(name)) { error_msg = "Conflicts with existing command"; continue; }
+                if (bookmarks_mod.add(name, command, "")) return;
+                error_msg = "Failed to save";
+            },
+            else => {
+                error_msg = "";
+                _ = name_input.handleKey(key);
+            },
+        }
+    }
+}
+
+fn drawBookmarkModal(scr: *Screen, tty: std.fs.File, command: []const u8, name_input: *const tui.Input, error_msg: []const u8) void {
+    const popup = tui.Popup{
+        .title = "Bookmark",
+        .width = .{ .fixed = @min(60, scr.width -| 4) },
+        .height = .{ .fixed = 8 },
+        .border_color = .bright_black,
+        .title_color = .white,
+    };
+    const scr_rect = tui.Rect.fromSize(scr.width, scr.height);
+    popup.draw(scr, scr_rect);
+
+    const content = popup.contentRect(scr_rect);
+    if (content.w < 4 or content.h < 4) { scr.flush(tty); return; }
+
+    // Command preview (row 1)
+    _ = scr.write(content.y + 1, content.x, "Cmd", .{ .dim = true });
+    scr.pad(content.y + 1, content.x + 3, 2, .{});
+    const cmd_w: u16 = @intCast(@min(command.len, content.w -| 6));
+    _ = scr.write(content.y + 1, content.x + 5, command[0..cmd_w], .{});
+    if (command.len > cmd_w) _ = scr.write(content.y + 1, content.x + 5 + cmd_w, style.box.ellipsis, .{ .dim = true });
+    scr.pad(content.y + 1, content.x + 5 + cmd_w + 1, content.w -| (6 + cmd_w), .{});
+
+    // Name input (row 3)
+    name_input.draw(scr, tui.Rect{ .x = content.x, .y = content.y + 3, .w = content.w, .h = 1 });
+
+    // Error or help (row 5)
+    if (error_msg.len > 0) {
+        _ = scr.write(content.y + 5, content.x, error_msg, .{ .fg = .red });
+        scr.pad(content.y + 5, content.x + @as(u16, @intCast(error_msg.len)), content.w -| @as(u16, @intCast(error_msg.len)), .{});
+    } else {
+        const help = tui.StatusBar{
+            .items = &.{
+                .{ .key = "Enter", .label = "save" },
+                .{ .key = "Esc", .label = "cancel" },
+            },
+            .transparent = true,
+        };
+        help.draw(scr, tui.Rect{ .x = content.x, .y = content.y + 5, .w = content.w, .h = 1 });
+    }
+
+    scr.flush(tty);
+}
 
 // ---------------------------------------------------------------------------
 // Loading

@@ -31,6 +31,7 @@ const overlay = @import("overlay.zig");
 const ipc = @import("ipc.zig");
 const context_manager = @import("project/context_manager.zig");
 const secrets_mod = @import("secrets.zig");
+const bookmarks_mod = @import("bookmarks.zig");
 const project_resolver = @import("project/resolver.zig");
 const git_info_mod = @import("git_info.zig");
 const title = @import("title.zig");
@@ -139,6 +140,7 @@ pub const Shell = struct {
         lua_api.setEnv(&self.env);
         lua_api.setBlockTable(&self.blocks);
         lua_api.setHistoryDb(&self.history_db);
+        bookmarks_mod.initDb(self.history_db.getDb());
 
         // Start IPC socket if --ipc flag was passed
         if (self.ipc_enabled) {
@@ -444,6 +446,24 @@ pub const Shell = struct {
             }
         }
 
+        // Check for bookmark/snippet (single command, not in pipeline)
+        if (expanded.commands.len == 1 and !expanded.background) {
+            const cmd = &expanded.commands[0];
+            if (cmd.argv.len > 0) {
+                if (bookmarks_mod.findByName(cmd.argv[0])) |bm| {
+                    // Expand snippet placeholders with remaining args
+                    var expand_buf: [2048]u8 = undefined;
+                    const expanded_cmd = if (bm.isSnippet() and cmd.argv.len > 1)
+                        bm.expand(cmd.argv[1..], &expand_buf)
+                    else
+                        bm.commandSlice();
+                    _ = self.history_db.recordCommand(trimmed, cwd_early, 0, 0, types.timestampMs(), false, &.{});
+                    self.executeLine(expanded_cmd);
+                    return;
+                }
+            }
+        }
+
         var cwd_before_buf: [std.fs.max_path_bytes]u8 = undefined;
         const cwd_before = posix.getcwd(&cwd_before_buf) catch "";
 
@@ -634,15 +654,25 @@ pub const Shell = struct {
 
     /// Reload Lua config and re-resolve project context.
     fn reloadConfig(self: *Shell, stdout: std.fs.File) void {
+        // Suspend raw mode so Lua errors and output are visible
+        term.suspendRawMode();
+
         // Clear require() cache so user modules are re-executed
         lua_api.clearModuleCache(self.lua);
-        // Reload Lua config
+        // Reload Lua config — setenv calls re-apply/overwrite
         loadLuaConfig(self.lua);
+        // Invalidate command cache (PATH may have changed)
+        self.cmd_cache.invalidate();
 
         // Re-resolve project context
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = posix.getcwd(&cwd_buf) catch return;
+        const cwd = posix.getcwd(&cwd_buf) catch {
+            term.resumeRawMode();
+            return;
+        };
         self.handleProjectChange(cwd, stdout);
+
+        term.resumeRawMode();
     }
 
     /// Do initial project detection on shell startup.

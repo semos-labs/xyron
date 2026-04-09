@@ -214,11 +214,12 @@ pub fn clearModuleCache(L: LuaState) void {
     //   end
     // end
     const code =
-        \\for k, v in pairs(package.loaded) do
-        \\  if type(v) ~= "boolean" and k ~= "_G" and k ~= "string"
-        \\     and k ~= "table" and k ~= "math" and k ~= "io"
-        \\     and k ~= "os" and k ~= "coroutine" and k ~= "debug"
-        \\     and k ~= "package" and k ~= "utf8" then
+        \\local protected = {
+        \\  _G=true, string=true, table=true, math=true, io=true,
+        \\  os=true, coroutine=true, debug=true, package=true, utf8=true,
+        \\}
+        \\for k in pairs(package.loaded) do
+        \\  if not protected[k] then
         \\    package.loaded[k] = nil
         \\  end
         \\end
