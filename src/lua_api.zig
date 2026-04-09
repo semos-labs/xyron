@@ -1021,6 +1021,15 @@ fn apiPromptConfigure(L: ?*c.lua_State) callconv(.c) c_int {
         readIconField(state, 2, "icon", &cfg.icon, &cfg.icon_len);
         readIconField(state, 2, "icon_vim", &cfg.icon_vim, &cfg.icon_vim_len);
         prompt_mod.setSymbolWidgetConfig(cfg);
+    } else if (std.mem.eql(u8, name, "cwd")) {
+        var cfg = prompt_mod.CwdWidgetConfig{};
+        _ = c.lua_getfield(state, 2, "truncate");
+        if (c.lua_type(state, -1) == c.LUA_TNUMBER) {
+            const val = c.lua_tointegerx(state, -1, null);
+            if (val > 0 and val <= 255) cfg.truncate = @intCast(val);
+        }
+        c.lua_pop(state, 1);
+        prompt_mod.setCwdWidgetConfig(cfg);
     }
 
     return 0;

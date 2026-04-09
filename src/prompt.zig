@@ -207,6 +207,22 @@ pub fn setGitWidgetConfig(cfg: GitWidgetConfig) void {
     git_widget_config = cfg;
 }
 
+/// Cwd widget config — configurable via xyron.prompt.configure("cwd", {...})
+pub const CwdWidgetConfig = struct {
+    /// When > 0, show only the last N path components.
+    truncate: u8 = 0, // 0 = no truncation
+};
+
+var cwd_widget_config: CwdWidgetConfig = .{};
+
+pub fn getCwdWidgetConfig() *const CwdWidgetConfig {
+    return &cwd_widget_config;
+}
+
+pub fn setCwdWidgetConfig(cfg: CwdWidgetConfig) void {
+    cwd_widget_config = cfg;
+}
+
 /// Symbol widget config — configurable via xyron.prompt.configure("symbol", {...})
 pub const SymbolWidgetConfig = struct {
     icon: [16]u8 = undefined,
@@ -412,18 +428,46 @@ fn renderCwd(dest: []u8, seg: *const Segment, ctx: *const PromptContext) SegResu
     const vis_start = pos;
 
     // Tilde contraction
+    var path: []const u8 = ctx.cwd;
+    var tilde = false;
     if (ctx.home.len > 0 and std.mem.eql(u8, ctx.cwd, ctx.home)) {
-        pos += cp(dest[pos..], "~");
+        path = "~";
+        tilde = true;
     } else if (ctx.home.len > 0 and std.mem.startsWith(u8, ctx.cwd, ctx.home) and ctx.cwd.len > ctx.home.len and ctx.cwd[ctx.home.len] == '/') {
-        pos += cp(dest[pos..], "~");
-        pos += cp(dest[pos..], ctx.cwd[ctx.home.len..]);
+        path = ctx.cwd[ctx.home.len..]; // "/foo/bar" portion after home
+        tilde = true;
+    }
+
+    // Apply truncation — show only the last N components, no prefix
+    const cfg = getCwdWidgetConfig();
+    if (cfg.truncate > 0 and !std.mem.eql(u8, path, "~")) {
+        const display = truncatePath(path, cfg.truncate);
+        pos += cp(dest[pos..], display);
     } else {
-        pos += cp(dest[pos..], ctx.cwd);
+        if (tilde) pos += cp(dest[pos..], "~");
+        if (!tilde or !std.mem.eql(u8, path, "~")) pos += cp(dest[pos..], path);
     }
 
     const vis_end = pos;
     if (seg.color.len > 0) pos += style.reset(dest[pos..]);
     return .{ .bytes = pos, .visible = vis_end - vis_start };
+}
+
+/// Return the last N path components from a path string.
+/// E.g. truncatePath("/foo/bar/baz/qux", 2) returns "baz/qux".
+fn truncatePath(path: []const u8, n: u8) []const u8 {
+    if (n == 0 or path.len == 0) return path;
+    var count: u8 = 0;
+    var i = path.len;
+    while (i > 0) {
+        i -= 1;
+        if (path[i] == '/') {
+            count += 1;
+            if (count >= n) return path[i + 1 ..];
+        }
+    }
+    // Fewer components than n — return the whole path (strip leading /)
+    return if (path[0] == '/') path[1..] else path;
 }
 
 fn renderSymbol(dest: []u8, ctx: *const PromptContext) SegResult {
