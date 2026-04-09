@@ -16,6 +16,7 @@ pub const TokenKind = enum {
     pipe,
     redirect_in,
     redirect_out,
+    redirect_append, // >>
     redirect_err,
     redirect_dup, // 2>&1, >&2, 1>&2
     ampersand, // &
@@ -67,6 +68,13 @@ pub fn tokenize(allocator: std.mem.Allocator, input: []const u8) ![]Token {
                 try tokens.append(allocator, .{ .kind = .redirect_err, .value = input[i .. i + 2] });
                 i += 2;
             }
+            continue;
+        }
+
+        // >> append redirect (must come before single >)
+        if (input[i] == '>' and i + 1 < input.len and input[i + 1] == '>' and !in_comparison_context) {
+            try tokens.append(allocator, .{ .kind = .redirect_append, .value = input[i .. i + 2] });
+            i += 2;
             continue;
         }
 
@@ -238,6 +246,15 @@ test "fd dup redirect >&2" {
     try std.testing.expectEqual(@as(usize, 2), tokens.len);
     try std.testing.expectEqual(TokenKind.redirect_dup, tokens[1].kind);
     try std.testing.expectEqualStrings(">&2", tokens[1].value);
+}
+
+test "append redirect >>" {
+    const tokens = try tokenize(std.testing.allocator, "echo hello >> file.txt");
+    defer freeTokens(std.testing.allocator, tokens);
+    try std.testing.expectEqual(@as(usize, 4), tokens.len);
+    try std.testing.expectEqual(TokenKind.redirect_append, tokens[2].kind);
+    try std.testing.expectEqualStrings(">>", tokens[2].value);
+    try std.testing.expectEqualStrings("file.txt", tokens[3].value);
 }
 
 test "fd dup in pipeline" {

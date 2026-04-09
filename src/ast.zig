@@ -14,6 +14,7 @@ const environ_mod = @import("environ.zig");
 pub const RedirectKind = enum {
     stdin, // < file
     stdout, // > file
+    append, // >> file
     stderr, // 2> file
     dup, // 2>&1, >&2, 1>&2 — fd duplication
 };

@@ -476,6 +476,12 @@ fn applyRedirects(redirects: []const ast.Redirect) void {
                 posix.dup2(fd, posix.STDOUT_FILENO) catch {};
                 posix.close(fd);
             },
+            .append => {
+                const path_z = toZ(redir.path) orelse continue;
+                const fd = posix.openZ(path_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch continue;
+                posix.dup2(fd, posix.STDOUT_FILENO) catch {};
+                posix.close(fd);
+            },
             .stderr => {
                 const path_z = toZ(redir.path) orelse continue;
                 const fd = posix.openZ(path_z, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch continue;

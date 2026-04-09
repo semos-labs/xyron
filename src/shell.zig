@@ -56,6 +56,7 @@ pub const Shell = struct {
     secret_key_count: usize = 0,
     last_exit_code: u8,
     last_duration_ms: i64,
+    last_bg_pid: i32,
     running: bool,
     ipc_enabled: bool,
 
@@ -110,6 +111,7 @@ pub const Shell = struct {
             .project_arena = project_arena,
             .last_exit_code = 0,
             .last_duration_ms = 0,
+            .last_bg_pid = 0,
             .running = true,
             .ipc_enabled = false,
         };
@@ -426,8 +428,12 @@ pub const Shell = struct {
         };
         defer pipeline.deinit(self.allocator);
 
-        // Expand
-        var expanded = expand.expandPipeline(self.allocator, &pipeline, &self.env) catch {
+        // Expand (with special variables from shell state)
+        var expanded = expand.expandPipelineWithVars(self.allocator, &pipeline, &self.env, .{
+            .exit_code = self.last_exit_code,
+            .shell_pid = std.c.getpid(),
+            .last_bg_pid = self.last_bg_pid,
+        }) catch {
             stderr.writeAll("xyron: expansion error\n") catch {};
             return;
         };
@@ -495,6 +501,8 @@ pub const Shell = struct {
             const job_id = self.job_table.createJob(
                 exec_plan.group_id, trimmed, result.pids[0..result.pid_count], result.pgid, true,
             );
+            // Track last background PID for $! expansion
+            if (result.pid_count > 0) self.last_bg_pid = @intCast(result.pids[0]);
             if (job_id) |id| {
                 if (self.blocks.findById(block_id)) |blk| blk.job_id = id;
                 var buf: [256]u8 = undefined;
