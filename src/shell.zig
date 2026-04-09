@@ -30,6 +30,7 @@ const block_mod = @import("block.zig");
 const overlay = @import("overlay.zig");
 const ipc = @import("ipc.zig");
 const context_manager = @import("project/context_manager.zig");
+const secrets_mod = @import("secrets.zig");
 const project_resolver = @import("project/resolver.zig");
 const git_info_mod = @import("git_info.zig");
 const title = @import("title.zig");
@@ -48,6 +49,10 @@ pub const Shell = struct {
     lua: lua_api.LuaState,
     project_state: context_manager.SessionProjectState,
     project_arena: std.heap.ArenaAllocator,
+    /// Keys of env vars set by secrets — removed on reload/cd.
+    secret_keys: [64][128]u8 = undefined,
+    secret_key_lens: [64]usize = [_]usize{0} ** 64,
+    secret_key_count: usize = 0,
     last_exit_code: u8,
     last_duration_ms: i64,
     running: bool,
@@ -568,6 +573,9 @@ pub const Shell = struct {
         // Snapshot secrets mtime after overlay is applied (not during resolution)
         self.project_state.snapshotSecretsMtime();
 
+        // Load secrets (env globals + local for current dir)
+        self.loadSecrets(new_cwd);
+
         // Update Lua-accessible project info cache
         updateProjectInfoCache(&result.next);
 
@@ -576,6 +584,48 @@ pub const Shell = struct {
             stdout.writeAll(msg) catch {};
             stdout.writeAll("\n") catch {};
         }
+    }
+
+    /// Load encrypted secrets into environment.
+    /// Applies env-type secrets globally and local-type secrets
+    /// for the current directory. Removes previously applied secret keys first.
+    fn loadSecrets(self: *Shell, cwd: []const u8) void {
+        // Remove previously applied secret env vars
+        for (0..self.secret_key_count) |i| {
+            const key = self.secret_keys[i][0..self.secret_key_lens[i]];
+            self.env.unset(key);
+        }
+        self.secret_key_count = 0;
+
+        var store = secrets_mod.SecretsStore.init();
+        if (!store.isInitialized()) return;
+        store.load() catch return;
+
+        // Apply env secrets (global)
+        var env_secrets: [64]secrets_mod.Secret = undefined;
+        const env_count = store.getEnvSecrets(&env_secrets);
+        for (0..env_count) |i| {
+            self.applySecret(&env_secrets[i]);
+        }
+
+        // Apply local secrets for current directory
+        var local_secrets: [64]secrets_mod.Secret = undefined;
+        const local_count = store.getLocalSecrets(cwd, &local_secrets);
+        for (0..local_count) |i| {
+            self.applySecret(&local_secrets[i]);
+        }
+    }
+
+    fn applySecret(self: *Shell, secret: *const secrets_mod.Secret) void {
+        if (self.secret_key_count >= 64) return;
+        const name = secret.nameSlice();
+        const value = secret.valueSlice();
+        self.env.set(name, value) catch return;
+        // Track the key so we can remove it on next reload
+        const kl = @min(name.len, 128);
+        @memcpy(self.secret_keys[self.secret_key_count][0..kl], name[0..kl]);
+        self.secret_key_lens[self.secret_key_count] = kl;
+        self.secret_key_count += 1;
     }
 
     /// Reload Lua config and re-resolve project context.

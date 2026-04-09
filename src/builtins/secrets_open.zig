@@ -129,7 +129,14 @@ const State = struct {
         self.filter.reset();
         for (0..self.store.count) |i| {
             const sec = &self.store.secrets[i];
-            if (self.local_only and (sec.kind != .local or !std.mem.eql(u8, sec.dirSlice(), self.cwd))) continue;
+            if (self.local_only and sec.kind != .local) continue;
+            // Hide local secrets from other directories
+            if (sec.kind == .local) {
+                const sdir = sec.dirSlice();
+                const matches = std.mem.eql(u8, self.cwd, sdir) or
+                    (self.cwd.len > sdir.len and std.mem.startsWith(u8, self.cwd, sdir) and self.cwd[sdir.len] == '/');
+                if (!matches) continue;
+            }
             self.filter.push(query, sec.nameSlice(), @intCast(i));
         }
         self.cursor = 0;
@@ -201,9 +208,8 @@ const State = struct {
                 '/' => { self.searching = true; self.search_input.focused = true; },
                 'v' => self.show_values = !self.show_values,
                 'a' => {
-                    const kind: secrets_mod.SecretKind = if (self.local_only) .local else .env;
-                    const dir = if (self.local_only) self.cwd else "";
-                    if (addSecretModal(tty, tty_fd, self.store, kind, dir, self.ts, screen)) {
+                    const default_kind: secrets_mod.SecretKind = if (self.local_only) .local else .env;
+                    if (addSecretModal(tty, tty_fd, self.store, default_kind, self.cwd, self.ts, screen)) {
                         self.store.save() catch {};
                         self.rescore();
                     }
@@ -327,6 +333,13 @@ const State = struct {
         }
     }
 
+    // Fixed column widths for table-like alignment
+    const col_arrow: u16 = 3; // " > " or "   "
+    const col_type: u16 = 6; // "env   " / "local " / "pass  "
+    const col_name: u16 = 20; // secret name
+    const col_value: u16 = 16; // value or dots
+    // description gets remaining space
+
     fn drawEntries(self: *const State, scr: *Screen, list_rect: tui.Rect, content_w: u16, vis_end: usize) void {
         var row: u16 = 0;
         const filtered = self.filter.results();
@@ -334,74 +347,81 @@ const State = struct {
         for (self.scroll..vis_end) |vi| {
             const sec = &self.store.secrets[filtered[vi].index];
             const is_sel = vi == self.cursor;
+            const y = list_rect.y + row;
             var col = list_rect.x;
 
-            // Arrow
+            // Arrow (3 cols)
             if (is_sel) {
-                col += scr.write(list_rect.y + row, col, " > ", .{ .fg = .cyan });
+                col += scr.write(y, col, " > ", .{ .fg = .cyan });
             } else {
-                scr.pad(list_rect.y + row, col, 3, .{});
-                col += 3;
+                scr.pad(y, col, col_arrow, .{});
+                col += col_arrow;
             }
 
-            // Kind badge
+            // Type (6 cols)
+            const badge_label: []const u8 = switch (sec.kind) {
+                .env => "env",
+                .local => "local",
+                .password => "pass",
+            };
             const badge_color: style.Color = switch (sec.kind) {
                 .env => .green,
                 .local => .blue,
                 .password => .yellow,
             };
-            col += scr.write(list_rect.y + row, col, style.box.bullet, .{ .fg = badge_color });
-            scr.pad(list_rect.y + row, col, 1, .{});
-            col += 1;
+            const bw = scr.write(y, col, badge_label, .{ .fg = badge_color, .dim = true });
+            scr.pad(y, col + bw, col_type -| bw, .{});
+            col += col_type;
 
-            // Name
+            // Name (20 cols)
             const name = sec.nameSlice();
-            const max_name: u16 = 24;
-            const name_w: u16 = @intCast(@min(name.len, max_name));
+            const name_w: u16 = @intCast(@min(name.len, col_name));
             const name_style: Screen.Style = if (is_sel) .{ .bold = true } else .{};
-            col += scr.write(list_rect.y + row, col, name[0..name_w], name_style);
+            const nw = scr.write(y, col, name[0..name_w], name_style);
+            if (name.len > col_name) _ = scr.write(y, col + nw, style.box.ellipsis, name_style);
+            scr.pad(y, col + @min(nw + 1, col_name), col_name -| @min(nw + 1, col_name), .{});
+            col += col_name;
 
-            // Value
+            // Value (16 cols)
             const val = sec.valueSlice();
             if (val.len > 0) {
-                scr.pad(list_rect.y + row, col, 2, .{});
-                col += 2;
                 if (self.show_values) {
-                    const max_val: u16 = if (content_w > col - list_rect.x + 20) content_w - (col - list_rect.x) - 16 else 16;
-                    const val_w: u16 = @intCast(@min(val.len, max_val));
-                    col += scr.write(list_rect.y + row, col, val[0..val_w], .{ .dim = true });
-                    if (val.len > max_val) col += scr.write(list_rect.y + row, col, style.box.ellipsis, .{ .dim = true });
+                    const needs_ellipsis = val.len > col_value;
+                    const vw: u16 = @intCast(@min(val.len, if (needs_ellipsis) col_value - 1 else col_value));
+                    const written = scr.write(y, col, val[0..vw], .{ .dim = true });
+                    var used = written;
+                    if (needs_ellipsis) { used += scr.write(y, col + used, style.box.ellipsis, .{ .dim = true }); }
+                    scr.pad(y, col + used, col_value -| used, .{});
                 } else {
-                    col += scr.write(list_rect.y + row, col, "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2", .{ .dim = true });
+                    _ = scr.write(y, col, "\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2\xe2\x80\xa2", .{ .dim = true });
+                    scr.pad(y, col + 8, col_value -| 8, .{});
                 }
-            }
-
-            // Description (right-aligned)
-            const desc = sec.descSlice();
-            const desc_w: u16 = @intCast(desc.len);
-            if (desc.len > 0 and col + desc_w + 2 < list_rect.x + content_w) {
-                scr.pad(list_rect.y + row, col, list_rect.x + content_w - col - desc_w, .{});
-                _ = scr.write(list_rect.y + row, list_rect.x + content_w - desc_w, desc, .{ .dim = true });
             } else {
-                scr.pad(list_rect.y + row, col, list_rect.x + content_w -| col, .{});
+                scr.pad(y, col, col_value, .{});
+            }
+            col += col_value;
+
+            // Description (remaining space, left-aligned)
+            const desc = sec.descSlice();
+            const remaining = content_w -| (col - list_rect.x);
+            if (desc.len > 0 and remaining > 0) {
+                const dw: u16 = @intCast(@min(desc.len, remaining));
+                const written = scr.write(y, col, desc[0..dw], .{ .dim = true });
+                scr.pad(y, col + written, remaining -| written, .{});
+            } else {
+                scr.pad(y, col, remaining, .{});
             }
 
             row += 1;
 
-            // Detail line for selected
-            if (is_sel and row < list_rect.h) {
-                scr.pad(list_rect.y + row, list_rect.x, 5, .{});
-                var dcol = list_rect.x + 5;
-                switch (sec.kind) {
-                    .env => dcol += scr.write(list_rect.y + row, dcol, "env", .{ .dim = true }),
-                    .local => {
-                        dcol += scr.write(list_rect.y + row, dcol, "local ", .{ .dim = true });
-                        const dir = sec.dirSlice();
-                        const dir_max: u16 = if (content_w > 20) content_w - 20 else content_w;
-                        dcol += scr.write(list_rect.y + row, dcol, dir[0..@min(dir.len, dir_max)], .{ .dim = true, .fg = .cyan });
-                    },
-                    .password => dcol += scr.write(list_rect.y + row, dcol, "password", .{ .dim = true }),
-                }
+            // Detail line for selected (shows directory for local secrets)
+            if (is_sel and sec.kind == .local and sec.dir_len > 0 and row < list_rect.h) {
+                const indent = col_arrow + col_type;
+                scr.pad(list_rect.y + row, list_rect.x, indent, .{});
+                const dir = sec.dirSlice();
+                const dir_max: u16 = if (content_w > indent + 2) content_w - indent - 2 else content_w;
+                var dcol = list_rect.x + indent;
+                dcol += scr.write(list_rect.y + row, dcol, dir[0..@min(dir.len, dir_max)], .{ .dim = true, .fg = .cyan });
                 scr.pad(list_rect.y + row, dcol, list_rect.x + content_w -| dcol, .{});
                 row += 1;
             }
@@ -487,40 +507,61 @@ const State = struct {
 // Add / Edit modals
 // ---------------------------------------------------------------------------
 
-const FieldIdx = enum(u2) { name = 0, value = 1, desc = 2 };
+const FieldIdx = enum(u3) { name = 0, value = 1, desc = 2, kind = 3 };
+const field_count = 4;
 
-fn addSecretModal(tty: std.fs.File, tty_fd: posix.fd_t, store: *secrets_mod.SecretsStore, kind: secrets_mod.SecretKind, dir: []const u8, ts: TermSize, scr: *Screen) bool {
+fn addSecretModal(tty: std.fs.File, tty_fd: posix.fd_t, store: *secrets_mod.SecretsStore, default_kind: secrets_mod.SecretKind, cwd: []const u8, ts: TermSize, scr: *Screen) bool {
     var fields: [3]tui.Input = .{ .{}, .{}, .{} };
-    const labels = [3][]const u8{ "Name", "Value", "Description" };
+    const labels = [field_count][]const u8{ "Name", "Value", "Description", "Type" };
     const placeholders = [3][]const u8{ "SECRET_NAME", "secret value", "optional description" };
     for (&fields, placeholders) |*f, ph| { f.placeholder = ph; }
     var active: FieldIdx = .name;
     fields[@intFromEnum(active)].focused = true;
+    var kind = default_kind;
 
     while (true) {
-        drawModal(scr, tty,"Add Secret", &labels, &fields, active, ts);
+        drawModalWithKind(scr, tty, "Add Secret", &labels, &fields, active, kind, ts);
         const key = keys.readKeyFromFd(tty_fd) orelse return false;
         switch (key) {
             .up, .shift_tab => {
-                fields[@intFromEnum(active)].focused = false;
-                active = if (@intFromEnum(active) > 0) @enumFromInt(@intFromEnum(active) - 1) else .desc;
-                fields[@intFromEnum(active)].focused = true;
+                if (@intFromEnum(active) < 3) fields[@intFromEnum(active)].focused = false;
+                active = if (@intFromEnum(active) > 0) @enumFromInt(@intFromEnum(active) - 1) else .kind;
+                if (@intFromEnum(active) < 3) fields[@intFromEnum(active)].focused = true;
             },
             .down, .tab => {
-                fields[@intFromEnum(active)].focused = false;
-                active = if (@intFromEnum(active) < 2) @enumFromInt(@intFromEnum(active) + 1) else .name;
-                fields[@intFromEnum(active)].focused = true;
+                if (@intFromEnum(active) < 3) fields[@intFromEnum(active)].focused = false;
+                active = if (@intFromEnum(active) < 3) @enumFromInt(@intFromEnum(active) + 1) else .name;
+                if (@intFromEnum(active) < 3) fields[@intFromEnum(active)].focused = true;
             },
             .enter => {
                 if (fields[0].value().len == 0) continue;
+                const dir = if (kind == .local) cwd else "";
                 return store.add(fields[0].value(), fields[1].value(), fields[2].value(), dir, kind);
             },
             .escape, .ctrl_c => return false,
+            .left, .right => {
+                if (active == .kind) kind = cycleKind(kind, key == .right);
+            },
             else => {
-                _ = fields[@intFromEnum(active)].handleKey(key);
+                if (active == .kind) {
+                    if (key == .char and key.char == ' ') kind = cycleKind(kind, true);
+                } else {
+                    _ = fields[@intFromEnum(active)].handleKey(key);
+                }
             },
         }
     }
+}
+
+fn cycleKind(current: secrets_mod.SecretKind, forward: bool) secrets_mod.SecretKind {
+    const order = [_]secrets_mod.SecretKind{ .env, .local, .password };
+    for (order, 0..) |k, i| {
+        if (k == current) {
+            if (forward) return order[(i + 1) % 3];
+            return order[(i + 2) % 3]; // backward wrap
+        }
+    }
+    return .env;
 }
 
 fn editSecretModal(tty: std.fs.File, tty_fd: posix.fd_t, store: *secrets_mod.SecretsStore, idx: usize, ts: TermSize, scr: *Screen) bool {
@@ -528,62 +569,69 @@ fn editSecretModal(tty: std.fs.File, tty_fd: posix.fd_t, store: *secrets_mod.Sec
     const sec = &store.secrets[idx];
 
     var fields: [3]tui.Input = .{ .{}, .{}, .{} };
-    const labels = [3][]const u8{ "Name", "Value", "Description" };
+    const labels = [field_count][]const u8{ "Name", "Value", "Description", "Type" };
     fields[0].setValue(sec.nameSlice());
     fields[1].setValue(sec.valueSlice());
     fields[2].setValue(sec.descSlice());
+    var kind = sec.kind;
 
     var active: FieldIdx = .value;
     fields[@intFromEnum(active)].focused = true;
 
     while (true) {
-        drawModal(scr, tty,"Edit Secret", &labels, &fields, active, ts);
+        drawModalWithKind(scr, tty, "Edit Secret", &labels, &fields, active, kind, ts);
         const key = keys.readKeyFromFd(tty_fd) orelse return false;
         switch (key) {
             .up, .shift_tab => {
-                fields[@intFromEnum(active)].focused = false;
-                active = if (@intFromEnum(active) > 0) @enumFromInt(@intFromEnum(active) - 1) else .desc;
-                fields[@intFromEnum(active)].focused = true;
+                if (@intFromEnum(active) < 3) fields[@intFromEnum(active)].focused = false;
+                active = if (@intFromEnum(active) > 0) @enumFromInt(@intFromEnum(active) - 1) else .kind;
+                if (@intFromEnum(active) < 3) fields[@intFromEnum(active)].focused = true;
             },
             .down, .tab => {
-                fields[@intFromEnum(active)].focused = false;
-                active = if (@intFromEnum(active) < 2) @enumFromInt(@intFromEnum(active) + 1) else .name;
-                fields[@intFromEnum(active)].focused = true;
+                if (@intFromEnum(active) < 3) fields[@intFromEnum(active)].focused = false;
+                active = if (@intFromEnum(active) < 3) @enumFromInt(@intFromEnum(active) + 1) else .name;
+                if (@intFromEnum(active) < 3) fields[@intFromEnum(active)].focused = true;
             },
             .enter => {
                 if (fields[0].value().len == 0) continue;
                 secrets_mod.SecretsStore.setFieldPub(&sec.name, &sec.name_len, fields[0].value());
                 secrets_mod.SecretsStore.setFieldPub(&sec.value, &sec.value_len, fields[1].value());
                 secrets_mod.SecretsStore.setFieldPub(&sec.description, &sec.desc_len, fields[2].value());
+                sec.kind = kind;
                 store.modified = true;
                 return true;
             },
             .escape, .ctrl_c => return false,
+            .left, .right => {
+                if (active == .kind) kind = cycleKind(kind, key == .right);
+            },
             else => {
-                _ = fields[@intFromEnum(active)].handleKey(key);
+                if (active == .kind) {
+                    if (key == .char and key.char == ' ') kind = cycleKind(kind, true);
+                } else {
+                    _ = fields[@intFromEnum(active)].handleKey(key);
+                }
             },
         }
     }
 }
 
-fn drawModal(scr: *Screen, tty: std.fs.File, title: []const u8, labels: *const [3][]const u8, fields: *const [3]tui.Input, active: FieldIdx, ts: TermSize) void {
+fn drawModalWithKind(scr: *Screen, tty: std.fs.File, title: []const u8, labels: *const [field_count][]const u8, fields: *const [3]tui.Input, active: FieldIdx, kind: secrets_mod.SecretKind, ts: TermSize) void {
     const cols: u16 = @intCast(@min(ts.cols, Screen.max_cols));
     const rows: u16 = @intCast(@min(ts.rows, Screen.max_rows));
     const scr_rect = tui.Rect.fromSize(cols, rows);
 
-    // Draw the popup frame
     const popup = tui.Popup{
         .title = title,
         .width = .{ .fixed = @min(56, cols -| 4) },
-        .height = .{ .fixed = 9 },
+        .height = .{ .fixed = 10 },
         .border_color = .bright_black,
         .title_color = .white,
     };
     popup.draw(scr, scr_rect);
 
-    // Content inside popup
     const content = popup.contentRect(scr_rect);
-    if (content.w < 4 or content.h < 5) {
+    if (content.w < 4 or content.h < 6) {
         scr.flush(tty);
         return;
     }
@@ -592,28 +640,57 @@ fn drawModal(scr: *Screen, tty: std.fs.File, title: []const u8, labels: *const [
     var max_label: u16 = 0;
     for (labels) |l| max_label = @max(max_label, @as(u16, @intCast(l.len)));
 
-    // Field rows (with 1 row gap at top)
+    // Text input fields (rows 0-2)
     for (0..3) |fi| {
         const field_y = content.y + 1 + @as(u16, @intCast(fi));
         const is_active = @intFromEnum(active) == fi;
         const label = labels[fi];
 
-        // Label (right-aligned)
         const lpad = max_label - @as(u16, @intCast(label.len));
         scr.pad(field_y, content.x, lpad, .{});
         const label_style: Screen.Style = if (is_active) .{ .fg = .cyan } else .{ .fg = .white };
         _ = scr.write(field_y, content.x + lpad, label, label_style);
         scr.pad(field_y, content.x + max_label, 2, .{});
 
-        // Input field
         const field_x = content.x + max_label + 2;
         const field_w = content.w -| max_label -| 2;
-        fields[fi].draw(scr, tui.Rect{
-            .x = field_x,
-            .y = field_y,
-            .w = field_w,
-            .h = 1,
-        });
+        fields[fi].draw(scr, tui.Rect{ .x = field_x, .y = field_y, .w = field_w, .h = 1 });
+    }
+
+    // Type selector (row 3)
+    {
+        const field_y = content.y + 4;
+        const is_active = active == .kind;
+        const label = labels[3];
+
+        const lpad = max_label - @as(u16, @intCast(label.len));
+        scr.pad(field_y, content.x, lpad, .{});
+        const label_style: Screen.Style = if (is_active) .{ .fg = .cyan } else .{ .fg = .white };
+        _ = scr.write(field_y, content.x + lpad, label, label_style);
+        scr.pad(field_y, content.x + max_label, 2, .{});
+
+        const field_x = content.x + max_label + 2;
+        const field_w = content.w -| max_label -| 2;
+
+        // Draw type pills: [env] [local] [password]
+        var col = field_x;
+        const kinds = [_]secrets_mod.SecretKind{ .env, .local, .password };
+        const kind_labels = [_][]const u8{ " env ", " local ", " password " };
+        const kind_colors = [_]style.Color{ .green, .blue, .yellow };
+
+        for (kinds, kind_labels, kind_colors) |k, kl, kc| {
+            const selected = k == kind;
+            const pill_style: Screen.Style = if (selected)
+                .{ .fg = kc, .inverse = true }
+            else if (is_active)
+                .{ .dim = true }
+            else
+                .{ .dim = true };
+            col += scr.write(field_y, col, kl, pill_style);
+            scr.pad(field_y, col, 1, .{});
+            col += 1;
+        }
+        scr.pad(field_y, col, field_x + field_w -| (col - field_x), .{});
     }
 
     // Help row

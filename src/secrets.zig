@@ -181,12 +181,18 @@ pub const SecretsStore = struct {
         return n;
     }
 
-    /// Get local secrets for a directory.
-    pub fn getLocalSecrets(self: *const SecretsStore, dir: []const u8, out: []Secret) usize {
+    /// Get local secrets that apply to a directory.
+    /// A secret matches if the cwd is the secret's directory or a subdirectory of it.
+    pub fn getLocalSecrets(self: *const SecretsStore, cwd: []const u8, out: []Secret) usize {
         var n: usize = 0;
         for (0..self.count) |i| {
             const s = &self.secrets[i];
-            if (s.kind == .local and std.mem.eql(u8, s.dirSlice(), dir) and n < out.len) {
+            if (s.kind != .local or n >= out.len) continue;
+            const sdir = s.dirSlice();
+            // cwd matches if it equals the secret dir or is a child of it
+            if (std.mem.eql(u8, cwd, sdir) or
+                (cwd.len > sdir.len and std.mem.startsWith(u8, cwd, sdir) and cwd[sdir.len] == '/'))
+            {
                 out[n] = self.secrets[i];
                 n += 1;
             }

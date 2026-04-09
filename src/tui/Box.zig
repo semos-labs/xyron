@@ -54,7 +54,7 @@ pub const Box = struct {
 
             pos += style.cp(buf[pos..], " ");
             // Fill remaining with horizontal lines
-            const used: u16 = @intCast(self.title.len + 4);
+            const used: u16 = @intCast(self.title.len + 3);
             const fill_w = inner_w -| @min(used, inner_w);
             pos += style.hline(buf[pos..], fill_w);
         } else {
@@ -101,7 +101,7 @@ pub const Box = struct {
             const title_max: u16 = @intCast(@min(self.title.len, inner_w -| 4));
             const tw = scr.write(rect.y, rect.x + 3, self.title[0..title_max], title_style);
             _ = scr.write(rect.y, rect.x + 3 + tw, " ", border_style);
-            scr.hline(rect.y, rect.x + 4 + tw, inner_w -| (tw + 4), border_style);
+            scr.hline(rect.y, rect.x + 4 + tw, inner_w -| (tw + 3), border_style);
         } else {
             scr.hline(rect.y, rect.x + 1, inner_w, border_style);
         }
