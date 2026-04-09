@@ -8,12 +8,24 @@ const std = @import("std");
 const ast = @import("ast.zig");
 const environ_mod = @import("environ.zig");
 const glob = @import("glob.zig");
+const brace = @import("brace.zig");
 
 /// Shell state needed for special variable expansion ($?, $$, $!).
 pub const SpecialVars = struct {
     exit_code: u8 = 0,
     shell_pid: i32 = 0,
     last_bg_pid: i32 = 0,
+};
+
+/// Callback for command substitution — executes a command and returns its output.
+/// The caller owns the returned slice.
+pub const CmdSubFn = *const fn (allocator: std.mem.Allocator, cmd: []const u8) ?[]const u8;
+
+/// Expansion context passed through all expansion phases.
+const ExpandCtx = struct {
+    env: *const environ_mod.Environ,
+    special: SpecialVars,
+    cmd_sub: ?CmdSubFn = null,
 };
 
 /// Expand all commands in a pipeline.
@@ -23,7 +35,7 @@ pub fn expandPipeline(
     pipeline: *const ast.Pipeline,
     env: *const environ_mod.Environ,
 ) !ast.Pipeline {
-    return expandPipelineWithVars(allocator, pipeline, env, .{});
+    return expandPipelineWithVars(allocator, pipeline, env, .{}, null);
 }
 
 /// Expand all commands in a pipeline with special variable context.
@@ -32,12 +44,14 @@ pub fn expandPipelineWithVars(
     pipeline: *const ast.Pipeline,
     env: *const environ_mod.Environ,
     special: SpecialVars,
+    cmd_sub: ?CmdSubFn,
 ) !ast.Pipeline {
+    const ctx = ExpandCtx{ .env = env, .special = special, .cmd_sub = cmd_sub };
     const commands = try allocator.alloc(ast.SimpleCommand, pipeline.commands.len);
     errdefer allocator.free(commands);
 
     for (pipeline.commands, 0..) |cmd, i| {
-        commands[i] = try expandCommand(allocator, &cmd, env, special);
+        commands[i] = try expandCommand(allocator, &cmd, ctx);
     }
 
     return .{ .commands = commands, .background = pipeline.background };
@@ -48,8 +62,7 @@ pub fn expandPipelineWithVars(
 fn expandCommand(
     allocator: std.mem.Allocator,
     cmd: *const ast.SimpleCommand,
-    env: *const environ_mod.Environ,
-    special: SpecialVars,
+    ctx: ExpandCtx,
 ) !ast.SimpleCommand {
     // Expand argv — use ArrayList because globs can produce multiple entries
     var argv_list: std.ArrayList([]const u8) = .{};
@@ -63,17 +76,33 @@ fn expandCommand(
         if (is_quoted) {
             try argv_list.append(allocator, try allocator.dupe(u8, arg));
         } else {
-            const expanded_word = try expandWord(allocator, arg, env, special);
-            // Check for glob metacharacters after variable/tilde expansion
-            if (glob.containsGlob(expanded_word)) {
-                const matches = try glob.expand(allocator, expanded_word);
-                defer allocator.free(matches);
+            const expanded_word = try expandWord(allocator, arg, ctx);
+
+            // Phase: brace expansion (one word → many words)
+            const brace_words = if (brace.containsBrace(expanded_word)) blk: {
+                const bw = try brace.expand(allocator, expanded_word);
                 allocator.free(expanded_word);
-                for (matches) |match| {
-                    try argv_list.append(allocator, match);
+                break :blk bw;
+            } else blk: {
+                // Wrap single word in a slice for uniform processing
+                const single = try allocator.alloc([]const u8, 1);
+                single[0] = expanded_word;
+                break :blk single;
+            };
+            defer allocator.free(brace_words);
+
+            // Phase: glob expansion (each brace result may contain globs)
+            for (brace_words) |bw| {
+                if (glob.containsGlob(bw)) {
+                    const matches = try glob.expand(allocator, bw);
+                    defer allocator.free(matches);
+                    allocator.free(bw);
+                    for (matches) |match| {
+                        try argv_list.append(allocator, match);
+                    }
+                } else {
+                    try argv_list.append(allocator, bw);
                 }
-            } else {
-                try argv_list.append(allocator, expanded_word);
             }
         }
     }
@@ -83,7 +112,7 @@ fn expandCommand(
     for (cmd.redirects, 0..) |redir, i| {
         redirects[i] = .{
             .kind = redir.kind,
-            .path = try expandWord(allocator, redir.path, env, special),
+            .path = try expandWord(allocator, redir.path, ctx),
         };
     }
 
@@ -95,24 +124,23 @@ fn expandCommand(
     };
 }
 
-/// Expand a single word: tilde expansion then variable expansion.
+/// Expand a single word: tilde expansion, then variable/command substitution expansion.
 fn expandWord(
     allocator: std.mem.Allocator,
     word: []const u8,
-    env: *const environ_mod.Environ,
-    special: SpecialVars,
+    ctx: ExpandCtx,
 ) ![]const u8 {
     // Phase 1: tilde expansion on the raw word
-    const tilde_expanded = tildeExpand(allocator, word, env) catch word;
+    const tilde_expanded = tildeExpand(allocator, word, ctx.env) catch word;
 
-    // Phase 2: variable expansion
+    // Phase 2: variable + command substitution expansion
     if (std.mem.indexOf(u8, tilde_expanded, "$") == null) {
         // No variables to expand — return as-is (already allocated or original)
         if (tilde_expanded.ptr != word.ptr) return tilde_expanded;
         return try allocator.dupe(u8, word);
     }
 
-    return varExpand(allocator, tilde_expanded, env, special);
+    return varExpand(allocator, tilde_expanded, ctx);
 }
 
 /// Expand leading ~ to $HOME.
@@ -140,12 +168,11 @@ fn tildeExpand(
     return word;
 }
 
-/// Expand $NAME and special variable references in a string.
+/// Expand $NAME, special variables, and $(cmd) in a string.
 fn varExpand(
     allocator: std.mem.Allocator,
     input: []const u8,
-    env: *const environ_mod.Environ,
-    special: SpecialVars,
+    ctx: ExpandCtx,
 ) ![]const u8 {
     var result: std.ArrayList(u8) = .{};
     errdefer result.deinit(allocator);
@@ -154,13 +181,34 @@ fn varExpand(
     while (i < input.len) {
         if (input[i] == '$' and i + 1 < input.len) {
             const next = input[i + 1];
+
+            // Command substitution: $(cmd)
+            if (next == '(') {
+                if (findMatchingParen(input, i + 1)) |end| {
+                    const cmd_str = input[i + 2 .. end];
+                    if (ctx.cmd_sub) |exec| {
+                        if (exec(allocator, cmd_str)) |output| {
+                            defer allocator.free(output);
+                            // Strip trailing newlines (standard shell behavior)
+                            var out = output;
+                            while (out.len > 0 and out[out.len - 1] == '\n') out = out[0 .. out.len - 1];
+                            try result.appendSlice(allocator, out);
+                        }
+                    }
+                    i = end + 1;
+                } else {
+                    // Unmatched $( — pass through as literal
+                    try result.append(allocator, input[i]);
+                    i += 1;
+                }
+            }
             // Special variables: $?, $$, $!
-            if (next == '?' or next == '!' or next == '$') {
+            else if (next == '?' or next == '!' or next == '$') {
                 var buf: [20]u8 = undefined;
                 const val: i32 = switch (next) {
-                    '?' => @intCast(special.exit_code),
-                    '$' => special.shell_pid,
-                    '!' => special.last_bg_pid,
+                    '?' => @intCast(ctx.special.exit_code),
+                    '$' => ctx.special.shell_pid,
+                    '!' => ctx.special.last_bg_pid,
                     else => unreachable,
                 };
                 const s = std.fmt.bufPrint(&buf, "{d}", .{val}) catch "";
@@ -172,7 +220,7 @@ fn varExpand(
                 const name_start = i;
                 while (i < input.len and isVarChar(input[i])) : (i += 1) {}
                 const name = input[name_start..i];
-                const value = env.get(name) orelse "";
+                const value = ctx.env.get(name) orelse "";
                 try result.appendSlice(allocator, value);
             } else {
                 try result.append(allocator, input[i]);
@@ -185,6 +233,22 @@ fn varExpand(
     }
 
     return result.toOwnedSlice(allocator);
+}
+
+/// Find the closing ')' for an opening '(' at position `open`, respecting nesting.
+fn findMatchingParen(input: []const u8, open: usize) ?usize {
+    var depth: u32 = 0;
+    var i = open;
+    while (i < input.len) {
+        if (input[i] == '(') {
+            depth += 1;
+        } else if (input[i] == ')') {
+            depth -= 1;
+            if (depth == 0) return i;
+        }
+        i += 1;
+    }
+    return null;
 }
 
 /// Valid first character of a variable name: [A-Za-z_]
@@ -240,7 +304,7 @@ test "variable expansion" {
     try env_map.put("FOO", "bar");
     var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
 
-    const result = try varExpand(std.testing.allocator, "hello $FOO world", &env, .{});
+    const result = try varExpand(std.testing.allocator, "hello $FOO world", .{ .env = &env, .special = .{} });
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("hello bar world", result);
 }
@@ -250,7 +314,7 @@ test "missing variable expands to empty" {
     defer env_map.deinit();
     var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
 
-    const result = try varExpand(std.testing.allocator, "hello $MISSING", &env, .{});
+    const result = try varExpand(std.testing.allocator, "hello $MISSING", .{ .env = &env, .special = .{} });
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("hello ", result);
 }
@@ -260,7 +324,7 @@ test "no expansion needed" {
     defer env_map.deinit();
     var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
 
-    const result = try expandWord(std.testing.allocator, "plain", &env, .{});
+    const result = try expandWord(std.testing.allocator, "plain", .{ .env = &env, .special = .{} });
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("plain", result);
 }
@@ -270,7 +334,7 @@ test "special variable $? expands to exit code" {
     defer env_map.deinit();
     var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
 
-    const result = try varExpand(std.testing.allocator, "code=$?", &env, .{ .exit_code = 42 });
+    const result = try varExpand(std.testing.allocator, "code=$?", .{ .env = &env, .special = .{ .exit_code = 42 } });
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("code=42", result);
 }
@@ -280,7 +344,7 @@ test "special variable $$ expands to shell pid" {
     defer env_map.deinit();
     var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
 
-    const result = try varExpand(std.testing.allocator, "pid=$$", &env, .{ .shell_pid = 1234 });
+    const result = try varExpand(std.testing.allocator, "pid=$$", .{ .env = &env, .special = .{ .shell_pid = 1234 } });
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("pid=1234", result);
 }
@@ -290,7 +354,62 @@ test "special variable $! expands to last bg pid" {
     defer env_map.deinit();
     var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
 
-    const result = try varExpand(std.testing.allocator, "bg=$!", &env, .{ .last_bg_pid = 5678 });
+    const result = try varExpand(std.testing.allocator, "bg=$!", .{ .env = &env, .special = .{ .last_bg_pid = 5678 } });
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("bg=5678", result);
+}
+
+fn testCmdSub(_: std.mem.Allocator, cmd: []const u8) ?[]const u8 {
+    // Simple mock: return the command itself reversed for testing
+    _ = cmd;
+    return null;
+}
+
+fn testCmdSubEcho(allocator: std.mem.Allocator, cmd: []const u8) ?[]const u8 {
+    // Mock that returns the command text (simulates echo)
+    return allocator.dupe(u8, cmd) catch null;
+}
+
+test "command substitution with mock" {
+    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+    var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
+
+    const result = try varExpand(std.testing.allocator, "hello $(world)", .{
+        .env = &env,
+        .special = .{},
+        .cmd_sub = &testCmdSubEcho,
+    });
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("hello world", result);
+}
+
+test "command substitution without callback passes through empty" {
+    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+    var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
+
+    const result = try varExpand(std.testing.allocator, "hello $(world)", .{
+        .env = &env,
+        .special = .{},
+        .cmd_sub = null,
+    });
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("hello ", result);
+}
+
+test "nested command substitution" {
+    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+    var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
+
+    // findMatchingParen should correctly handle nesting
+    const result = try varExpand(std.testing.allocator, "$(echo $(inner))", .{
+        .env = &env,
+        .special = .{},
+        .cmd_sub = &testCmdSubEcho,
+    });
+    defer std.testing.allocator.free(result);
+    // The outer $() captures "echo $(inner)" and the mock returns it as-is
+    try std.testing.expectEqualStrings("echo $(inner)", result);
 }

@@ -428,12 +428,12 @@ pub const Shell = struct {
         };
         defer pipeline.deinit(self.allocator);
 
-        // Expand (with special variables from shell state)
+        // Expand (with special variables and command substitution)
         var expanded = expand.expandPipelineWithVars(self.allocator, &pipeline, &self.env, .{
             .exit_code = self.last_exit_code,
             .shell_pid = std.c.getpid(),
             .last_bg_pid = self.last_bg_pid,
-        }) catch {
+        }, &captureCommandOutput) catch {
             stderr.writeAll("xyron: expansion error\n") catch {};
             return;
         };
@@ -917,6 +917,39 @@ fn loadRecentHistory(hdb: *history_db_mod.HistoryDb, hist: *history_mod.History)
     const count = hdb.recentEntries(&entries, &str_buf);
     var i = count;
     while (i > 0) { i -= 1; hist.push(entries[i].raw_input); }
+}
+
+/// Execute a command and capture its stdout output for $() substitution.
+/// Uses /bin/sh -c to handle pipes and shell syntax inside the substitution.
+fn captureCommandOutput(allocator: std.mem.Allocator, cmd: []const u8) ?[]const u8 {
+    // Drain background threads before forking
+    git_info_mod.waitForRefresh();
+
+    const cmd_z = allocator.dupeZ(u8, cmd) catch return null;
+    defer allocator.free(cmd_z);
+
+    var child = std.process.Child.init(
+        &.{ "/bin/sh", "-c", cmd_z },
+        allocator,
+    );
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Inherit;
+    child.spawn() catch return null;
+
+    // Read stdout
+    var buf: [65536]u8 = undefined;
+    var total: usize = 0;
+    const reader = child.stdout.?;
+    while (total < buf.len) {
+        const n = reader.read(buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+
+    _ = child.wait() catch {};
+
+    if (total == 0) return null;
+    return allocator.dupe(u8, buf[0..total]) catch null;
 }
 
 /// Detect if a command should be delegated to /bin/sh.

@@ -149,11 +149,32 @@ pub fn tokenize(allocator: std.mem.Allocator, input: []const u8) ![]Token {
             continue;
         }
 
-        // Bare word
+        // Bare word — tracks $() nesting so pipes/redirects inside
+        // command substitutions don't split the word.
         const start = i;
+        var paren_depth: u32 = 0;
         while (i < input.len) {
             const c = input[i];
-            if (c == ' ' or c == '\t' or c == '|' or c == '>' or c == '<') break;
+            if (c == '$' and i + 1 < input.len and input[i + 1] == '(') {
+                paren_depth += 1;
+                i += 2;
+                continue;
+            }
+            if (c == '(' and paren_depth > 0) {
+                paren_depth += 1;
+                i += 1;
+                continue;
+            }
+            if (c == ')' and paren_depth > 0) {
+                paren_depth -= 1;
+                i += 1;
+                continue;
+            }
+            // Only break on delimiters when outside $()
+            if (paren_depth == 0) {
+                if (c == ' ' or c == '\t' or c == '|' or c == '>' or c == '<') break;
+                if (c == '&') break;
+            }
             i += 1;
         }
         if (i > start) {
