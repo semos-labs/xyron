@@ -202,6 +202,37 @@ pub const HistoryDb = struct {
         return entries[0];
     }
 
+    /// Find the best ghost text suggestion — most recent successful command
+    /// that starts with the given prefix. Searches the full database.
+    /// Returns the result into the caller's buffer.
+    pub fn findGhost(self: *HistoryDb, prefix: []const u8, out: []u8) ?[]const u8 {
+        if (prefix.len == 0) return null;
+        var db = &(self.db orelse return null);
+
+        var stmt = db.prepare(
+            "SELECT raw_input FROM commands" ++
+                " WHERE raw_input LIKE ?1 AND exit_code = 0 AND length(raw_input) > ?2" ++
+                " ORDER BY id DESC LIMIT 1",
+        ) catch return null;
+        defer stmt.deinit();
+
+        // Build prefix pattern: "typed_text%"
+        var pat_buf: [512]u8 = undefined;
+        const pl = @min(prefix.len, pat_buf.len - 1);
+        @memcpy(pat_buf[0..pl], prefix[0..pl]);
+        pat_buf[pl] = '%';
+        stmt.bindText(1, pat_buf[0 .. pl + 1]);
+        stmt.bindInt(2, @intCast(prefix.len));
+
+        const has_row = stmt.step() catch return null;
+        if (!has_row) return null;
+
+        const raw = stmt.columnText(0) orelse return null;
+        if (raw.len == 0 or raw.len > out.len) return null;
+        @memcpy(out[0..raw.len], raw[0..raw.len]);
+        return out[0..raw.len];
+    }
+
     fn readEntries(self: *HistoryDb, stmt: *sqlite.Stmt, buf: []HistoryEntry, str_buf: []u8) usize {
         _ = self;
         var count: usize = 0;

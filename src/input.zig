@@ -361,7 +361,7 @@ pub fn readLine(
                 if (complete_mod.inline_state.active) {
                     complete_mod.dismissInline(stdout);
                 } else if (ed.cursor == ed.len) {
-                    if (getGhostSuggestion(ed, hist)) |ghost| {
+                    if (getGhostSuggestion(ed)) |ghost| {
                         ed.setContent(ghost);
                         refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
                         continue;
@@ -745,7 +745,7 @@ pub fn refreshLineWithHistory(
     prompt_str_default: []const u8,
     ed: *const editor_mod.Editor,
     hl: ?*const HighlightCtx,
-    hist: ?*const history_mod.History,
+    _: ?*const history_mod.History,
 ) void {
     var buf: [16384]u8 = undefined;
     var pos: usize = 0;
@@ -813,15 +813,12 @@ pub fn refreshLineWithHistory(
     var move_back: usize = ed.visibleLen() - ed.visibleCursorPos();
 
     if (ed.cursor == ed.len and ed.len > 0) {
-        if (hist) |h| {
-            if (h.findGhost(content)) |match| {
-                const ghost = match[content.len..];
-                // Write a space to separate cursor from ghost, then ghost text
-                pos += cp(buf[pos..], "\x1b[38;5;246m");
-                pos += cp(buf[pos..], ghost);
-                pos += cp(buf[pos..], "\x1b[0m");
-                move_back = utf8VisibleLen(ghost);
-            }
+        if (findGhostFromDb(content)) |match| {
+            const ghost = match[content.len..];
+            pos += cp(buf[pos..], "\x1b[38;5;246m");
+            pos += cp(buf[pos..], ghost);
+            pos += cp(buf[pos..], "\x1b[0m");
+            move_back = utf8VisibleLen(ghost);
         }
     }
 
@@ -834,10 +831,17 @@ pub fn refreshLineWithHistory(
 }
 
 /// Get the current ghost text suggestion (for Right arrow acceptance).
-pub fn getGhostSuggestion(ed: *const editor_mod.Editor, hist: ?*const history_mod.History) ?[]const u8 {
+pub fn getGhostSuggestion(ed: *const editor_mod.Editor) ?[]const u8 {
     if (ed.cursor != ed.len or ed.len == 0) return null;
-    const h = hist orelse return null;
-    return h.findGhost(ed.content());
+    return findGhostFromDb(ed.content());
+}
+
+/// Ghost text buffer — persists across calls so the returned slice stays valid.
+var ghost_buf: [4096]u8 = undefined;
+
+fn findGhostFromDb(prefix: []const u8) ?[]const u8 {
+    const db = history_db_ref orelse return null;
+    return db.findGhost(prefix, &ghost_buf);
 }
 
 /// Render prompt + editor content into an external buffer (no stdout write).

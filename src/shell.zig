@@ -357,13 +357,17 @@ pub const Shell = struct {
 
         self.history.push(trimmed);
 
+        // Capture cwd early — used by all recording paths
+        var cwd_early_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd_early = posix.getcwd(&cwd_early_buf) catch "";
+
         // Lua expression shorthand: `=expr` evaluates and prints
         if (lua_eval.expressionShorthand(trimmed)) |expr| {
             term.suspendRawMode();
             const result = lua_eval.evalExpression(self.lua, expr);
             term.resumeRawMode();
             self.last_exit_code = result.exit_code;
-            _ = self.history_db.recordCommand(trimmed, "", result.exit_code, 0, types.timestampMs(), false, &.{});
+            _ = self.history_db.recordCommand(trimmed, cwd_early, result.exit_code, 0, types.timestampMs(), false, &.{});
             return;
         }
 
@@ -396,7 +400,7 @@ pub const Shell = struct {
             const result = lua_eval.evalCode(self.lua, input_to_parse);
             term.resumeRawMode();
             self.last_exit_code = result.exit_code;
-            _ = self.history_db.recordCommand(trimmed, "", result.exit_code, 0, types.timestampMs(), false, &.{});
+            _ = self.history_db.recordCommand(trimmed, cwd_early, result.exit_code, 0, types.timestampMs(), false, &.{});
             return;
         }
 
@@ -435,7 +439,7 @@ pub const Shell = struct {
                 const code = lua_commands.execute(self.lua, cmd.argv[0], cmd.argv);
                 term.resumeRawMode();
                 self.last_exit_code = code;
-                _ = self.history_db.recordCommand(trimmed, "", code, 0, types.timestampMs(), false, &.{});
+                _ = self.history_db.recordCommand(trimmed, cwd_early, code, 0, types.timestampMs(), false, &.{});
                 return;
             }
         }
