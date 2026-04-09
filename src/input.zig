@@ -213,7 +213,7 @@ pub fn readLine(
             },
             .ctrl_r => {
                 // Launch history search
-                const result = history_search.run(history_db_ref, stdout);
+                const result = history_search.run(history_db_ref, stdout, .insert);
                 switch (result) {
                     .selected => |cmd| {
                         ed.setContent(cmd);

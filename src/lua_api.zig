@@ -57,10 +57,11 @@ pub fn init(env: *environ_mod.Environ, attyx_enabled: bool) LuaState {
     registerFn(L, "configure", apiPromptConfigure);
     registerFn(L, "init", apiPromptInit);
     c.lua_setfield(L, -2, "prompt");
-    // xyron.config = { vim_mode = fn, completion = fn }
-    c.lua_createtable(L, 0, 2);
+    // xyron.config = { vim_mode = fn, completion = fn, history = fn }
+    c.lua_createtable(L, 0, 3);
     registerFn(L, "vim_mode", apiVimMode);
     registerFn(L, "completion", apiCompletion);
+    registerFn(L, "history", apiConfigHistory);
     c.lua_setfield(L, -2, "config");
     // Keep old top-level names working for backward compat
     registerFn(L, "vim_mode", apiVimMode);
@@ -522,6 +523,22 @@ fn apiVimMode(L: ?*c.lua_State) callconv(.c) c_int {
     if (c.lua_type(state, 1) == c.LUA_TBOOLEAN) {
         vim_mode_enabled = c.lua_toboolean(state, 1) != 0;
     }
+    return 0;
+}
+
+/// xyron.config.history({ local = true }) — configure history browser defaults
+fn apiConfigHistory(L: ?*c.lua_State) callconv(.c) c_int {
+    const state = L orelse return 0;
+    const hs = @import("history_search.zig");
+
+    if (c.lua_type(state, 1) == c.LUA_TTABLE) {
+        _ = c.lua_getfield(state, 1, "local");
+        if (c.lua_type(state, -1) == c.LUA_TBOOLEAN) {
+            hs.default_local = c.lua_toboolean(state, -1) != 0;
+        }
+        c.lua_pop(state, 1);
+    }
+
     return 0;
 }
 

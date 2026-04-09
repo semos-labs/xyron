@@ -49,6 +49,10 @@ pub const unicode = @import("tui/core.zig").unicode;
 // Screen (double-buffered rendering)
 pub const Screen = @import("tui/Screen.zig");
 
+// Fuzzy filter engine
+pub const FuzzyFilter = @import("tui/FuzzyFilter.zig").FuzzyFilter;
+pub const FuzzyResult = @import("tui/FuzzyFilter.zig").Result;
+
 // Components
 pub const Text = @import("tui/Text.zig");
 pub const Input = @import("tui/Input.zig");
@@ -67,6 +71,7 @@ test {
     _ = @import("tui/core.zig");
     _ = @import("tui/unicode.zig");
     _ = @import("tui/Screen.zig");
+    _ = @import("tui/FuzzyFilter.zig");
     _ = @import("tui/Text.zig");
     _ = @import("tui/Box.zig");
     _ = @import("tui/Input.zig");

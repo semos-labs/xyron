@@ -72,6 +72,7 @@ pub fn run(args: []const []const u8, _: std.fs.File, stderr: std.fs.File) Result
         @intCast(@min(state.ts.rows, Screen.max_rows)),
     );
 
+    state.rescore();
     state.draw(&screen);
     screen.flush(tty);
 
@@ -118,33 +119,25 @@ const State = struct {
     show_values: bool = false,
     searching: bool = false,
     search_input: tui.Input = .{},
+    filter: tui.FuzzyFilter(secrets_mod.MAX_SECRETS) = tui.FuzzyFilter(secrets_mod.MAX_SECRETS).init(),
     ts: TermSize = .{ .rows = 24, .cols = 80 },
     cwd_buf: [std.fs.max_path_bytes]u8 = undefined,
     cwd: []const u8 = ".",
 
-    fn filteredCount(self: *const State) usize {
-        const filter = self.search_input.value();
-        var n: usize = 0;
+    fn rescore(self: *State) void {
+        const query = self.search_input.value();
+        self.filter.reset();
         for (0..self.store.count) |i| {
             const sec = &self.store.secrets[i];
             if (self.local_only and (sec.kind != .local or !std.mem.eql(u8, sec.dirSlice(), self.cwd))) continue;
-            if (!matchesFilter(sec, filter)) continue;
-            n += 1;
+            self.filter.push(query, sec.nameSlice(), @intCast(i));
         }
-        return n;
+        self.cursor = 0;
+        self.scroll = 0;
     }
 
     fn resolveIndex(self: *const State, visual_idx: usize) ?usize {
-        const filter = self.search_input.value();
-        var n: usize = 0;
-        for (0..self.store.count) |i| {
-            const sec = &self.store.secrets[i];
-            if (self.local_only and (sec.kind != .local or !std.mem.eql(u8, sec.dirSlice(), self.cwd))) continue;
-            if (!matchesFilter(sec, filter)) continue;
-            if (n == visual_idx) return i;
-            n += 1;
-        }
-        return null;
+        return self.filter.originalIndex(visual_idx);
     }
 
     fn visibleRows(self: *const State) usize {
@@ -168,8 +161,7 @@ const State = struct {
             .escape => {
                 self.searching = false;
                 self.search_input.clear();
-                self.cursor = 0;
-                self.scroll = 0;
+                self.rescore();
             },
             .enter => {
                 self.searching = false;
@@ -177,19 +169,17 @@ const State = struct {
             .ctrl_c => {
                 self.searching = false;
                 self.search_input.clear();
+                self.rescore();
             },
             else => {
                 const action = self.search_input.handleKey(key);
-                if (action == .changed) {
-                    self.cursor = 0;
-                    self.scroll = 0;
-                }
+                if (action == .changed) self.rescore();
             },
         }
     }
 
     fn handleNormalKey(self: *State, key: Key, tty: std.fs.File, tty_fd: posix.fd_t, screen: *Screen) bool {
-        const total = self.filteredCount();
+        const total = self.filter.count;
         switch (key) {
             .up, .ctrl_p => {
                 if (self.cursor > 0) self.cursor -= 1;
@@ -199,7 +189,13 @@ const State = struct {
                 if (total > 0 and self.cursor + 1 < total) self.cursor += 1;
                 self.clampScroll();
             },
-            .escape, .ctrl_c => return true,
+            .escape => return true,
+            .ctrl_c => {
+                if (self.search_input.value().len > 0) {
+                    self.search_input.clear();
+                    self.rescore();
+                } else return true;
+            },
             .char => |ch| switch (ch) {
                 'q' => return true,
                 '/' => { self.searching = true; self.search_input.focused = true; },
@@ -209,21 +205,23 @@ const State = struct {
                     const dir = if (self.local_only) self.cwd else "";
                     if (addSecretModal(tty, tty_fd, self.store, kind, dir, self.ts, screen)) {
                         self.store.save() catch {};
+                        self.rescore();
                     }
                 },
                 'e' => {
                     if (self.resolveIndex(self.cursor)) |real_idx| {
                         if (editSecretModal(tty, tty_fd, self.store, real_idx, self.ts, screen)) {
                             self.store.save() catch {};
+                            self.rescore();
                         }
                     }
                 },
                 'x' => {
                     if (self.resolveIndex(self.cursor)) |real_idx| {
                         self.store.remove(real_idx);
-                        const new_total = self.filteredCount();
-                        if (self.cursor > 0 and self.cursor >= new_total) self.cursor -= 1;
                         self.store.save() catch {};
+                        self.rescore();
+                        if (self.cursor > 0 and self.cursor >= self.filter.count) self.cursor -= 1;
                     }
                 },
                 else => {},
@@ -241,7 +239,7 @@ const State = struct {
         const cols = scr.width;
         const rows = scr.height;
         const filter = self.search_input.value();
-        const total = self.filteredCount();
+        const total = self.filter.count;
         const show_search = self.searching or filter.len > 0;
 
         // Layout
@@ -330,17 +328,11 @@ const State = struct {
     }
 
     fn drawEntries(self: *const State, scr: *Screen, list_rect: tui.Rect, content_w: u16, vis_end: usize) void {
-        const filter = self.search_input.value();
-        var vi: usize = 0;
         var row: u16 = 0;
+        const filtered = self.filter.results();
 
-        for (0..self.store.count) |i| {
-            const sec = &self.store.secrets[i];
-            if (self.local_only and (sec.kind != .local or !std.mem.eql(u8, sec.dirSlice(), self.cwd))) continue;
-            if (!matchesFilter(sec, filter)) continue;
-            if (vi < self.scroll) { vi += 1; continue; }
-            if (vi >= vis_end) break;
-
+        for (self.scroll..vis_end) |vi| {
+            const sec = &self.store.secrets[filtered[vi].index];
             const is_sel = vi == self.cursor;
             var col = list_rect.x;
 
@@ -413,8 +405,6 @@ const State = struct {
                 scr.pad(list_rect.y + row, dcol, list_rect.x + content_w -| dcol, .{});
                 row += 1;
             }
-
-            vi += 1;
         }
 
         // Clear remaining rows
@@ -648,27 +638,6 @@ fn drawModal(scr: *Screen, tty: std.fs.File, title: []const u8, labels: *const [
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn matchesFilter(sec: *const secrets_mod.Secret, filter_str: []const u8) bool {
-    if (filter_str.len == 0) return true;
-    return findCaseInsensitive(sec.nameSlice(), filter_str) != null or
-        findCaseInsensitive(sec.descSlice(), filter_str) != null;
-}
-
-fn findCaseInsensitive(haystack: []const u8, needle: []const u8) ?usize {
-    if (needle.len > haystack.len) return null;
-    const limit = haystack.len - needle.len + 1;
-    for (0..limit) |i| {
-        var matched = true;
-        for (0..needle.len) |j| {
-            const a = if (haystack[i + j] >= 'A' and haystack[i + j] <= 'Z') haystack[i + j] + 32 else haystack[i + j];
-            const b = if (needle[j] >= 'A' and needle[j] <= 'Z') needle[j] + 32 else needle[j];
-            if (a != b) { matched = false; break; }
-        }
-        if (matched) return i;
-    }
-    return null;
-}
 
 const TermSize = struct { rows: usize, cols: usize };
 

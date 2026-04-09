@@ -46,6 +46,12 @@ function xyron.config.vim_mode(enabled) end
 ---@param enabled boolean
 function xyron.config.completion(enabled) end
 
+--- Configure history browser defaults.
+--- When `local = true`, Ctrl+R and history explore default to showing
+--- only commands from the current directory and its children.
+---@param opts { local?: boolean }
+function xyron.config.history(opts) end
+
 --- @deprecated Use xyron.config.vim_mode instead
 ---@param enabled boolean
 function xyron.vim_mode(enabled) end

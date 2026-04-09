@@ -17,7 +17,6 @@
 const std = @import("std");
 const posix = std.posix;
 const c = std.c;
-const fuzzy_mod = @import("../fuzzy.zig");
 const style = @import("../style.zig");
 const tui = @import("../tui.zig");
 const keys = @import("../keys.zig");
@@ -183,8 +182,8 @@ fn runInteractive(items: *const ItemList, opts: Options, stdout: std.fs.File) bo
                             stdout.writeAll("\n") catch {};
                         }
                     }
-                } else if (state.scored_count > 0) {
-                    const idx = state.scored_idx[state.cursor];
+                } else if (state.filter.count > 0) {
+                    const idx = state.filter.buf[state.cursor].index;
                     stdout.writeAll(items.get(idx)) catch {};
                     stdout.writeAll("\n") catch {};
                 } else {
@@ -230,11 +229,7 @@ fn runInteractive(items: *const ItemList, opts: Options, stdout: std.fs.File) bo
 const PickerState = struct {
     items: *const ItemList,
     input: tui.Input = .{},
-    scored_idx: [MAX_ITEMS]usize = undefined,
-    scored_vals: [MAX_ITEMS]i32 = undefined,
-    scored_positions: [MAX_ITEMS][fuzzy_mod.max_positions]u8 = undefined,
-    scored_match_counts: [MAX_ITEMS]u8 = undefined,
-    scored_count: usize = 0,
+    filter: tui.FuzzyFilter(MAX_ITEMS) = tui.FuzzyFilter(MAX_ITEMS).init(),
     cursor: usize = 0,
     scroll: usize = 0,
     selected_map: [MAX_ITEMS]bool = [_]bool{false} ** MAX_ITEMS,
@@ -253,40 +248,16 @@ const PickerState = struct {
     }
 
     fn score(self: *PickerState) void {
-        self.scored_count = 0;
-        const f = self.input.value();
+        const query = self.input.value();
+        self.filter.reset();
         for (0..self.items.count) |i| {
-            const text = self.items.get(i);
-            if (f.len == 0) {
-                self.scored_idx[self.scored_count] = i;
-                self.scored_vals[self.scored_count] = 0;
-                self.scored_match_counts[self.scored_count] = 0;
-                self.scored_count += 1;
-            } else {
-                const s = fuzzy_mod.score(text, f);
-                if (s.matched) {
-                    var pos = self.scored_count;
-                    while (pos > 0 and self.scored_vals[pos - 1] < s.value) {
-                        self.scored_idx[pos] = self.scored_idx[pos - 1];
-                        self.scored_vals[pos] = self.scored_vals[pos - 1];
-                        self.scored_positions[pos] = self.scored_positions[pos - 1];
-                        self.scored_match_counts[pos] = self.scored_match_counts[pos - 1];
-                        pos -= 1;
-                    }
-                    self.scored_idx[pos] = i;
-                    self.scored_vals[pos] = s.value;
-                    self.scored_positions[pos] = s.positions;
-                    self.scored_match_counts[pos] = s.match_count;
-                    self.scored_count += 1;
-                    if (self.scored_count >= MAX_ITEMS) break;
-                }
-            }
+            self.filter.push(query, self.items.get(i), @intCast(i));
         }
     }
 
     fn moveUp(self: *PickerState) void {
         if (self.tui) {
-            if (self.cursor + 1 < self.scored_count) self.cursor += 1;
+            if (self.cursor + 1 < self.filter.count) self.cursor += 1;
             const vis = self.visibleRows();
             if (self.cursor >= self.scroll + vis) self.scroll = self.cursor - vis + 1;
         } else {
@@ -300,15 +271,15 @@ const PickerState = struct {
             if (self.cursor > 0) self.cursor -= 1;
             if (self.cursor < self.scroll) self.scroll = self.cursor;
         } else {
-            if (self.scored_count > 0 and self.cursor + 1 < self.scored_count) self.cursor += 1;
+            if (self.filter.count > 0 and self.cursor + 1 < self.filter.count) self.cursor += 1;
             const vis = self.visibleRows();
             if (self.cursor >= self.scroll + vis) self.scroll = self.cursor - vis + 1;
         }
     }
 
     fn toggleSelect(self: *PickerState) void {
-        if (!self.multi or self.scored_count == 0) return;
-        const idx = self.scored_idx[self.cursor];
+        if (!self.multi or self.filter.count == 0) return;
+        const idx = self.filter.buf[self.cursor].index;
         if (self.selected_map[idx]) {
             self.selected_map[idx] = false;
             self.selected_count -= 1;
@@ -325,15 +296,15 @@ const PickerState = struct {
         const rows = scr.height;
         const cols = scr.width;
         const vis = self.visibleRows();
-        const visible_end = @min(self.scroll + vis, self.scored_count);
+        const visible_end = @min(self.scroll + vis, self.filter.count);
         const list_width: u16 = if (self.preview) cols / 2 else cols;
 
         // Load preview
         var preview_lines: [64][]const u8 = undefined;
         var preview_count: usize = 0;
         var preview_buf: [4096]u8 = undefined;
-        if (self.preview and self.scored_count > 0) {
-            const cur_idx = self.scored_idx[self.cursor];
+        if (self.preview and self.filter.count > 0) {
+            const cur_idx = self.filter.buf[self.cursor].index;
             preview_count = loadPreview(self.items.get(cur_idx), self.preview_cmd, &preview_buf, &preview_lines);
         }
 
@@ -354,7 +325,7 @@ const PickerState = struct {
         var ri: usize = visible_end;
         while (ri > self.scroll) {
             ri -= 1;
-            const item_idx = self.scored_idx[ri];
+            const item_idx = self.filter.buf[ri].index;
             const text = self.items.get(item_idx);
             const is_cursor = (ri == self.cursor);
             const is_selected = self.selected_map[item_idx];
@@ -397,8 +368,9 @@ const PickerState = struct {
 
     fn drawHighlightedItem(self: *const PickerState, scr: *Screen, row: u16, start_col: u16, text: []const u8, max_w: u16, scored_i: usize, is_cursor: bool) u16 {
         const len = @min(text.len, max_w);
-        const positions = &self.scored_positions[scored_i];
-        const match_count = self.scored_match_counts[scored_i];
+        const result = &self.filter.buf[scored_i];
+        const positions = &result.positions;
+        const match_count = result.match_count;
 
         const base_color: ?style.Color = if (is_cursor) .bright_white else fileColorEnum(text);
         const hl_color: style.Color = if (is_cursor) .yellow else .red;
@@ -440,7 +412,7 @@ const PickerState = struct {
     fn drawStatus(self: *const PickerState, scr: *Screen, row: u16, cols: u16) void {
         var col: u16 = 1;
         var cnt_buf: [32]u8 = undefined;
-        const cnt_str = std.fmt.bufPrint(&cnt_buf, "  {d}/{d}", .{ self.scored_count, self.items.count }) catch "";
+        const cnt_str = std.fmt.bufPrint(&cnt_buf, "  {d}/{d}", .{ self.filter.count, self.items.count }) catch "";
         col += scr.write(row, col, cnt_str, .{ .dim = true });
         if (self.multi) {
             var sel_buf: [16]u8 = undefined;
@@ -466,16 +438,16 @@ const PickerState = struct {
         @memcpy(buf[pos..][0..filter.len], filter);
         pos += filter.len;
         pos += cp(buf[pos..], "\x1b[2m");
-        const cnt = std.fmt.bufPrint(buf[pos..], "  {d}/{d}", .{ self.scored_count, self.items.count }) catch "";
+        const cnt = std.fmt.bufPrint(buf[pos..], "  {d}/{d}", .{ self.filter.count, self.items.count }) catch "";
         pos += cnt.len;
         pos += cp(buf[pos..], "\x1b[0m");
 
         const vis = self.visibleRows();
-        const visible_end = @min(self.scroll + vis, self.scored_count);
+        const visible_end = @min(self.scroll + vis, self.filter.count);
 
         for (self.scroll..visible_end) |i| {
             pos += cp(buf[pos..], "\r\n\x1b[K");
-            const idx = self.scored_idx[i];
+            const idx = self.filter.buf[i].index;
             const text = self.items.get(idx);
             const is_cursor = (i == self.cursor);
             const is_selected = self.selected_map[idx];
@@ -493,8 +465,8 @@ const PickerState = struct {
             renderHighlightedText(
                 &buf, &pos, text,
                 buf.len - pos - 20,
-                &self.scored_positions[i],
-                self.scored_match_counts[i],
+                &self.filter.buf[i].positions,
+                self.filter.buf[i].match_count,
                 base, hl,
             );
 

@@ -37,15 +37,16 @@ pub fn run(args: []const []const u8, stdout: std.fs.File, hdb: ?*history_db_mod.
     if (std.mem.eql(u8, subcmd, "cwd")) return cwdQuery(db, if (args.len > 1) args[1] else null, stdout);
     if (std.mem.eql(u8, subcmd, "slow")) return slow(db, if (args.len > 1) parseNum(args[1], 1000) else 1000, stdout);
     if (std.mem.eql(u8, subcmd, "explore")) {
-        const explore = @import("history_explore.zig");
-        const result = explore.run(hdb, stdout);
-        if (explore.replay_pending) {
-            explore.replay_pending = false;
-            @memcpy(replay_command[0..@min(explore.replay_len, 256)], explore.replay_command[0..@min(explore.replay_len, 256)]);
-            replay_len = @min(explore.replay_len, 256);
+        const hs = @import("../history_search.zig");
+        _ = hs.run(hdb, stdout, .replay);
+        if (hs.replay_pending) {
+            hs.replay_pending = false;
+            const n = @min(hs.replay_len, replay_command.len);
+            @memcpy(replay_command[0..n], hs.replay_command[0..n]);
+            replay_len = n;
             replay_pending = true;
         }
-        return result;
+        return .{};
     }
 
     stdout.writeAll("xyron: history: unknown subcommand\n") catch {};
