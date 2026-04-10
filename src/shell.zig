@@ -57,6 +57,9 @@ pub const Shell = struct {
     last_exit_code: u8,
     last_duration_ms: i64,
     last_bg_pid: i32,
+    /// Per-step exit codes from last pipeline (for pipefail / $PIPESTATUS).
+    last_pipe_statuses: [32]u8 = [_]u8{0} ** 32,
+    last_pipe_count: usize = 0,
     running: bool,
     ipc_enabled: bool,
 
@@ -359,6 +362,38 @@ pub const Shell = struct {
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
         if (trimmed.len == 0) return;
 
+        // Semicolons: split on top-level ';' and execute each segment
+        if (splitOnSemicolon(trimmed)) |split| {
+            self.executeLine(split.left);
+            self.executeLine(split.right);
+            return;
+        }
+
+        // Subshell: (cmd1; cmd2) — fork and execute inner commands
+        if (trimmed.len >= 2 and trimmed[0] == '(' and trimmed[trimmed.len - 1] == ')') {
+            const inner = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t");
+            if (inner.len > 0) {
+                const pid = posix.fork() catch {
+                    stderr.writeAll("xyron: fork error\n") catch {};
+                    return;
+                };
+                if (pid == 0) {
+                    // Child: execute inner commands and exit
+                    self.executeLine(inner);
+                    std.process.exit(self.last_exit_code);
+                }
+                // Parent: wait for subshell
+                const wait_result = posix.waitpid(pid, 0);
+                const W = posix.W;
+                if (W.IFEXITED(wait_result.status)) {
+                    self.last_exit_code = W.EXITSTATUS(wait_result.status);
+                } else {
+                    self.last_exit_code = 1;
+                }
+                return;
+            }
+        }
+
         self.history.push(trimmed);
 
         // Capture cwd early — used by all recording paths
@@ -428,6 +463,67 @@ pub const Shell = struct {
         };
         defer pipeline.deinit(self.allocator);
 
+        // Prepare heredocs and here-strings: create pipes with content.
+        // We store FD strings in a fixed buffer so they outlive this scope.
+        var heredoc_fds: [16]posix.fd_t = [_]posix.fd_t{-1} ** 16;
+        var heredoc_fd_count: usize = 0;
+        var heredoc_fd_bufs: [16][12]u8 = undefined;
+        {
+            const cmds = @constCast(pipeline.commands);
+            for (cmds) |*cmd| {
+                const redirs = @constCast(cmd.redirects);
+                for (redirs) |*redir| {
+                    if (redir.kind == .herestring) {
+                        const pipe_fds = posix.pipe2(.{}) catch continue;
+                        _ = posix.write(pipe_fds[1], redir.path) catch {};
+                        _ = posix.write(pipe_fds[1], "\n") catch {};
+                        posix.close(pipe_fds[1]);
+                        if (heredoc_fd_count < heredoc_fds.len) {
+                            const idx = heredoc_fd_count;
+                            const fd_str = std.fmt.bufPrint(&heredoc_fd_bufs[idx], "{d}", .{pipe_fds[0]}) catch continue;
+                            redir.content = fd_str;
+                            heredoc_fds[idx] = pipe_fds[0];
+                            heredoc_fd_count += 1;
+                        }
+                    } else if (redir.kind == .heredoc) {
+                        const delimiter = redir.path;
+                        var content_list: std.ArrayList(u8) = .{};
+                        defer content_list.deinit(self.allocator);
+
+                        term.suspendRawMode();
+                        const stdin_file = std.fs.File.stdin();
+                        var line_buf: [4096]u8 = undefined;
+                        while (true) {
+                            stdout.writeAll("> ") catch {};
+                            const line_len = stdin_file.read(&line_buf) catch break;
+                            if (line_len == 0) break;
+                            var lc = line_buf[0..line_len];
+                            while (lc.len > 0 and (lc[lc.len - 1] == '\n' or lc[lc.len - 1] == '\r'))
+                                lc = lc[0 .. lc.len - 1];
+                            if (std.mem.eql(u8, lc, delimiter)) break;
+                            content_list.appendSlice(self.allocator, line_buf[0..line_len]) catch break;
+                        }
+                        term.resumeRawMode();
+
+                        const pipe_fds = posix.pipe2(.{}) catch continue;
+                        _ = posix.write(pipe_fds[1], content_list.items) catch {};
+                        posix.close(pipe_fds[1]);
+                        if (heredoc_fd_count < heredoc_fds.len) {
+                            const idx = heredoc_fd_count;
+                            const fd_str = std.fmt.bufPrint(&heredoc_fd_bufs[idx], "{d}", .{pipe_fds[0]}) catch continue;
+                            redir.content = fd_str;
+                            heredoc_fds[idx] = pipe_fds[0];
+                            heredoc_fd_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        // Clean up heredoc read-end FDs after execution
+        defer for (heredoc_fds[0..heredoc_fd_count]) |fd| {
+            if (fd >= 0) posix.close(fd);
+        };
+
         // Expand (with special variables and command substitution)
         var expanded = expand.expandPipelineWithVars(self.allocator, &pipeline, &self.env, .{
             .exit_code = self.last_exit_code,
@@ -494,6 +590,10 @@ pub const Shell = struct {
         const result = executor.executeGroup(&exec_plan, &self.attyx, &self.env, &self.history_db, &self.job_table);
         self.last_exit_code = result.exit_code;
         self.last_duration_ms = result.duration_ms;
+        // Store per-step exit codes for pipefail / $PIPESTATUS
+        const n = @min(result.pipe_status_count, self.last_pipe_statuses.len);
+        @memcpy(self.last_pipe_statuses[0..n], result.pipe_statuses[0..n]);
+        self.last_pipe_count = n;
 
         if (result.backgrounded) {
             // Block stays running — will be finalized when job completes
@@ -919,6 +1019,38 @@ fn loadRecentHistory(hdb: *history_db_mod.HistoryDb, hist: *history_mod.History)
     while (i > 0) { i -= 1; hist.push(entries[i].raw_input); }
 }
 
+const SemicolonSplit = struct { left: []const u8, right: []const u8 };
+
+/// Split input on the first top-level ';' (outside quotes, parens, $()).
+fn splitOnSemicolon(line_input: []const u8) ?SemicolonSplit {
+    var i: usize = 0;
+    var in_single_quote = false;
+    var in_double_quote = false;
+    var paren_depth: u32 = 0;
+    while (i < line_input.len) {
+        const c = line_input[i];
+        if (c == '\'' and !in_double_quote) {
+            in_single_quote = !in_single_quote;
+        } else if (c == '"' and !in_single_quote) {
+            in_double_quote = !in_double_quote;
+        } else if (!in_single_quote and !in_double_quote) {
+            if (c == '(' or (c == '$' and i + 1 < line_input.len and line_input[i + 1] == '(')) {
+                paren_depth += 1;
+                if (c == '$') i += 1;
+            } else if (c == ')' and paren_depth > 0) {
+                paren_depth -= 1;
+            } else if (c == ';' and paren_depth == 0) {
+                return .{
+                    .left = std.mem.trim(u8, line_input[0..i], " \t"),
+                    .right = std.mem.trim(u8, line_input[i + 1 ..], " \t"),
+                };
+            }
+        }
+        i += 1;
+    }
+    return null;
+}
+
 /// Execute a command and capture its stdout output for $() substitution.
 /// Uses /bin/sh -c to handle pipes and shell syntax inside the substitution.
 fn captureCommandOutput(allocator: std.mem.Allocator, cmd: []const u8) ?[]const u8 {
@@ -982,8 +1114,7 @@ fn shouldDelegateToSh(line: []const u8) bool {
         return true;
     if (std.mem.indexOf(u8, line, "&&") != null or std.mem.indexOf(u8, line, "||") != null)
         return true;
-    if (std.mem.indexOf(u8, line, "<<") != null) // heredoc
-        return true;
+    // Heredocs (<<) are now handled natively — no longer delegated to sh
 
     return false;
 }

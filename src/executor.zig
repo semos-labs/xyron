@@ -32,6 +32,9 @@ pub const GroupResult = struct {
     pgid: posix.pid_t = 0,
     backgrounded: bool = false,
     stopped: bool = false,
+    /// Per-step exit codes for pipefail — rightmost non-zero wins.
+    pipe_statuses: [MAX_PIPELINE]u8 = [_]u8{0} ** MAX_PIPELINE,
+    pipe_status_count: usize = 0,
 };
 
 /// Shell's own pgid (for background process group setup).
@@ -157,6 +160,8 @@ pub fn executeGroup(
     const final = waitForForeground(exec_plan, ax, &result);
     result.exit_code = final.exit_code;
     result.stopped = final.stopped;
+    result.pipe_statuses = final.pipe_statuses;
+    result.pipe_status_count = final.pipe_status_count;
     result.duration_ms = types.timestampMs() - start;
 
     if (!final.stopped) {
@@ -280,15 +285,20 @@ fn forkPipeline(
     return result;
 }
 
-const WaitResult = struct { exit_code: u8, stopped: bool };
+const WaitResult = struct {
+    exit_code: u8,
+    stopped: bool,
+    pipe_statuses: [MAX_PIPELINE]u8 = [_]u8{0} ** MAX_PIPELINE,
+    pipe_status_count: usize = 0,
+};
 
 fn waitForForeground(
     exec_plan: *const planner_mod.ExecutionPlan,
     ax: *const attyx_mod.Attyx,
     result: *const GroupResult,
 ) WaitResult {
-    var last_code: u8 = 0;
     var was_stopped = false;
+    var statuses: [MAX_PIPELINE]u8 = [_]u8{0} ** MAX_PIPELINE;
     const steps = exec_plan.steps;
     const W = posix.W;
 
@@ -300,9 +310,10 @@ fn waitForForeground(
         if (W.IFSTOPPED(wait.status)) {
             was_stopped = true;
         } else {
-            last_code = extractExitCode(wait.status);
+            const code = extractExitCode(wait.status);
+            statuses[i] = code;
             if (i < steps.len) {
-                ax.stepFinished(exec_plan, &steps[i], last_code, types.timestampMs() - step_start);
+                ax.stepFinished(exec_plan, &steps[i], code, types.timestampMs() - step_start);
             }
         }
     }
@@ -310,7 +321,18 @@ fn waitForForeground(
     // Reclaim terminal control for the shell.
     takeTerminal();
 
-    return .{ .exit_code = last_code, .stopped = was_stopped };
+    // Pipefail: rightmost non-zero exit code, or 0 if all succeeded.
+    var final_code: u8 = 0;
+    for (0..result.pid_count) |i| {
+        if (statuses[i] != 0) final_code = statuses[i];
+    }
+
+    return .{
+        .exit_code = final_code,
+        .stopped = was_stopped,
+        .pipe_statuses = statuses,
+        .pipe_status_count = result.pid_count,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +515,16 @@ fn applyRedirects(redirects: []const ast.Redirect) void {
                 const fd = posix.openZ(path_z, .{ .ACCMODE = .RDONLY }, 0o0) catch continue;
                 posix.dup2(fd, posix.STDIN_FILENO) catch {};
                 posix.close(fd);
+            },
+            .heredoc, .herestring => {
+                // Content is piped via a temporary pipe created before fork.
+                // The read-end FD is stored in the content field as a decimal string.
+                const content = redir.content;
+                if (content.len > 0) {
+                    const fd = std.fmt.parseInt(posix.fd_t, content, 10) catch continue;
+                    posix.dup2(fd, posix.STDIN_FILENO) catch {};
+                    posix.close(fd);
+                }
             },
             .dup => {
                 // Parse fd duplication: "2>&1", ">&2", "1>&2"

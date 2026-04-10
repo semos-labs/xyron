@@ -107,13 +107,21 @@ fn expandCommand(
         }
     }
 
-    // Expand redirect paths
+    // Expand redirect paths (skip expansion for heredoc/herestring — content is pre-set)
     const redirects = try allocator.alloc(ast.Redirect, cmd.redirects.len);
     for (cmd.redirects, 0..) |redir, i| {
-        redirects[i] = .{
-            .kind = redir.kind,
-            .path = try expandWord(allocator, redir.path, ctx),
-        };
+        if (redir.kind == .heredoc or redir.kind == .herestring) {
+            redirects[i] = .{
+                .kind = redir.kind,
+                .path = try allocator.dupe(u8, redir.path),
+                .content = redir.content,
+            };
+        } else {
+            redirects[i] = .{
+                .kind = redir.kind,
+                .path = try expandWord(allocator, redir.path, ctx),
+            };
+        }
     }
 
     return .{
@@ -124,12 +132,19 @@ fn expandCommand(
     };
 }
 
-/// Expand a single word: tilde expansion, then variable/command substitution expansion.
+/// Expand a single word: process substitution, tilde expansion, then variable/command substitution.
 fn expandWord(
     allocator: std.mem.Allocator,
     word: []const u8,
     ctx: ExpandCtx,
 ) ![]const u8 {
+    // Phase 0: process substitution <(cmd) or >(cmd)
+    if (word.len > 3 and (word[0] == '<' or word[0] == '>') and word[1] == '(' and word[word.len - 1] == ')') {
+        const cmd_str = word[2 .. word.len - 1];
+        const is_input = word[0] == '<'; // <(cmd) = read from cmd's stdout
+        return processSubstitution(allocator, cmd_str, is_input);
+    }
+
     // Phase 1: tilde expansion on the raw word
     const tilde_expanded = tildeExpand(allocator, word, ctx.env) catch word;
 
@@ -141,6 +156,58 @@ fn expandWord(
     }
 
     return varExpand(allocator, tilde_expanded, ctx);
+}
+
+/// Fork a subprocess for process substitution and return /dev/fd/N.
+/// For <(cmd): cmd's stdout is connected to the returned FD (read from it).
+/// For >(cmd): cmd's stdin is connected to the returned FD (write to it).
+fn processSubstitution(allocator: std.mem.Allocator, cmd: []const u8, is_input: bool) ![]const u8 {
+    const posix = std.posix;
+    const pipe_fds = try posix.pipe2(.{});
+
+    const pid = try posix.fork();
+    if (pid == 0) {
+        // Child process
+        if (is_input) {
+            // <(cmd): child writes to pipe, parent reads
+            posix.close(pipe_fds[0]); // close read end
+            posix.dup2(pipe_fds[1], posix.STDOUT_FILENO) catch std.process.exit(126);
+            posix.close(pipe_fds[1]);
+        } else {
+            // >(cmd): child reads from pipe, parent writes
+            posix.close(pipe_fds[1]); // close write end
+            posix.dup2(pipe_fds[0], posix.STDIN_FILENO) catch std.process.exit(126);
+            posix.close(pipe_fds[0]);
+        }
+
+        // Exec via /bin/sh -c
+        var cmd_buf: [4096]u8 = undefined;
+        if (cmd.len < cmd_buf.len) {
+            @memcpy(cmd_buf[0..cmd.len], cmd);
+            cmd_buf[cmd.len] = 0;
+            const cmd_z: [*:0]const u8 = @ptrCast(&cmd_buf);
+            const sh: [*:0]const u8 = "/bin/sh";
+            const c_flag: [*:0]const u8 = "-c";
+            const argv2 = [_:null]?[*:0]const u8{ sh, c_flag, cmd_z, null };
+            const envp: [*:null]const ?[*:0]const u8 = @ptrCast(std.c.environ);
+            _ = posix.execvpeZ(sh, @ptrCast(&argv2), envp) catch {};
+        }
+        std.process.exit(127);
+    }
+
+    // Parent
+    if (is_input) {
+        posix.close(pipe_fds[1]); // close write end — child writes
+        // Return /dev/fd/N for the read end
+        var buf: [24]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "/dev/fd/{d}", .{pipe_fds[0]}) catch return error.OutOfMemory;
+        return allocator.dupe(u8, path);
+    } else {
+        posix.close(pipe_fds[0]); // close read end — child reads
+        var buf: [24]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "/dev/fd/{d}", .{pipe_fds[1]}) catch return error.OutOfMemory;
+        return allocator.dupe(u8, path);
+    }
 }
 
 /// Expand leading ~ to $HOME.
@@ -202,6 +269,20 @@ fn varExpand(
                     i += 1;
                 }
             }
+            // Parameter expansion: ${var}, ${var:-default}, ${var%pattern}, etc.
+            else if (next == '{') {
+                if (std.mem.indexOf(u8, input[i + 2 ..], "}")) |rel_close| {
+                    const close = i + 2 + rel_close;
+                    const inner = input[i + 2 .. close];
+                    const expanded = paramExpand(inner, ctx.env);
+                    try result.appendSlice(allocator, expanded);
+                    i = close + 1;
+                } else {
+                    // Unmatched ${ — pass through
+                    try result.append(allocator, input[i]);
+                    i += 1;
+                }
+            }
             // Special variables: $?, $$, $!
             else if (next == '?' or next == '!' or next == '$') {
                 var buf: [20]u8 = undefined;
@@ -249,6 +330,155 @@ fn findMatchingParen(input: []const u8, open: usize) ?usize {
         i += 1;
     }
     return null;
+}
+
+/// Expand a parameter expression inside ${...}.
+/// Supports: ${var}, ${var:-default}, ${var:=default}, ${var:+alternate},
+/// ${var#pattern}, ${var##pattern}, ${var%pattern}, ${var%%pattern}.
+fn paramExpand(inner: []const u8, env: *const environ_mod.Environ) []const u8 {
+    if (inner.len == 0) return "";
+
+    // Find the operator position — scan for :, #, or %
+    var name_end: usize = 0;
+    while (name_end < inner.len and isVarChar(inner[name_end])) : (name_end += 1) {}
+
+    // Handle first char specially for isVarStart
+    if (name_end == 0 or !isVarStart(inner[0])) return "";
+
+    const name = inner[0..name_end];
+    const value = env.get(name);
+    const is_set = value != null;
+    const val = value orelse "";
+    const is_empty = val.len == 0;
+
+    // ${var} — bare expansion
+    if (name_end == inner.len) return val;
+
+    const op_start = name_end;
+    const rest = inner[op_start..];
+
+    // ${var:-default} / ${var:=default} / ${var:+alternate}
+    if (rest.len >= 2 and rest[0] == ':') {
+        const rhs = rest[2..];
+        return switch (rest[1]) {
+            '-' => if (!is_set or is_empty) rhs else val,
+            '=' => if (!is_set or is_empty) rhs else val,
+            '+' => if (is_set and !is_empty) rhs else "",
+            else => val,
+        };
+    }
+
+    // ${var#pattern} / ${var##pattern} — remove prefix
+    if (rest.len >= 1 and rest[0] == '#') {
+        const greedy = rest.len >= 2 and rest[1] == '#';
+        const pattern = if (greedy) rest[2..] else rest[1..];
+        return stripPrefix(val, pattern, greedy);
+    }
+
+    // ${var%pattern} / ${var%%pattern} — remove suffix
+    if (rest.len >= 1 and rest[0] == '%') {
+        const greedy = rest.len >= 2 and rest[1] == '%';
+        const pattern = if (greedy) rest[2..] else rest[1..];
+        return stripSuffix(val, pattern, greedy);
+    }
+
+    return val;
+}
+
+/// Remove prefix matching pattern from value.
+/// Pattern supports trailing * (match anything after literal) and leading * (match anything before literal).
+fn stripPrefix(val: []const u8, pattern: []const u8, greedy: bool) []const u8 {
+    if (val.len == 0 or pattern.len == 0) return val;
+
+    // Pattern with leading * — e.g. ##*/ means "longest prefix ending with /"
+    if (pattern.len > 0 and pattern[0] == '*') {
+        const literal = pattern[1..];
+        if (literal.len == 0) {
+            // ##* removes everything, #* removes first char
+            return if (greedy) "" else if (val.len > 0) val[1..] else val;
+        }
+        if (greedy) {
+            // ##*X — find last occurrence of X, strip up to and including it
+            var last: ?usize = null;
+            var pos: usize = 0;
+            while (pos + literal.len <= val.len) {
+                if (std.mem.eql(u8, val[pos..][0..literal.len], literal)) last = pos + literal.len;
+                pos += 1;
+            }
+            if (last) |l| return val[l..];
+        } else {
+            // #*X — find first occurrence of X, strip up to and including it
+            if (std.mem.indexOf(u8, val, literal)) |pos| return val[pos + literal.len ..];
+        }
+        return val;
+    }
+
+    // Pattern with trailing * — e.g. #X* means "strip prefix starting with X"
+    if (pattern.len > 0 and pattern[pattern.len - 1] == '*') {
+        const literal = pattern[0 .. pattern.len - 1];
+        if (std.mem.startsWith(u8, val, literal)) {
+            if (greedy) return "" else return val[literal.len..];
+        }
+        return val;
+    }
+
+    // Exact prefix match
+    if (std.mem.startsWith(u8, val, pattern)) return val[pattern.len..];
+    return val;
+}
+
+/// Remove suffix matching pattern from value.
+/// Supports leading * (e.g. `*.txt`) and trailing * (e.g. `/*`).
+fn stripSuffix(val: []const u8, pattern: []const u8, greedy: bool) []const u8 {
+    if (val.len == 0 or pattern.len == 0) return val;
+
+    // Pattern with leading * — e.g. %*.txt means "suffix ending with .txt"
+    if (pattern[0] == '*') {
+        const literal = pattern[1..];
+        if (literal.len == 0) {
+            return if (greedy) "" else if (val.len > 0) val[0 .. val.len - 1] else val;
+        }
+        if (greedy) {
+            // %%*.txt — find first .txt, strip from there
+            if (std.mem.indexOf(u8, val, literal)) |pos| return val[0..pos];
+        } else {
+            // %*.txt — find last .txt, strip from there
+            var last: ?usize = null;
+            var pos: usize = 0;
+            while (pos + literal.len <= val.len) {
+                if (std.mem.eql(u8, val[pos..][0..literal.len], literal)) last = pos;
+                pos += 1;
+            }
+            if (last) |l| return val[0..l];
+        }
+        return val;
+    }
+
+    // Pattern with trailing * — e.g. %/* means "suffix starting with /"
+    if (pattern[pattern.len - 1] == '*') {
+        const literal = pattern[0 .. pattern.len - 1];
+        if (literal.len == 0) {
+            return if (greedy) "" else if (val.len > 0) val[0 .. val.len - 1] else val;
+        }
+        if (greedy) {
+            // %%/* — find first /, strip from there to end
+            if (std.mem.indexOf(u8, val, literal)) |pos| return val[0..pos];
+        } else {
+            // %/* — find last /, strip from there to end
+            var last: ?usize = null;
+            var pos: usize = 0;
+            while (pos + literal.len <= val.len) {
+                if (std.mem.eql(u8, val[pos..][0..literal.len], literal)) last = pos;
+                pos += 1;
+            }
+            if (last) |l| return val[0..l];
+        }
+        return val;
+    }
+
+    // Exact suffix match
+    if (std.mem.endsWith(u8, val, pattern)) return val[0 .. val.len - pattern.len];
+    return val;
 }
 
 /// Valid first character of a variable name: [A-Za-z_]
@@ -412,4 +642,73 @@ test "nested command substitution" {
     defer std.testing.allocator.free(result);
     // The outer $() captures "echo $(inner)" and the mock returns it as-is
     try std.testing.expectEqualStrings("echo $(inner)", result);
+}
+
+test "param expansion ${var}" {
+    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+    try env_map.put("FOO", "bar");
+    var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
+
+    const result = try varExpand(std.testing.allocator, "${FOO}", .{ .env = &env, .special = .{} });
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("bar", result);
+}
+
+test "param expansion ${var:-default}" {
+    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+    var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
+
+    const result = try varExpand(std.testing.allocator, "${MISSING:-fallback}", .{ .env = &env, .special = .{} });
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("fallback", result);
+}
+
+test "param expansion ${var:-default} when set" {
+    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+    try env_map.put("FOO", "bar");
+    var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
+
+    const result = try varExpand(std.testing.allocator, "${FOO:-fallback}", .{ .env = &env, .special = .{} });
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("bar", result);
+}
+
+test "param expansion ${var:+alternate}" {
+    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+    try env_map.put("FOO", "bar");
+    var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
+
+    const r1 = try varExpand(std.testing.allocator, "${FOO:+yes}", .{ .env = &env, .special = .{} });
+    defer std.testing.allocator.free(r1);
+    try std.testing.expectEqualStrings("yes", r1);
+
+    const r2 = try varExpand(std.testing.allocator, "${MISSING:+yes}", .{ .env = &env, .special = .{} });
+    defer std.testing.allocator.free(r2);
+    try std.testing.expectEqualStrings("", r2);
+}
+
+test "param expansion ${var%pattern}" {
+    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+    try env_map.put("PATH", "/home/user/docs/file.txt");
+    var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
+
+    const result = try varExpand(std.testing.allocator, "${PATH%/*}", .{ .env = &env, .special = .{} });
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("/home/user/docs", result);
+}
+
+test "param expansion ${var##pattern}" {
+    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+    try env_map.put("PATH", "/home/user/docs/file.txt");
+    var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
+
+    const result = try varExpand(std.testing.allocator, "${PATH##*/}", .{ .env = &env, .special = .{} });
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("file.txt", result);
 }

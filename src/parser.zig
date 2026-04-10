@@ -108,12 +108,14 @@ fn parseSimpleCommand(allocator: std.mem.Allocator, tokens: []const Token) Parse
                 quoted_flags.append(allocator, tokens[i].single_quoted) catch return ParseError.OutOfMemory;
                 i += 1;
             },
-            .redirect_in, .redirect_out, .redirect_append, .redirect_err => {
+            .redirect_in, .redirect_out, .redirect_append, .redirect_heredoc, .redirect_herestring, .redirect_err => {
                 past_assignments = true;
                 const kind: ast.RedirectKind = switch (tokens[i].kind) {
                     .redirect_in => .stdin,
                     .redirect_out => .stdout,
                     .redirect_append => .append,
+                    .redirect_heredoc => .heredoc,
+                    .redirect_herestring => .herestring,
                     .redirect_err => .stderr,
                     else => unreachable,
                 };

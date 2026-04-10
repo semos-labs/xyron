@@ -17,6 +17,8 @@ pub const TokenKind = enum {
     redirect_in,
     redirect_out,
     redirect_append, // >>
+    redirect_heredoc, // <<
+    redirect_herestring, // <<<
     redirect_err,
     redirect_dup, // 2>&1, >&2, 1>&2
     ampersand, // &
@@ -78,6 +80,20 @@ pub fn tokenize(allocator: std.mem.Allocator, input: []const u8) ![]Token {
             continue;
         }
 
+        // Process substitution >(...) — treat as a word, not a redirect
+        if (input[i] == '>' and i + 1 < input.len and input[i + 1] == '(' and !in_comparison_context) {
+            const start = i;
+            i += 2; // skip >(
+            var depth: u32 = 1;
+            while (i < input.len and depth > 0) {
+                if (input[i] == '(') depth += 1;
+                if (input[i] == ')') depth -= 1;
+                i += 1;
+            }
+            try tokens.append(allocator, .{ .kind = .word, .value = input[start..i] });
+            continue;
+        }
+
         if (input[i] == '>' and !in_comparison_context) {
             // >&2 — fd duplication
             if (i + 1 < input.len and input[i + 1] == '&' and i + 2 < input.len and (input[i + 2] >= '0' and input[i + 2] <= '9')) {
@@ -91,6 +107,34 @@ pub fn tokenize(allocator: std.mem.Allocator, input: []const u8) ![]Token {
                 try tokens.append(allocator, .{ .kind = .redirect_out, .value = input[i .. i + 1] });
                 i += 1;
             }
+            continue;
+        }
+
+        // Process substitution <(...) — treat as a word, not a redirect
+        if (input[i] == '<' and i + 1 < input.len and input[i + 1] == '(' and !in_comparison_context) {
+            const start = i;
+            i += 2; // skip <(
+            var depth: u32 = 1;
+            while (i < input.len and depth > 0) {
+                if (input[i] == '(') depth += 1;
+                if (input[i] == ')') depth -= 1;
+                i += 1;
+            }
+            try tokens.append(allocator, .{ .kind = .word, .value = input[start..i] });
+            continue;
+        }
+
+        // <<< here-string (must come before << and <)
+        if (input[i] == '<' and i + 2 < input.len and input[i + 1] == '<' and input[i + 2] == '<' and !in_comparison_context) {
+            try tokens.append(allocator, .{ .kind = .redirect_herestring, .value = input[i .. i + 3] });
+            i += 3;
+            continue;
+        }
+
+        // << heredoc (must come before <)
+        if (input[i] == '<' and i + 1 < input.len and input[i + 1] == '<' and !in_comparison_context) {
+            try tokens.append(allocator, .{ .kind = .redirect_heredoc, .value = input[i .. i + 2] });
+            i += 2;
             continue;
         }
 

@@ -15,13 +15,16 @@ pub const RedirectKind = enum {
     stdin, // < file
     stdout, // > file
     append, // >> file
+    heredoc, // << DELIM
+    herestring, // <<< word
     stderr, // 2> file
     dup, // 2>&1, >&2, 1>&2 — fd duplication
 };
 
 pub const Redirect = struct {
     kind: RedirectKind,
-    path: []const u8, // for dup: the raw token value (e.g. "2>&1")
+    path: []const u8, // for dup: the raw token; for heredoc: delimiter; for herestring: the string
+    content: []const u8 = "", // heredoc body (filled by shell after parsing)
 };
 
 // ---------------------------------------------------------------------------
