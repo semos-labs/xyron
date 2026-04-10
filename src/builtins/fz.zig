@@ -21,19 +21,23 @@ const style = @import("../style.zig");
 const tui = @import("../tui.zig");
 const keys = @import("../keys.zig");
 const Result = @import("mod.zig").BuiltinResult;
+const fzh = @import("fz_helpers.zig");
 
 const Screen = tui.Screen;
 const Key = keys.Key;
 
-const MAX_ITEMS: usize = 8192;
-const MAX_LINE: usize = 512;
-
-const Options = struct {
-    multi: bool = false,
-    inline_mode: bool = false,
-    preview: bool = false,
-    preview_cmd: ?[]const u8 = null,
-};
+const MAX_ITEMS = fzh.MAX_ITEMS;
+const MAX_LINE = fzh.MAX_LINE;
+const ItemList = fzh.ItemList;
+const collectFiles = fzh.collectFiles;
+const loadPreview = fzh.loadPreview;
+const renderHighlightedText = fzh.renderHighlightedText;
+const fileColorEnum = fzh.fileColorEnum;
+const exactContains = fzh.exactContains;
+const getTermSize = fzh.getTermSize;
+const cp = fzh.cp;
+const Options = fzh.Options;
+const parseOptions = fzh.parseOptions;
 
 pub fn run(args: []const []const u8, stdout: std.fs.File) Result {
     const opts = parseOptions(args);
@@ -41,7 +45,7 @@ pub fn run(args: []const []const u8, stdout: std.fs.File) Result {
     collectFiles(".", &items, 0);
     if (items.count == 0) return .{ .exit_code = 1 };
     if (runInteractive(&items, opts, stdout)) return .{};
-    return .{ .exit_code = 130 };
+    return .{ .exit_code = 1 }; // 1 = cancelled/no selection (fzf convention)
 }
 
 pub fn runFromPipe(args: []const []const u8) void {
@@ -50,6 +54,9 @@ pub fn runFromPipe(args: []const []const u8) void {
     const stdin = std.fs.File{ .handle = posix.STDIN_FILENO };
 
     var items: ItemList = .{};
+    var header_buf: [MAX_ITEMS][MAX_LINE]u8 = undefined;
+    var header_lens: [MAX_ITEMS]usize = undefined;
+    var header_count: usize = 0;
     var read_buf: [524288]u8 = undefined;
     var total: usize = 0;
     while (total < read_buf.len) {
@@ -57,38 +64,50 @@ pub fn runFromPipe(args: []const []const u8) void {
         if (n == 0) break;
         total += n;
     }
+    var line_num: usize = 0;
     var iter = std.mem.splitScalar(u8, read_buf[0..total], '\n');
     while (iter.next()) |line| {
         const trimmed = std.mem.trimRight(u8, line, "\r");
         if (trimmed.len == 0) continue;
+        // --header-lines: first N lines become header, not items
+        if (line_num < opts.header_lines and header_count < MAX_ITEMS) {
+            const hl = @min(trimmed.len, MAX_LINE);
+            @memcpy(header_buf[header_count][0..hl], trimmed[0..hl]);
+            header_lens[header_count] = hl;
+            header_count += 1;
+            line_num += 1;
+            continue;
+        }
         items.add(trimmed);
+        line_num += 1;
     }
     if (items.count == 0) std.process.exit(1);
-    if (runInteractive(&items, opts, stdout)) std.process.exit(0);
-    std.process.exit(130);
+    // Build combined header from --header and --header-lines
+    var combined_header_buf: [2048]u8 = undefined;
+    var combined_opts = opts;
+    if (header_count > 0) {
+        var hp: usize = 0;
+        // Append --header first if present
+        if (opts.header) |h| {
+            const hl = @min(h.len, combined_header_buf.len);
+            @memcpy(combined_header_buf[hp..][0..hl], h[0..hl]);
+            hp += hl;
+            if (hp < combined_header_buf.len) { combined_header_buf[hp] = '\n'; hp += 1; }
+        }
+        for (0..header_count) |hi| {
+            const hl = @min(header_lens[hi], combined_header_buf.len - hp);
+            @memcpy(combined_header_buf[hp..][0..hl], header_buf[hi][0..hl]);
+            hp += hl;
+            if (hi + 1 < header_count and hp < combined_header_buf.len) {
+                combined_header_buf[hp] = '\n';
+                hp += 1;
+            }
+        }
+        combined_opts.header = combined_header_buf[0..hp];
+    }
+    if (runInteractive(&items, combined_opts, stdout)) std.process.exit(0);
+    std.process.exit(1);
 }
-
-// ---------------------------------------------------------------------------
-// Item storage
-// ---------------------------------------------------------------------------
-
-const ItemList = struct {
-    bufs: [MAX_ITEMS][MAX_LINE]u8 = undefined,
-    lens: [MAX_ITEMS]usize = undefined,
-    count: usize = 0,
-
-    fn add(self: *ItemList, text: []const u8) void {
-        if (self.count >= MAX_ITEMS) return;
-        const l = @min(text.len, MAX_LINE);
-        @memcpy(self.bufs[self.count][0..l], text[0..l]);
-        self.lens[self.count] = l;
-        self.count += 1;
-    }
-
-    fn get(self: *const ItemList, idx: usize) []const u8 {
-        return self.bufs[idx][0..self.lens[idx]];
-    }
-};
 
 // ---------------------------------------------------------------------------
 // Interactive picker
@@ -124,18 +143,28 @@ fn runInteractive(items: *const ItemList, opts: Options, stdout: std.fs.File) bo
     }
     defer if (alt_screen_active) tty.writeAll("\x1b[?1049l") catch {};
 
+    const eff_rows = if (opts.height) |h| @min(h, ts.rows) else ts.rows;
+
     var state = PickerState{
         .items = items,
-        .term_rows = ts.rows,
+        .term_rows = eff_rows,
         .term_cols = ts.cols,
         .multi = opts.multi,
         .preview = opts.preview and use_tui,
         .preview_cmd = opts.preview_cmd,
         .tui = use_tui,
+        .exact = opts.exact,
+        .reverse = opts.reverse,
+        .header = opts.header,
+        .print0 = opts.print0,
     };
-    state.input.prompt = "> ";
+    state.input.prompt = opts.prompt;
     state.input.prompt_color = .cyan;
     state.input.focused = true;
+    // Pre-populate query if --query was given
+    if (opts.query) |q| {
+        for (q) |ch| _ = state.input.handleKey(.{ .char = ch });
+    }
     state.score();
 
     // Screen for TUI mode
@@ -175,17 +204,18 @@ fn runInteractive(items: *const ItemList, opts: Options, stdout: std.fs.File) bo
             .enter => {
                 if (alt_screen_active) { tty.writeAll("\x1b[?1049l") catch {}; alt_screen_active = false; }
                 if (!use_tui) state.clearInline(tty);
+                const sep: []const u8 = if (state.print0) "\x00" else "\n";
                 if (opts.multi and state.selected_count > 0) {
                     for (0..items.count) |i| {
                         if (state.selected_map[i]) {
                             stdout.writeAll(items.get(i)) catch {};
-                            stdout.writeAll("\n") catch {};
+                            stdout.writeAll(sep) catch {};
                         }
                     }
                 } else if (state.filter.count > 0) {
                     const idx = state.filter.buf[state.cursor].index;
                     stdout.writeAll(items.get(idx)) catch {};
-                    stdout.writeAll("\n") catch {};
+                    stdout.writeAll(sep) catch {};
                 } else {
                     return false;
                 }
@@ -238,20 +268,38 @@ const PickerState = struct {
     preview: bool = false,
     preview_cmd: ?[]const u8 = null,
     tui: bool = true,
+    exact: bool = false,
+    reverse: bool = false,
+    header: ?[]const u8 = null,
+    print0: bool = false,
     term_rows: usize = 24,
     term_cols: usize = 80,
     rendered_lines: usize = 0,
 
     fn visibleRows(self: *const PickerState) usize {
-        if (self.tui) return if (self.term_rows > 3) self.term_rows - 2 else 1;
+        const header_rows = if (self.header) |h| std.mem.count(u8, h, "\n") + 1 else 0;
+        if (self.tui) {
+            const overhead = 2 + header_rows; // status + prompt + header
+            return if (self.term_rows > overhead) self.term_rows - overhead else 1;
+        }
         return @min(20, if (self.term_rows > 5) self.term_rows - 4 else 5);
     }
 
     fn score(self: *PickerState) void {
         const query = self.input.value();
         self.filter.reset();
-        for (0..self.items.count) |i| {
-            self.filter.push(query, self.items.get(i), @intCast(i));
+        if (self.exact and query.len > 0) {
+            // Exact substring match — no fuzzy scoring
+            for (0..self.items.count) |i| {
+                const text = self.items.get(i);
+                if (exactContains(text, query)) {
+                    self.filter.pushExact(@intCast(i));
+                }
+            }
+        } else {
+            for (0..self.items.count) |i| {
+                self.filter.push(query, self.items.get(i), @intCast(i));
+            }
         }
     }
 
@@ -308,62 +356,116 @@ const PickerState = struct {
             preview_count = loadPreview(self.items.get(cur_idx), self.preview_cmd, &preview_buf, &preview_lines);
         }
 
-        const rendered = visible_end - self.scroll;
-        const empty: u16 = if (rows > @as(u16, @intCast(rendered)) + 2) rows - @as(u16, @intCast(rendered)) - 2 else 0;
+        if (self.reverse) {
+            // Reverse layout: prompt at top, items top-down
+            var screen_row: u16 = 1;
 
-        // Empty rows at top (clear + preview)
-        var screen_row: u16 = 1;
-        for (0..empty) |row_i| {
-            scr.pad(screen_row, 1, list_width, .{});
-            if (self.preview) {
-                self.drawPreviewCell(scr, screen_row, list_width, @intCast(row_i), &preview_lines, preview_count);
-            }
+            // Prompt (top row)
+            self.input.draw(scr, tui.Rect{ .x = 1, .y = screen_row, .w = cols, .h = 1 });
             screen_row += 1;
+
+            // Header
+            if (self.header) |hdr| {
+                var hdr_iter = std.mem.splitScalar(u8, hdr, '\n');
+                while (hdr_iter.next()) |hdr_line| {
+                    const hw: u16 = @intCast(@min(hdr_line.len, cols));
+                    _ = scr.write(screen_row, 1, hdr_line[0..hw], .{ .dim = true });
+                    scr.pad(screen_row, hw + 1, cols -| hw, .{});
+                    screen_row += 1;
+                }
+            }
+
+            // Status bar
+            self.drawStatus(scr, screen_row, cols);
+            screen_row += 1;
+
+            // Items (top-down)
+            for (self.scroll..visible_end) |ri| {
+                self.drawItemRow(scr, screen_row, list_width, ri, &preview_lines, preview_count);
+                screen_row += 1;
+            }
+
+
+            // Pad remaining rows
+            while (screen_row <= rows) {
+                scr.pad(screen_row, 1, cols, .{});
+                screen_row += 1;
+            }
+        } else {
+            // Default layout: items bottom-up, prompt at bottom
+            const rendered = visible_end - self.scroll;
+            const header_rows: u16 = if (self.header) |h| @intCast(std.mem.count(u8, h, "\n") + 1) else 0;
+            const overhead: u16 = 2 + header_rows;
+            const empty: u16 = if (rows > @as(u16, @intCast(rendered)) + overhead) rows - @as(u16, @intCast(rendered)) - overhead else 0;
+
+            var screen_row: u16 = 1;
+
+            // Empty rows at top
+            for (0..empty) |row_i| {
+                scr.pad(screen_row, 1, list_width, .{});
+                if (self.preview) {
+                    self.drawPreviewCell(scr, screen_row, list_width, @intCast(row_i), &preview_lines, preview_count);
+                }
+                screen_row += 1;
+            }
+
+            // Items (bottom-up: highest index at top)
+            {
+                var ri: usize = visible_end;
+                while (ri > self.scroll) {
+                    ri -= 1;
+                    self.drawItemRow(scr, screen_row, list_width, ri, &preview_lines, preview_count);
+                    screen_row += 1;
+                }
+            }
+
+            // Header (above status bar)
+            if (self.header) |hdr| {
+                var hdr_iter = std.mem.splitScalar(u8, hdr, '\n');
+                while (hdr_iter.next()) |hdr_line| {
+                    const hw: u16 = @intCast(@min(hdr_line.len, cols));
+                    _ = scr.write(screen_row, 1, hdr_line[0..hw], .{ .dim = true });
+                    scr.pad(screen_row, hw + 1, cols -| hw, .{});
+                    screen_row += 1;
+                }
+            }
+
+            // Status bar
+            self.drawStatus(scr, screen_row, cols);
+            screen_row += 1;
+
+            // Prompt (bottom row)
+            self.input.draw(scr, tui.Rect{ .x = 1, .y = screen_row, .w = cols, .h = 1 });
+        }
+    }
+
+    fn drawItemRow(self: *const PickerState, scr: *Screen, screen_row: u16, list_width: u16, ri: usize, preview_lines: *const [64][]const u8, preview_count: usize) void {
+        const item_idx = self.filter.buf[ri].index;
+        const text = self.items.get(item_idx);
+        const is_cursor = (ri == self.cursor);
+        const is_selected = self.selected_map[item_idx];
+
+        var col: u16 = 1;
+        if (is_cursor) {
+            col += scr.write(screen_row, col, ">", .{ .fg = .cyan, .bold = true });
+            scr.pad(screen_row, col, 1, .{});
+            col += 1;
+        } else if (is_selected) {
+            col += scr.write(screen_row, col, "*", .{ .fg = .green });
+            scr.pad(screen_row, col, 1, .{});
+            col += 1;
+        } else {
+            scr.pad(screen_row, col, 2, .{});
+            col += 2;
         }
 
-        // Items (bottom-up: highest index at top)
-        var ri: usize = visible_end;
-        while (ri > self.scroll) {
-            ri -= 1;
-            const item_idx = self.filter.buf[ri].index;
-            const text = self.items.get(item_idx);
-            const is_cursor = (ri == self.cursor);
-            const is_selected = self.selected_map[item_idx];
+        const max_text: u16 = list_width -| 4;
+        col += self.drawHighlightedItem(scr, screen_row, col, text, max_text, ri, is_cursor);
+        scr.pad(screen_row, col, list_width -| (col - 1), .{});
 
-            var col: u16 = 1;
-
-            // Indicator
-            if (is_cursor) {
-                col += scr.write(screen_row, col, ">", .{ .fg = .cyan, .bold = true });
-                scr.pad(screen_row, col, 1, .{});
-                col += 1;
-            } else if (is_selected) {
-                col += scr.write(screen_row, col, "*", .{ .fg = .green });
-                scr.pad(screen_row, col, 1, .{});
-                col += 1;
-            } else {
-                scr.pad(screen_row, col, 2, .{});
-                col += 2;
-            }
-
-            // Highlighted text with file color
-            const max_text: u16 = list_width -| 4;
-            col += self.drawHighlightedItem(scr, screen_row, col, text, max_text, ri, is_cursor);
-            scr.pad(screen_row, col, list_width -| (col - 1), .{});
-
-            // Preview column
-            if (self.preview) {
-                self.drawPreviewCell(scr, screen_row, list_width, @intCast(screen_row - 1), &preview_lines, preview_count);
-            }
-            screen_row += 1;
+        if (self.preview) {
+            self.drawPreviewCell(scr, screen_row, list_width, @intCast(screen_row - 1), preview_lines, preview_count);
         }
-
-        // Status bar: "  N/M ────────"
-        self.drawStatus(scr, screen_row, cols);
-        screen_row += 1;
-
-        // Prompt (bottom row)
-        self.input.draw(scr, tui.Rect{ .x = 1, .y = screen_row, .w = cols, .h = 1 });
     }
 
     fn drawHighlightedItem(self: *const PickerState, scr: *Screen, row: u16, start_col: u16, text: []const u8, max_w: u16, scored_i: usize, is_cursor: bool) u16 {
@@ -502,234 +604,5 @@ const PickerState = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// File collection
-// ---------------------------------------------------------------------------
 
-fn collectFiles(dir_path: []const u8, items: *ItemList, depth: usize) void {
-    if (depth > 8 or items.count >= MAX_ITEMS) return;
 
-    var dir = if (dir_path[0] == '/')
-        std.fs.openDirAbsolute(dir_path, .{ .iterate = true }) catch return
-    else
-        std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
-    defer dir.close();
-
-    var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
-        if (items.count >= MAX_ITEMS) return;
-        if (entry.name.len > 0 and entry.name[0] == '.') continue;
-        if (std.mem.eql(u8, entry.name, "node_modules")) continue;
-        if (std.mem.eql(u8, entry.name, "zig-cache")) continue;
-        if (std.mem.eql(u8, entry.name, ".zig-cache")) continue;
-        if (std.mem.eql(u8, entry.name, "target")) continue;
-
-        var path_buf: [MAX_LINE]u8 = undefined;
-        var pl: usize = 0;
-        if (!std.mem.eql(u8, dir_path, ".")) {
-            const dl = @min(dir_path.len, MAX_LINE);
-            @memcpy(path_buf[0..dl], dir_path[0..dl]);
-            pl = dl;
-            if (pl < MAX_LINE) { path_buf[pl] = '/'; pl += 1; }
-        }
-        const nl = @min(entry.name.len, MAX_LINE - pl);
-        @memcpy(path_buf[pl..][0..nl], entry.name[0..nl]);
-        pl += nl;
-
-        items.add(path_buf[0..pl]);
-
-        if (entry.kind == .directory) {
-            collectFiles(path_buf[0..pl], items, depth + 1);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Render highlighted text into a raw ANSI buffer (used by inline mode).
-fn renderHighlightedText(
-    buf: []u8,
-    pos: *usize,
-    text: []const u8,
-    max_len: usize,
-    positions: []const u8,
-    match_count: u8,
-    base_color: []const u8,
-    highlight_color: []const u8,
-) void {
-    const len = @min(text.len, max_len);
-    var in_highlight = false;
-
-    for (0..len) |ci| {
-        var is_match = false;
-        for (0..match_count) |mi| {
-            if (positions[mi] == ci) { is_match = true; break; }
-        }
-
-        if (is_match and !in_highlight) {
-            pos.* += cp(buf[pos.*..], highlight_color);
-            in_highlight = true;
-        } else if (!is_match and in_highlight) {
-            pos.* += cp(buf[pos.*..], "\x1b[0m");
-            pos.* += cp(buf[pos.*..], base_color);
-            in_highlight = false;
-        }
-
-        if (pos.* < buf.len) { buf[pos.*] = text[ci]; pos.* += 1; }
-    }
-
-    if (in_highlight) pos.* += cp(buf[pos.*..], "\x1b[0m");
-}
-
-fn fileColorEnum(path: []const u8) ?style.Color {
-    if (path.len > 0 and path[path.len - 1] == '/') return .blue;
-    if (std.mem.endsWith(u8, path, ".zig")) return .yellow;
-    if (std.mem.endsWith(u8, path, ".lua")) return .magenta;
-    if (std.mem.endsWith(u8, path, ".md")) return .cyan;
-    if (std.mem.endsWith(u8, path, ".json") or std.mem.endsWith(u8, path, ".toml") or
-        std.mem.endsWith(u8, path, ".yaml") or std.mem.endsWith(u8, path, ".yml")) return .green;
-    if (std.mem.endsWith(u8, path, ".sh") or std.mem.endsWith(u8, path, ".bash") or
-        std.mem.endsWith(u8, path, ".py") or std.mem.endsWith(u8, path, ".js") or
-        std.mem.endsWith(u8, path, ".jsx")) return .yellow;
-    if (std.mem.endsWith(u8, path, ".rs") or std.mem.endsWith(u8, path, ".html")) return .red;
-    if (std.mem.endsWith(u8, path, ".go") or std.mem.endsWith(u8, path, ".ts") or
-        std.mem.endsWith(u8, path, ".tsx")) return .cyan;
-    if (std.mem.endsWith(u8, path, ".css") or std.mem.endsWith(u8, path, ".scss")) return .magenta;
-    return .white;
-}
-
-fn loadPreview(
-    item: []const u8,
-    custom_cmd: ?[]const u8,
-    preview_buf: *[4096]u8,
-    lines: *[64][]const u8,
-) usize {
-    if (custom_cmd) |cmd_template| {
-        var cmd_buf: [1024]u8 = undefined;
-        var cl: usize = 0;
-        var i: usize = 0;
-        while (i < cmd_template.len) {
-            if (i + 1 < cmd_template.len and cmd_template[i] == '{' and cmd_template[i + 1] == '}') {
-                const n = @min(item.len, cmd_buf.len - cl);
-                @memcpy(cmd_buf[cl..][0..n], item[0..n]);
-                cl += n;
-                i += 2;
-            } else {
-                if (cl < cmd_buf.len) { cmd_buf[cl] = cmd_template[i]; cl += 1; }
-                i += 1;
-            }
-        }
-        return runPreviewCmd(cmd_buf[0..cl], preview_buf, lines);
-    }
-
-    const file = std.fs.cwd().openFile(item, .{}) catch return 0;
-    defer file.close();
-    const n = file.read(preview_buf) catch return 0;
-    if (n == 0) return 0;
-
-    const check = @min(n, 512);
-    for (preview_buf[0..check]) |ch| {
-        if (ch == 0) { lines[0] = "[binary file]"; return 1; }
-    }
-
-    var count: usize = 0;
-    var line_iter = std.mem.splitScalar(u8, preview_buf[0..n], '\n');
-    while (line_iter.next()) |line| {
-        if (count >= 64) break;
-        lines[count] = line;
-        count += 1;
-    }
-    return count;
-}
-
-fn runPreviewCmd(cmd: []const u8, preview_buf: *[4096]u8, lines: *[64][]const u8) usize {
-    var child = std.process.Child.init(
-        &.{ "/bin/sh", "-c", cmd },
-        std.heap.page_allocator,
-    );
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return 0;
-
-    var total: usize = 0;
-    if (child.stdout) |f| {
-        while (total < preview_buf.len) {
-            const n = f.read(preview_buf[total..]) catch break;
-            if (n == 0) break;
-            total += n;
-        }
-    }
-    _ = child.wait() catch {};
-
-    var count: usize = 0;
-    var iter = std.mem.splitScalar(u8, preview_buf[0..total], '\n');
-    while (iter.next()) |line| {
-        if (count >= 64) break;
-        lines[count] = line;
-        count += 1;
-    }
-    return count;
-}
-
-fn parseOptions(args: []const []const u8) Options {
-    var opts = Options{};
-    var i: usize = 0;
-    while (i < args.len) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "--multi") or std.mem.eql(u8, arg, "-m")) {
-            opts.multi = true;
-        } else if (std.mem.eql(u8, arg, "--inline") or std.mem.eql(u8, arg, "-i")) {
-            opts.inline_mode = true;
-        } else if (std.mem.eql(u8, arg, "--preview") or std.mem.eql(u8, arg, "-p")) {
-            opts.preview = true;
-        } else if (std.mem.eql(u8, arg, "--preview-cmd") and i + 1 < args.len) {
-            opts.preview = true;
-            i += 1;
-            opts.preview_cmd = args[i];
-        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printHelp();
-        }
-        i += 1;
-    }
-    return opts;
-}
-
-fn printHelp() void {
-    const stderr = std.fs.File.stderr();
-    stderr.writeAll(
-        \\fz — fuzzy finder
-        \\
-        \\Usage:
-        \\  fz [options]              Find files in current directory
-        \\  ... | fz [options]        Pick from piped input
-        \\
-        \\Options:
-        \\  -m, --multi               Enable multi-select (Tab to toggle, Enter to confirm)
-        \\  -p, --preview             Show file preview (right pane)
-        \\  --preview-cmd "cmd {}"    Custom preview command ({} is replaced with selected item)
-        \\  -i, --inline              Inline mode (no alternate screen, for embedding)
-        \\  -h, --help                Show this help
-        \\
-        \\Keys:
-        \\  Up/Down                   Navigate
-        \\  Tab / Shift-Tab           Toggle selection (multi-select mode)
-        \\  Enter                     Confirm selection
-        \\  Escape / Ctrl+C           Cancel
-        \\  Type to filter            Fuzzy search
-        \\
-    ) catch {};
-}
-
-fn getTermSize(fd: posix.fd_t) struct { rows: usize, cols: usize } {
-    const ts = style.getTermSize(fd);
-    return .{ .rows = ts.rows, .cols = ts.cols };
-}
-
-fn cp(dest: []u8, src: []const u8) usize {
-    const n = @min(src.len, dest.len);
-    @memcpy(dest[0..n], src[0..n]);
-    return n;
-}

@@ -55,6 +55,18 @@ pub fn FuzzyFilter(comptime max_items: usize) type {
             self.scoreOne(query, text, index);
         }
 
+        /// Push an item with no scoring (for exact match mode).
+        pub fn pushExact(self: *Self, index: u32) void {
+            if (self.count >= max_items) return;
+            self.buf[self.count] = .{
+                .index = index,
+                .score = 0,
+                .positions = [_]u8{0} ** max_positions,
+                .match_count = 0,
+            };
+            self.count += 1;
+        }
+
         /// Reset results. Call before a series of push() calls.
         pub fn reset(self: *Self) void {
             self.count = 0;
