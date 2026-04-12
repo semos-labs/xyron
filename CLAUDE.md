@@ -172,3 +172,4 @@ All reference documentation lives in `docs/`. **Keep docs in sync with the code*
 - `docs/sqlite-schema.md` — database schema
 - `docs/project-system.md` — project system (xyron.toml, context, commands, services, doctor, explain, bootstrap)
 - `docs/migration-assistant.md` — bash/zsh conversion
+- `docs/fz.md` — fuzzy finder (fz builtin, preview, bat integration)

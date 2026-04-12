@@ -180,7 +180,9 @@ fn runInteractive(items: *const ItemList, opts: Options, stdout: std.fs.File) bo
         state.renderInline(tty);
     }
 
+    state.cached_preview.preview_cmd = opts.preview_cmd;
     while (true) {
+
         const key = keys.readKeyFromFd(tty_fd) orelse break;
 
         if (key == .resize) {
@@ -229,6 +231,13 @@ fn runInteractive(items: *const ItemList, opts: Options, stdout: std.fs.File) bo
             .down => state.moveDown(),
             .tab => state.toggleSelect(),
             .shift_tab => state.toggleSelect(),
+            // Preview scrolling
+            .ctrl_d => { state.previewScrollDown(state.visibleRows() / 2); },
+            .ctrl_u => { state.previewScrollUp(state.visibleRows() / 2); },
+            .ctrl_down => { state.previewScrollDown(1); },
+            .ctrl_up => { state.previewScrollUp(1); },
+            .page_down => { state.previewScrollDown(state.visibleRows()); },
+            .page_up => { state.previewScrollUp(state.visibleRows()); },
             else => {
                 const action = state.input.handleKey(key);
                 if (action == .changed) {
@@ -256,6 +265,15 @@ fn runInteractive(items: *const ItemList, opts: Options, stdout: std.fs.File) bo
 // Picker state
 // ---------------------------------------------------------------------------
 
+/// Cached preview — stores loaded preview content, skips reload for same item.
+const CachedPreview = struct {
+    item_idx: u32 = 0xFFFFFFFF,
+    buf: [32768]u8 = undefined,
+    lines: [64][]const u8 = undefined,
+    line_count: usize = 0,
+    preview_cmd: ?[]const u8 = null,
+};
+
 const PickerState = struct {
     items: *const ItemList,
     input: tui.Input = .{},
@@ -272,6 +290,9 @@ const PickerState = struct {
     reverse: bool = false,
     header: ?[]const u8 = null,
     print0: bool = false,
+    preview_scroll: usize = 0,
+    preview_line_count: usize = 0,
+    cached_preview: CachedPreview = .{},
     term_rows: usize = 24,
     term_cols: usize = 80,
     rendered_lines: usize = 0,
@@ -312,6 +333,7 @@ const PickerState = struct {
             if (self.cursor > 0) self.cursor -= 1;
             if (self.cursor < self.scroll) self.scroll = self.cursor;
         }
+        self.preview_scroll = 0; // reset on cursor change
     }
 
     fn moveDown(self: *PickerState) void {
@@ -322,6 +344,26 @@ const PickerState = struct {
             if (self.filter.count > 0 and self.cursor + 1 < self.filter.count) self.cursor += 1;
             const vis = self.visibleRows();
             if (self.cursor >= self.scroll + vis) self.scroll = self.cursor - vis + 1;
+        }
+        self.preview_scroll = 0; // reset on cursor change
+    }
+
+    fn previewScrollDown(self: *PickerState, lines: usize) void {
+        self.preview_scroll += lines;
+        self.clampPreviewScroll();
+    }
+
+    fn previewScrollUp(self: *PickerState, lines: usize) void {
+        self.preview_scroll -|= lines;
+    }
+
+    fn clampPreviewScroll(self: *PickerState) void {
+        // Clamp so at least one line remains visible at the bottom.
+        // preview_line_count is set during drawTui after loading preview.
+        if (self.preview_line_count > 0) {
+            const vis = self.visibleRows();
+            const max = if (self.preview_line_count > vis) self.preview_line_count - vis else 0;
+            if (self.preview_scroll > max) self.preview_scroll = max;
         }
     }
 
@@ -340,21 +382,31 @@ const PickerState = struct {
 
     // ----- TUI (full-screen) rendering via Screen -----
 
-    fn drawTui(self: *const PickerState, scr: *Screen) void {
+    fn drawTui(self: *PickerState, scr: *Screen) void {
         const rows = scr.height;
         const cols = scr.width;
         const vis = self.visibleRows();
         const visible_end = @min(self.scroll + vis, self.filter.count);
         const list_width: u16 = if (self.preview) cols / 2 else cols;
 
-        // Load preview
-        var preview_lines: [64][]const u8 = undefined;
+        // Load preview for current item (cached — only reloads on cursor change)
         var preview_count: usize = 0;
-        var preview_buf: [4096]u8 = undefined;
         if (self.preview and self.filter.count > 0) {
             const cur_idx = self.filter.buf[self.cursor].index;
-            preview_count = loadPreview(self.items.get(cur_idx), self.preview_cmd, &preview_buf, &preview_lines);
+            if (cur_idx != self.cached_preview.item_idx) {
+                self.cached_preview.item_idx = cur_idx;
+                self.cached_preview.line_count = loadPreview(
+                    self.items.get(cur_idx),
+                    self.cached_preview.preview_cmd,
+                    &self.cached_preview.buf,
+                    &self.cached_preview.lines,
+                );
+                self.preview_scroll = 0;
+            }
+            preview_count = self.cached_preview.line_count;
         }
+        const preview_lines = &self.cached_preview.lines;
+        self.preview_line_count = preview_count;
 
         if (self.reverse) {
             // Reverse layout: prompt at top, items top-down
@@ -381,7 +433,7 @@ const PickerState = struct {
 
             // Items (top-down)
             for (self.scroll..visible_end) |ri| {
-                self.drawItemRow(scr, screen_row, list_width, ri, &preview_lines, preview_count);
+                self.drawItemRow(scr, screen_row, list_width, ri, preview_lines, preview_count);
                 screen_row += 1;
             }
 
@@ -404,7 +456,7 @@ const PickerState = struct {
             for (0..empty) |row_i| {
                 scr.pad(screen_row, 1, list_width, .{});
                 if (self.preview) {
-                    self.drawPreviewCell(scr, screen_row, list_width, @intCast(row_i), &preview_lines, preview_count);
+                    self.drawPreviewCell(scr, screen_row, list_width, @intCast(row_i), preview_lines, preview_count);
                 }
                 screen_row += 1;
             }
@@ -414,7 +466,7 @@ const PickerState = struct {
                 var ri: usize = visible_end;
                 while (ri > self.scroll) {
                     ri -= 1;
-                    self.drawItemRow(scr, screen_row, list_width, ri, &preview_lines, preview_count);
+                    self.drawItemRow(scr, screen_row, list_width, ri, preview_lines, preview_count);
                     screen_row += 1;
                 }
             }
@@ -495,16 +547,16 @@ const PickerState = struct {
     }
 
     fn drawPreviewCell(self: *const PickerState, scr: *Screen, row: u16, list_width: u16, content_row: u16, preview_lines: *const [64][]const u8, preview_count: usize) void {
-        _ = self;
         const sep_col = list_width + 1;
         _ = scr.write(row, sep_col, style.box.vertical, .{ .dim = true });
         scr.pad(row, sep_col + 1, 1, .{});
         const preview_col = sep_col + 2;
         const preview_w = scr.width -| preview_col + 1;
-        if (content_row < preview_count) {
-            const line = preview_lines[content_row];
-            const tw: u16 = @intCast(@min(line.len, preview_w));
-            _ = scr.write(row, preview_col, line[0..tw], .{ .dim = true });
+        // Apply preview scroll offset
+        const scrolled_row = content_row + @as(u16, @intCast(@min(self.preview_scroll, 0xFFFF)));
+        if (scrolled_row < preview_count) {
+            const line = preview_lines[scrolled_row];
+            const tw = scr.writeAnsi(row, preview_col, line);
             scr.pad(row, preview_col + tw, preview_w -| tw, .{});
         } else {
             scr.pad(row, preview_col, preview_w, .{});

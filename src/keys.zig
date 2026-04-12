@@ -49,6 +49,10 @@ pub const Key = union(enum) {
     ctrl_space, // trigger completion
     escape,
     // Alt/Meta combos (ESC + key)
+    ctrl_up, // preview scroll up (line)
+    ctrl_down, // preview scroll down (line)
+    page_up, // page up
+    page_down, // page down
     alt_b, // word backward
     alt_f, // word forward
     alt_d, // kill word forward
@@ -307,10 +311,24 @@ fn parseCsiParamsFromFd(fd: posix.fd_t, first_digit: u8) Key {
         const code = parseNum(params);
         return switch (code) {
             3 => .delete,
+            5 => .page_up, // CSI 5~
+            6 => .page_down, // CSI 6~
             200 => .paste_begin,
             201 => .paste_end,
             else => .unknown,
         };
+    }
+
+    // Modified arrow keys: CSI 1;mod A/B/C/D
+    if (final == 'A' or final == 'B') {
+        // Parse modifier: 5=ctrl, 2=shift, 3=alt
+        if (std.mem.indexOf(u8, params, ";")) |sep| {
+            const modifier = parseNum(params[sep + 1 ..]);
+            if (modifier == 5) { // Ctrl
+                return if (final == 'A') .ctrl_up else .ctrl_down;
+            }
+        }
+        return if (final == 'A') .up else .down;
     }
 
     return .unknown;

@@ -357,11 +357,22 @@ pub fn readLine(
                 complete_mod.dismissInline(stdout);
                 ed.moveLeft();
             },
-            .right, .ctrl_f => {
+            .ctrl_f => {
                 if (complete_mod.inline_state.active) {
                     _ = complete_mod.acceptInline(ed, stdout);
                     content_changed = true;
                 } else if (ed.cursor == ed.len) {
+                    if (getGhostSuggestion(ed)) |ghost| {
+                        ed.setContent(ghost);
+                        refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
+                        continue;
+                    }
+                }
+                ed.moveRight();
+            },
+            .right => {
+                complete_mod.dismissInline(stdout);
+                if (ed.cursor == ed.len) {
                     if (getGhostSuggestion(ed)) |ghost| {
                         ed.setContent(ghost);
                         refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);

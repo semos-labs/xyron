@@ -241,6 +241,115 @@ pub fn write(self: *Self, row: u16, col: u16, text: []const u8, s: Style) u16 {
     return c - c_start;
 }
 
+/// Write text containing ANSI SGR escape sequences (e.g. from bat).
+/// Parses \x1b[...m codes and maps them to cell fg/attrs. Returns columns written.
+pub fn writeAnsi(self: *Self, row: u16, col: u16, text: []const u8) u16 {
+    if (row == 0 or col == 0) return 0;
+    const r = row - 1;
+    var cx = col - 1;
+    if (r >= self.height or cx >= self.width) return 0;
+
+    var fg: u8 = @intFromEnum(style.Color.default);
+    var bold = false;
+    var dim = false;
+    var italic = false;
+
+    var i: usize = 0;
+    while (i < text.len and cx < self.width) {
+        // ANSI escape sequence: \x1b[...m
+        if (text[i] == 0x1b and i + 1 < text.len and text[i + 1] == '[') {
+            i += 2; // skip \x1b[
+            // Collect SGR params
+            var params: [8]u16 = undefined;
+            var param_count: usize = 0;
+            while (i < text.len and text[i] != 'm') {
+                var param: u16 = 0;
+                while (i < text.len and text[i] >= '0' and text[i] <= '9') {
+                    param = param * 10 + @as(u16, text[i] - '0');
+                    i += 1;
+                }
+                if (param_count < params.len) {
+                    params[param_count] = param;
+                    param_count += 1;
+                }
+                if (i < text.len and text[i] == ';') i += 1;
+            }
+            if (i < text.len and text[i] == 'm') i += 1;
+            // Apply SGR params
+            var pi: usize = 0;
+            while (pi < param_count) {
+                const p = params[pi];
+                switch (p) {
+                    0 => { fg = @intFromEnum(style.Color.default); bold = false; dim = false; italic = false; },
+                    1 => bold = true,
+                    2 => dim = true,
+                    3 => italic = true,
+                    22 => { bold = false; dim = false; },
+                    23 => italic = false,
+                    30...37 => fg = @truncate(p),
+                    39 => fg = @intFromEnum(style.Color.default),
+                    90...97 => fg = @truncate(p),
+                    38 => {
+                        // Extended color: 38;5;N (256-color) or 38;2;R;G;B (truecolor)
+                        if (pi + 1 < param_count and params[pi + 1] == 5 and pi + 2 < param_count) {
+                            fg = mapColor256(@truncate(params[pi + 2]));
+                            pi += 2;
+                        } else if (pi + 1 < param_count and params[pi + 1] == 2 and pi + 4 < param_count) {
+                            fg = mapColorRgb(@truncate(params[pi + 2]), @truncate(params[pi + 3]), @truncate(params[pi + 4]));
+                            pi += 4;
+                        }
+                    },
+                    else => {},
+                }
+                pi += 1;
+            }
+            continue;
+        }
+
+        // Regular character
+        const byte = text[i];
+        const seq_len = std.unicode.utf8ByteSequenceLength(byte) catch {
+            const cell = &self.back[@as(usize, r) * max_cols + cx];
+            cell.setChar(byte);
+            cell.fg = fg;
+            cell.bg = 0;
+            cell.attrs = .{ .bold = bold, .dim = dim, .italic = italic };
+            cx += 1;
+            i += 1;
+            continue;
+        };
+        if (i + seq_len > text.len) break;
+
+        const cp = std.unicode.utf8Decode(text[i..][0..seq_len]) catch {
+            i += seq_len;
+            continue;
+        };
+        const w = unicode.codepointWidth(cp);
+        if (w == 0) { i += seq_len; continue; }
+        if (cx + w > self.width) break;
+
+        const cell = &self.back[@as(usize, r) * max_cols + cx];
+        cell.setUtf8(text[i..][0..seq_len]);
+        cell.fg = fg;
+        cell.bg = 0;
+        cell.attrs = .{ .bold = bold, .dim = dim, .italic = italic };
+
+        if (w == 2 and cx + 1 < self.width) {
+            const next = &self.back[@as(usize, r) * max_cols + cx + 1];
+            next.setChar(0);
+            next.char_len = 0;
+            next.fg = fg;
+            next.bg = 0;
+            next.attrs = .{ .bold = bold, .dim = dim, .italic = italic };
+        }
+
+        cx += w;
+        i += seq_len;
+    }
+
+    return cx - (col - 1);
+}
+
 /// Fill a rect with spaces using the given style.
 pub fn fill(self: *Self, rect: Rect, s: Style) void {
     if (rect.w == 0 or rect.h == 0) return;
@@ -503,6 +612,71 @@ test "diff skips unchanged cells" {
     for (0..5) |i| {
         try std.testing.expect(scr.back[i].eql(scr.front[i]));
     }
+}
+
+/// Map a 256-color index to the nearest base-16 SGR code.
+fn mapColor256(idx: u8) u8 {
+    return switch (idx) {
+        0 => 30,   // black
+        1 => 31,   // red
+        2 => 32,   // green
+        3 => 33,   // yellow
+        4 => 34,   // blue
+        5 => 35,   // magenta
+        6 => 36,   // cyan
+        7 => 37,   // white
+        8 => 90,   // bright black
+        9 => 91,   // bright red
+        10 => 92,  // bright green
+        11 => 93,  // bright yellow
+        12 => 94,  // bright blue
+        13 => 95,  // bright magenta
+        14 => 96,  // bright cyan
+        15 => 97,  // bright white
+        16...231 => {
+            // 6x6x6 color cube: map to nearest base color
+            const ci = idx - 16;
+            const r = ci / 36;
+            const g = (ci % 36) / 6;
+            const b = ci % 6;
+            return rgbToSgr(r * 51, g * 51, b * 51);
+        },
+        232...255 => {
+            // Grayscale: 232=dark, 255=light
+            const gray = (idx - 232) * 10 + 8;
+            return if (gray < 64) 90 else if (gray < 128) 37 else 97;
+        },
+    };
+}
+
+/// Map RGB values to the nearest base-16 SGR code.
+fn mapColorRgb(r: u8, g: u8, b: u8) u8 {
+    return rgbToSgr(r, g, b);
+}
+
+fn rgbToSgr(r: u8, g: u8, b: u8) u8 {
+    // Simple nearest-match to base 16 colors
+    const lum = (@as(u16, r) * 3 + @as(u16, g) * 6 + @as(u16, b)) / 10;
+    const bright = lum > 128;
+    const base: u8 = if (bright) 90 else 30;
+
+    // Determine dominant channel(s)
+    const max = @max(r, @max(g, b));
+    if (max < 40) return if (bright) 90 else 30; // black/dark gray
+
+    const threshold = max / 2;
+    const has_r = r > threshold;
+    const has_g = g > threshold;
+    const has_b = b > threshold;
+
+    if (has_r and has_g and has_b) return base + 7; // white
+    if (has_r and has_g) return base + 3; // yellow
+    if (has_r and has_b) return base + 5; // magenta
+    if (has_g and has_b) return base + 6; // cyan
+    if (has_r) return base + 1; // red
+    if (has_g) return base + 2; // green
+    if (has_b) return base + 4; // blue
+    return base + 7; // white fallback
 }
 
 test "resize invalidates" {

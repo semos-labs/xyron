@@ -261,15 +261,50 @@ fn provideHelpFlags(
 ) void {
     if (ctx.cmd_name.len == 0) return;
 
+    // Resolve aliases: if the command is an alias, use its expansion instead.
+    // e.g. alias cc="cargo check" → base command "cargo", extra args ["check"]
+    var alias_args: [16][]const u8 = undefined;
+    var alias_args_len: usize = 0;
+    const resolved_cmd = blk: {
+        const expansion = aliases_mod.get(ctx.cmd_name) orelse break :blk ctx.cmd_name;
+        // Parse expansion to extract base command and any extra args
+        var iter = std.mem.splitScalar(u8, expansion, ' ');
+        const base = iter.next() orelse break :blk ctx.cmd_name;
+        if (base.len == 0) break :blk ctx.cmd_name;
+        // Skip if alias expands to a builtin (no --help in PATH)
+        if (builtins.isBuiltin(base)) return;
+        // Collect extra args from expansion (e.g. "check" from "cargo check")
+        while (iter.next()) |arg| {
+            if (arg.len == 0) continue;
+            if (alias_args_len < alias_args.len) {
+                alias_args[alias_args_len] = arg;
+                alias_args_len += 1;
+            }
+        }
+        break :blk base;
+    };
+
     // Walk subcommand chain: e.g. "docker" → "docker compose" → "docker compose up"
     // At each level, check if the next arg is a known subcommand.
     var cmd_buf: [512]u8 = undefined;
-    const base_len = @min(ctx.cmd_name.len, cmd_buf.len);
-    @memcpy(cmd_buf[0..base_len], ctx.cmd_name[0..base_len]);
+    const base_len = @min(resolved_cmd.len, cmd_buf.len);
+    @memcpy(cmd_buf[0..base_len], resolved_cmd[0..base_len]);
     var cmd_len: usize = base_len;
 
     // Cache and resolve each subcommand level
     help_cache.ensureCached(cmd_buf[0..cmd_len], env);
+
+    // Walk alias expansion args first (e.g. "check" from alias "cargo check"),
+    // then context args from the actual input.
+    for (alias_args[0..alias_args_len]) |arg| {
+        if (arg.len > 0 and arg[0] == '-') continue; // skip flags in alias expansion
+        if (!help_cache.isSubcommand(cmd_buf[0..cmd_len], arg)) break;
+        if (cmd_len + 1 + arg.len > cmd_buf.len) break;
+        cmd_buf[cmd_len] = ' ';
+        @memcpy(cmd_buf[cmd_len + 1 ..][0..arg.len], arg);
+        cmd_len += 1 + arg.len;
+        help_cache.ensureCached(cmd_buf[0..cmd_len], env);
+    }
 
     for (ctx.cmd_args[0..ctx.cmd_args_len]) |arg| {
         // Check if this arg is a known subcommand at current level

@@ -81,7 +81,7 @@ pub fn collectFiles(dir_path: []const u8, items: *ItemList, depth: usize) void {
 pub fn loadPreview(
     item: []const u8,
     custom_cmd: ?[]const u8,
-    preview_buf: *[4096]u8,
+    preview_buf: *[32768]u8,
     lines: *[64][]const u8,
 ) usize {
     if (custom_cmd) |cmd_template| {
@@ -102,6 +102,17 @@ pub fn loadPreview(
         return runPreviewCmd(cmd_buf[0..cl], preview_buf, lines);
     }
 
+    // Try bat for syntax-highlighted preview
+    if (hasBat()) {
+        var cmd_buf: [1024]u8 = undefined;
+        const cmd = std.fmt.bufPrint(&cmd_buf, "bat --color=always --plain --paging=never --line-range=:64 -- '{s}'", .{item}) catch "";
+        if (cmd.len > 0) {
+            const n = runPreviewCmd(cmd, preview_buf, lines);
+            if (n > 0) return n;
+        }
+    }
+
+    // Fallback: plain file read
     const file = std.fs.cwd().openFile(item, .{}) catch return 0;
     defer file.close();
     const n = file.read(preview_buf) catch return 0;
@@ -122,7 +133,40 @@ pub fn loadPreview(
     return count;
 }
 
-fn runPreviewCmd(cmd: []const u8, preview_buf: *[4096]u8, lines: *[64][]const u8) usize {
+/// Check if bat is available in PATH (cached after first check).
+var bat_checked: bool = false;
+var bat_available: bool = false;
+
+pub fn hasBatPublic() bool {
+    return hasBat();
+}
+
+fn hasBat() bool {
+    if (bat_checked) return bat_available;
+    bat_checked = true;
+    // Search PATH for bat
+    const path_env = std.posix.getenv("PATH") orelse "";
+    var path_iter = std.mem.splitScalar(u8, path_env, ':');
+    while (path_iter.next()) |dir| {
+        if (dir.len == 0) continue;
+        var buf: [512]u8 = undefined;
+        const needed = dir.len + 1 + 3; // dir + "/" + "bat"
+        if (needed >= buf.len) continue;
+        @memcpy(buf[0..dir.len], dir);
+        buf[dir.len] = '/';
+        @memcpy(buf[dir.len + 1 ..][0..3], "bat");
+        buf[needed] = 0;
+        const path_z: [*:0]const u8 = @ptrCast(&buf);
+        if (std.fs.accessAbsoluteZ(path_z, .{})) {
+            bat_available = true;
+            return true;
+        } else |_| {}
+    }
+    bat_available = false;
+    return false;
+}
+
+fn runPreviewCmd(cmd: []const u8, preview_buf: *[32768]u8, lines: *[64][]const u8) usize {
     var child = std.process.Child.init(
         &.{ "/bin/sh", "-c", cmd },
         std.heap.page_allocator,
