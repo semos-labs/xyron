@@ -1169,8 +1169,11 @@ fn shouldDelegateToSh(line: []const u8) bool {
     return false;
 }
 
-/// Flag set by SIGWINCH handler — checked in the main loop.
-var winch_pending: bool = false;
+/// Flag set by SIGWINCH handler — checked in the main loop AND inside
+/// keys.readKey so a resize that arrives between renderPrompt and the
+/// next poll() (or before the first poll on startup) still triggers an
+/// immediate re-render instead of waiting for user input.
+pub var winch_pending: bool = false;
 
 fn installSignalHandlers() void {
     const noop_act = posix.Sigaction{

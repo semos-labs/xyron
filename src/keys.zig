@@ -78,7 +78,16 @@ pub fn readKey() !Key {
         // Poll stdin + IPC socket simultaneously. This lets xyron handle
         // IPC requests (like handshake) while waiting for user input.
         const ipc_mod = @import("ipc.zig");
+        const shell_mod = @import("shell.zig");
         while (true) {
+            // Drain any pending SIGWINCH BEFORE blocking — the signal may
+            // have arrived between the previous render and this poll, in
+            // which case EINTR from poll() won't fire (signal already ran)
+            // and the prompt would stay at stale dims until the user types.
+            if (shell_mod.winch_pending) {
+                shell_mod.winch_pending = false;
+                return .resize;
+            }
             var fds: [2]posix.pollfd = .{
                 .{ .fd = posix.STDIN_FILENO, .events = posix.POLL.IN, .revents = 0 },
                 .{ .fd = ipc_mod.getListenFd(), .events = posix.POLL.IN, .revents = 0 },
