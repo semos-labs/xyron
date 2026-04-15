@@ -36,6 +36,12 @@ const project_resolver = @import("project/resolver.zig");
 const git_info_mod = @import("git_info.zig");
 const title = @import("title.zig");
 
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+
+fn c_unsetenv(name: [*:0]const u8) void {
+    _ = unsetenv(name);
+}
+
 pub const Shell = struct {
     allocator: std.mem.Allocator,
     ids: types.IdGenerator,
@@ -93,6 +99,23 @@ pub const Shell = struct {
         // Initialize Lua
         const lua = lua_api.init(&env_inst, attyx.enabled);
         loadLuaConfig(lua);
+
+        // Attyx integration: Lua config typically rebuilds PATH from scratch,
+        // dropping the bin dir Attyx prepended before exec. Re-prepend it now
+        // so the `attyx` CLI is reachable from inside xyron panes.
+        if (posix.getenv("__ATTYX_BIN_DIR")) |bin_dir_z| {
+            const bin_dir = std.mem.sliceTo(bin_dir_z.ptr, 0);
+            if (bin_dir.len > 0) {
+                const cur_path = env_inst.get("PATH") orelse "";
+                if (std.mem.indexOf(u8, cur_path, bin_dir) == null) {
+                    var path_buf: [4096]u8 = undefined;
+                    if (std.fmt.bufPrint(&path_buf, "{s}:{s}", .{ bin_dir, cur_path })) |new_path| {
+                        env_inst.set("PATH", new_path) catch {};
+                    } else |_| {}
+                }
+            }
+            c_unsetenv("__ATTYX_BIN_DIR");
+        }
 
         // Initialize project context with session ID derived from pid+timestamp
         const session_num: u64 = @intCast(@as(i64, pid) * 1000000 + @rem(ts, 1000000));
@@ -204,6 +227,7 @@ pub const Shell = struct {
         git_info_mod.requestRefresh();
 
         var deferred_done = false;
+        var startup_cmd_done = false;
 
         while (self.running) {
             // Ensure raw mode is active — fork-based builtins can corrupt terminal state
@@ -282,6 +306,32 @@ pub const Shell = struct {
                 const pr2 = prompt_mod.render(&pbuf2, &pctx2, self.lua);
                 input.refreshLine(stdout, pr2.text, &ed, &hl_ctx);
                 input.prompt_extra_lines = if (pr2.line_count > 1) pr2.line_count - 1 else 0;
+            }
+
+            // Attyx command injection: when launched via `attyx tab create
+            // --cmd <cmd>` (or similar), the parent terminal sets
+            // __ATTYX_STARTUP_CMD on us. Execute it once on the first prompt,
+            // then unset so it never fires again (e.g. in subshells).
+            if (!startup_cmd_done) {
+                startup_cmd_done = true;
+                if (posix.getenv("__ATTYX_STARTUP_CMD")) |raw_cmd| {
+                    const cmd_slice = std.mem.sliceTo(raw_cmd.ptr, 0);
+                    if (cmd_slice.len > 0 and cmd_slice.len < editor_mod.MAX_LINE) {
+                        var line_buf: [editor_mod.MAX_LINE]u8 = undefined;
+                        @memcpy(line_buf[0..cmd_slice.len], cmd_slice);
+                        // Newline so the executed command output starts on a
+                        // fresh line below the just-rendered prompt.
+                        stdout.writeAll("\r\n") catch {};
+                        term.disableRawMode();
+                        self.executeLine(line_buf[0..cmd_slice.len]);
+                        term.enableRawMode() catch {};
+                        c_unsetenv("__ATTYX_STARTUP_CMD");
+                        // Re-render prompt for the next iteration.
+                        input.prompt_fresh = true;
+                        continue;
+                    }
+                    c_unsetenv("__ATTYX_STARTUP_CMD");
+                }
             }
 
             const result = input.readLine(&ed, prompt_str, &self.history, &hl_ctx) catch |err| {
