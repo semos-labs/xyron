@@ -60,8 +60,7 @@ pub var replay_len: usize = 0;
 pub var replay_pending: bool = false;
 
 fn recent(db: *history_db_mod.HistoryDb, limit: usize, stdout: std.fs.File) Result {
-    var q = history_db_mod.HistoryQuery{ .limit = @min(limit, 100) };
-    _ = &q;
+    const q = history_db_mod.HistoryQuery{ .limit = @min(limit, 100), .dedup = true };
     var entries: [100]history_db_mod.HistoryEntry = undefined;
     var str_buf: [100 * 256]u8 = undefined;
     const count = db.query(&q, entries[0..q.limit], &str_buf);
@@ -70,7 +69,7 @@ fn recent(db: *history_db_mod.HistoryDb, limit: usize, stdout: std.fs.File) Resu
 }
 
 fn search(db: *history_db_mod.HistoryDb, text: []const u8, stdout: std.fs.File) Result {
-    const q = history_db_mod.HistoryQuery{ .text_contains = text, .limit = 25 };
+    const q = history_db_mod.HistoryQuery{ .text_contains = text, .limit = 25, .dedup = true };
     var entries: [25]history_db_mod.HistoryEntry = undefined;
     var str_buf: [25 * 256]u8 = undefined;
     const count = db.query(&q, &entries, &str_buf);
@@ -80,7 +79,7 @@ fn search(db: *history_db_mod.HistoryDb, text: []const u8, stdout: std.fs.File) 
 }
 
 fn failed(db: *history_db_mod.HistoryDb, limit: usize, stdout: std.fs.File) Result {
-    const q = history_db_mod.HistoryQuery{ .only_failed = true, .limit = @min(limit, 50) };
+    const q = history_db_mod.HistoryQuery{ .only_failed = true, .limit = @min(limit, 50), .dedup = true };
     var entries: [50]history_db_mod.HistoryEntry = undefined;
     var str_buf: [50 * 256]u8 = undefined;
     const count = db.query(&q, entries[0..q.limit], &str_buf);

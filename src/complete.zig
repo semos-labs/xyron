@@ -1187,10 +1187,11 @@ fn sendOverlayToAttyx(
     const visible_end = @min(scroll + max_visible, count);
     const visible_count = visible_end - scroll;
 
-    // Build payload: selected:i64, scroll:i64, total:i64, visible_count:i64,
+    // Build payload: pane_id:str, selected:i64, scroll:i64, total:i64, visible_count:i64,
     // then per visible candidate: text:str, desc:str, kind:u8
     var buf: [proto.MAX_PAYLOAD]u8 = undefined;
     var w = proto.PayloadWriter.init(&buf);
+    w.writeStr(ipc_mod.getAttyxPaneId() orelse "");
     w.writeInt(@intCast(selected));
     w.writeInt(@intCast(scroll));
     w.writeInt(@intCast(count));
@@ -1209,9 +1210,13 @@ fn sendOverlayToAttyx(
 
 /// Tell Attyx to dismiss the overlay.
 pub fn dismissAttyxOverlay() void {
+    const proto = @import("protocol.zig");
     const ipc_mod = @import("ipc.zig");
     if (!ipc_mod.attyx_connected) return;
-    _ = ipc_mod.sendToAttyx(.evt_overlay_dismiss, &.{});
+    var buf: [128]u8 = undefined;
+    var w = proto.PayloadWriter.init(&buf);
+    w.writeStr(ipc_mod.getAttyxPaneId() orelse "");
+    _ = ipc_mod.sendToAttyx(.evt_overlay_dismiss, w.written());
 }
 
 test "analyzeContext: command position" {

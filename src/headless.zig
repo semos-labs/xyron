@@ -509,8 +509,14 @@ pub const HeadlessRuntime = struct {
         const req_id = r.readInt();
         const buffer = r.readStr();
 
-        // Find ghost suggestion from in-memory history
-        const suggestion = if (self.history_buf) |h| h.findGhost(buffer) else null;
+        // Prefer DB (has full history, ordered by recency) over in-memory buffer
+        var ghost_store: [4096]u8 = undefined;
+        const suggestion: ?[]const u8 = if (self.history_db.findGhost(buffer, &ghost_store)) |s|
+            s
+        else if (self.history_buf) |h|
+            h.findGhost(buffer)
+        else
+            null;
 
         var buf: [1024]u8 = undefined;
         var w = proto.PayloadWriter.init(&buf);

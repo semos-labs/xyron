@@ -170,6 +170,9 @@ pub const HistoryDb = struct {
         if (q.min_duration_ms > 0)
             pos += cp(sql_buf[pos..], " AND duration_ms >= ?4");
 
+        // When deduping, fetch more rows so we can skip duplicates and still
+        // fill the requested limit. The scan limit caps how far back we look.
+        const scan_limit: usize = if (q.dedup) q.limit * 10 else q.limit;
         pos += cp(sql_buf[pos..], " ORDER BY id DESC LIMIT ?5");
         sql_buf[pos] = 0;
 
@@ -188,9 +191,9 @@ pub const HistoryDb = struct {
         if (q.cwd_filter.len > 0) stmt.bindText(2, q.cwd_filter);
         if (q.since_ms > 0) stmt.bindInt(3, q.since_ms);
         if (q.min_duration_ms > 0) stmt.bindInt(4, q.min_duration_ms);
-        stmt.bindInt(5, @intCast(q.limit));
+        stmt.bindInt(5, @intCast(scan_limit));
 
-        return self.readEntries(&stmt, buf, str_buf);
+        return self.readEntries(&stmt, buf, str_buf, q.dedup);
     }
 
     /// Get a single entry by ID.
@@ -203,7 +206,7 @@ pub const HistoryDb = struct {
         stmt.bindInt(1, id);
 
         var entries: [1]HistoryEntry = undefined;
-        const count = self.readEntries(&stmt, &entries, str_buf);
+        const count = self.readEntries(&stmt, &entries, str_buf, false);
         if (count == 0) return null;
         return entries[0];
     }
@@ -217,7 +220,7 @@ pub const HistoryDb = struct {
 
         var stmt = db.prepare(
             "SELECT raw_input FROM commands" ++
-                " WHERE raw_input LIKE ?1 AND exit_code = 0 AND length(raw_input) > ?2" ++
+                " WHERE raw_input LIKE ?1 AND length(raw_input) > ?2" ++
                 " ORDER BY id DESC LIMIT 1",
         ) catch return null;
         defer stmt.deinit();
@@ -239,17 +242,30 @@ pub const HistoryDb = struct {
         return out[0..raw.len];
     }
 
-    fn readEntries(self: *HistoryDb, stmt: *sqlite.Stmt, buf: []HistoryEntry, str_buf: []u8) usize {
+    fn readEntries(self: *HistoryDb, stmt: *sqlite.Stmt, buf: []HistoryEntry, str_buf: []u8, dedup: bool) usize {
         _ = self;
         var count: usize = 0;
         var str_pos: usize = 0;
 
-        while (count < buf.len) {
+        while (true) {
+            if (count >= buf.len) break;
             const has_row = stmt.step() catch break;
             if (!has_row) break;
 
             const raw = stmt.columnText(1) orelse "";
             const cwd_text = stmt.columnText(2) orelse "";
+
+            // Skip duplicates: check if we already have this raw_input
+            if (dedup) {
+                var dupe = false;
+                for (0..count) |j| {
+                    if (buf[j].raw_input.len == raw.len and std.mem.eql(u8, buf[j].raw_input, raw)) {
+                        dupe = true;
+                        break;
+                    }
+                }
+                if (dupe) continue;
+            }
 
             const raw_start = str_pos;
             const raw_len = @min(raw.len, str_buf.len - str_pos);
@@ -292,6 +308,7 @@ pub const HistoryQuery = struct {
     only_interrupted: bool = false,
     since_ms: i64 = 0,
     min_duration_ms: i64 = 0,
+    dedup: bool = false,
     limit: usize = 25,
 };
 

@@ -293,17 +293,21 @@ fn handleGetGhost(fd: posix.fd_t, payload: []const u8) void {
     const req_id = r.readInt();
     const buffer = r.readStr();
 
+    var ghost_buf: [4096]u8 = undefined;
+    const suggestion = if (history_db) |db|
+        db.findGhost(buffer, &ghost_buf)
+    else if (history) |h|
+        h.findGhost(buffer)
+    else
+        null;
+
     var buf: [1024]u8 = undefined;
     var w = proto.PayloadWriter.init(&buf);
     w.writeInt(req_id);
 
-    if (history) |h| {
-        if (h.findGhost(buffer)) |s| {
-            w.writeU8(1);
-            w.writeStr(s);
-        } else {
-            w.writeU8(0);
-        }
+    if (suggestion) |s| {
+        w.writeU8(1);
+        w.writeStr(s);
     } else {
         w.writeU8(0);
     }
