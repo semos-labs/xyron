@@ -42,7 +42,10 @@ pub fn renderLine(
         is_powerline_seg[idx] = seg.bg_color != null;
     }
 
-    // Phase 2: if spacer, measure total visible width for spacing
+    // Phase 2: if spacer, measure total visible width for spacing.
+    // Leave 1 col of slack so we never end the line at col == width
+    // (pending-wrap state) right before the \r\n — see the matching
+    // comment in prompt.zig render() for why this matters.
     var spacer_w: usize = 0;
     if (has_spacer) {
         var total_vis: usize = 0;
@@ -57,7 +60,8 @@ pub fn renderLine(
                 total_vis += raw_vis[idx];
             }
         }
-        spacer_w = if (term_w > total_vis) term_w - total_vis else 1;
+        const safe_w = if (term_w > 0) term_w - 1 else 0;
+        spacer_w = if (safe_w > total_vis) safe_w - total_vis else 1;
     }
 
     // Phase 3: compose output with powerline transitions

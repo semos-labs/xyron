@@ -33,7 +33,17 @@ pub const ReadResult = union(enum) {
 };
 
 /// Number of extra lines in the prompt (0 = single line).
+/// Counts logical newlines in the prompt only — does NOT account for
+/// visual wrapping of long content. Kept for external callers in
+/// complete.zig. For cursor repositioning in refreshLineWithHistory use
+/// `last_editor_cursor_row` which tracks visual rows.
 pub var prompt_extra_lines: usize = 0;
+
+/// Visual row offset from the prompt's first row where the editor cursor
+/// was placed at the last render. Used on the next refresh to move up to
+/// the prompt's top-left before clearing — this is the key value that
+/// accounts for visual wrapping of content past the terminal width.
+pub var last_editor_cursor_row: usize = 0;
 
 /// Set to true for the first render of a new prompt (after command output).
 /// Prevents moving up over command output.
@@ -142,13 +152,33 @@ pub fn readLine(
                 continue;
             },
             .resize => {
-                // Terminal resized — re-render prompt cleanly.
-                // Block re-rendering requires terminal emulator support
-                // (Attyx tracks blocks via events and re-renders on its side).
+                // After the terminal resizes, the engine has already
+                // reflowed whatever we last drew to the new width. Our
+                // cached `last_editor_cursor_row` was computed at the OLD
+                // width and no longer matches where the terminal cursor
+                // actually sits. Recompute the visual layout of the
+                // currently-rendered (old) prompt + content at the NEW
+                // width — under the assumption that the terminal reflow
+                // is consistent with our layout model — and reset the
+                // tracked cursor row. Then do a normal refresh which
+                // will move up that many rows, clear, and redraw.
                 complete_mod.dismissInline(stdout);
                 const ts = overlay.getTermSize();
                 cursor_row_estimate = @min(cursor_row_estimate, ts.rows);
-                refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
+
+                const old_layout = computeLayout(prompt_str, ed.content(), &[_]u8{}, ed.cursor, ts.cols);
+                last_editor_cursor_row = old_layout.cursor_row;
+                const old_visual = promptVisualRows(prompt_str, ts.cols);
+                prompt_extra_lines = if (old_visual > 1) old_visual - 1 else 0;
+                prompt_fresh = false;
+
+                const prompt_mod = @import("prompt.zig");
+                var pctx = prompt_mod.buildContext(prompt_last_exit, prompt_last_duration, prompt_job_count);
+                pctx.vim_normal = ed.vim_enabled and (ed.mode == .normal or ed.mode == .visual);
+                var pbuf: [prompt_mod.MAX_PROMPT]u8 = undefined;
+                const pr = prompt_mod.render(&pbuf, &pctx, prompt_lua);
+                refreshLineWithHistory(stdout, pr.text, ed, hl, hist);
+                prompt_extra_lines = if (pr.line_count > 1) pr.line_count - 1 else 0;
                 continue;
             },
             .enter => {
@@ -169,12 +199,15 @@ pub fn readLine(
                 }
                 ed.mode = .insert;
                 {
-                    // Move to first prompt line, clear from there,
-                    // re-render prompt + content, then newline
-                    var clr_buf: [8192]u8 = undefined;
+                    // Move to the prompt's first visual row, clear from
+                    // there, re-render prompt+content, then newline.
+                    // Using `last_editor_cursor_row` (visual) rather than
+                    // `prompt_extra_lines` (logical) — otherwise wrapped
+                    // content would leave a ghost prompt row behind.
+                    var clr_buf: [16384]u8 = undefined;
                     var clr_pos: usize = 0;
-                    if (prompt_extra_lines > 0) {
-                        const up = std.fmt.bufPrint(clr_buf[clr_pos..], "\x1b[{d}A", .{prompt_extra_lines}) catch "";
+                    if (last_editor_cursor_row > 0) {
+                        const up = std.fmt.bufPrint(clr_buf[clr_pos..], "\x1b[{d}A", .{last_editor_cursor_row}) catch "";
                         clr_pos += up.len;
                     }
                     clr_pos += cp(clr_buf[clr_pos..], "\r\x1b[J");
@@ -188,6 +221,7 @@ pub fn readLine(
                     clr_pos += cp(clr_buf[clr_pos..], "\r\n");
                     stdout.writeAll(clr_buf[0..clr_pos]) catch {};
                 }
+                last_editor_cursor_row = 0;
                 if (hist) |h| h.resetNavigation();
                 return .{ .line = ed.content() };
             },
@@ -208,6 +242,8 @@ pub fn readLine(
             .ctrl_l => {
                 stdout.writeAll("\x1b[2J\x1b[H") catch {};
                 cursor_row_estimate = 1 + prompt_extra_lines; // reset to top
+                last_editor_cursor_row = 0;
+                prompt_fresh = true;
                 refreshLineWithHistory(stdout, prompt_str, ed, hl, hist);
                 continue;
             },
@@ -752,6 +788,11 @@ pub var prompt_lua: lua_api.LuaState = null;
 pub var history_db_ref: ?*history_db_mod.HistoryDb = null;
 
 /// Full redraw with ghost text from history fuzzy match.
+///
+/// Handles visual wrapping of long content: moves up by the previously-
+/// tracked editor cursor row (not just prompt's logical newlines), and
+/// positions the cursor after write using multi-row motion so it can
+/// cross visual wrap boundaries.
 pub fn refreshLineWithHistory(
     stdout: std.fs.File,
     prompt_str_default: []const u8,
@@ -762,43 +803,44 @@ pub fn refreshLineWithHistory(
     var buf: [16384]u8 = undefined;
     var pos: usize = 0;
 
-    // For multiline prompts: move up to redraw — but NOT on fresh prompt
-    // (fresh = first render after command output, don't eat the output)
+    // On fresh prompt (first render after command output), the terminal
+    // cursor is already sitting at the prompt's first row — nothing to
+    // move up over.
     if (prompt_fresh) {
         prompt_fresh = false;
-    } else if (prompt_extra_lines > 0) {
-        const n = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{prompt_extra_lines}) catch "";
+        last_editor_cursor_row = 0;
+    } else if (last_editor_cursor_row > 0) {
+        const n = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{last_editor_cursor_row}) catch "";
         pos += n.len;
     }
     pos += cp(buf[pos..], "\r\x1b[J");
 
-    // Re-render prompt if vim mode (symbol changes with mode)
+    // Pick the prompt: re-render in vim mode so the symbol reflects the mode.
     const prompt_mod = @import("prompt.zig");
-    if (ed.vim_enabled) {
+    var pbuf_local: [prompt_mod.MAX_PROMPT]u8 = undefined;
+    const prompt_str: []const u8 = if (ed.vim_enabled) blk: {
         var pctx = prompt_mod.buildContext(prompt_last_exit, prompt_last_duration, prompt_job_count);
         pctx.vim_normal = (ed.mode == .normal or ed.mode == .visual);
-        var pbuf_local: [prompt_mod.MAX_PROMPT]u8 = undefined;
         const pr = prompt_mod.render(&pbuf_local, &pctx, prompt_lua);
-        pos += cp(buf[pos..], pr.text);
         prompt_extra_lines = if (pr.line_count > 1) pr.line_count - 1 else 0;
-    } else {
-        pos += cp(buf[pos..], prompt_str_default);
-    }
+        break :blk pr.text;
+    } else prompt_str_default;
 
-    // Cursor: hidden in visual mode, block in normal, beam in insert
+    pos += cp(buf[pos..], prompt_str);
+
+    // Cursor shape: hidden in visual, block in normal, beam in insert.
     if (ed.vim_enabled and ed.mode == .visual) {
-        pos += cp(buf[pos..], "\x1b[?25l"); // hide cursor
+        pos += cp(buf[pos..], "\x1b[?25l");
     } else if (ed.vim_enabled and ed.mode == .normal) {
-        pos += cp(buf[pos..], "\x1b[?25h\x1b[2 q"); // show + block
+        pos += cp(buf[pos..], "\x1b[?25h\x1b[2 q");
     } else {
-        pos += cp(buf[pos..], "\x1b[?25h\x1b[6 q"); // show + beam
+        pos += cp(buf[pos..], "\x1b[?25h\x1b[6 q");
     }
 
     const content = ed.content();
     if (ed.vim_enabled and ed.mode == .visual and content.len > 0) {
-        // Render with visual selection highlight (inverse video)
+        // Visual selection — inverse video for the selected range.
         const vr = ed.visualRange();
-        // Before selection
         if (vr.start > 0) {
             if (hl) |ctx| {
                 pos += highlight.renderHighlighted(buf[pos..], content[0..vr.start], ctx.cache, ctx.env, ctx.lua);
@@ -806,11 +848,9 @@ pub fn refreshLineWithHistory(
                 pos += cp(buf[pos..], content[0..vr.start]);
             }
         }
-        // Selected region — reset first, then reverse video (matches cursor color)
         pos += cp(buf[pos..], "\x1b[0;7m");
         pos += cp(buf[pos..], content[vr.start..vr.end]);
         pos += cp(buf[pos..], "\x1b[0m");
-        // After selection
         if (vr.end < content.len) {
             pos += cp(buf[pos..], content[vr.end..]);
         }
@@ -820,22 +860,30 @@ pub fn refreshLineWithHistory(
         pos += cp(buf[pos..], content);
     }
 
-    // At this point cursor is at prompt_len + content visible length
-    // Ghost text + cursor positioning — count visible chars, not bytes
-    var move_back: usize = ed.visibleLen() - ed.visibleCursorPos();
-
+    // Ghost text (only at end-of-content).
+    var ghost_slice: []const u8 = &[_]u8{};
     if (ed.cursor == ed.len and ed.len > 0) {
         if (findGhostFromDb(content)) |match| {
-            const ghost = match[content.len..];
+            ghost_slice = match[content.len..];
             pos += cp(buf[pos..], "\x1b[38;5;246m");
-            pos += cp(buf[pos..], ghost);
+            pos += cp(buf[pos..], ghost_slice);
             pos += cp(buf[pos..], "\x1b[0m");
-            move_back = utf8VisibleLen(ghost);
         }
     }
 
-    if (move_back > 0) {
-        const n = std.fmt.bufPrint(buf[pos..], "\x1b[{d}D", .{move_back}) catch "";
+    // Compute visual layout → place the cursor correctly even across wraps.
+    const term_cols = overlay.getTermSize().cols;
+    const layout = computeLayout(prompt_str, content, ghost_slice, ed.cursor, term_cols);
+    last_editor_cursor_row = layout.cursor_row;
+
+    if (layout.end_row > layout.cursor_row) {
+        const up = layout.end_row - layout.cursor_row;
+        const n = std.fmt.bufPrint(buf[pos..], "\x1b[{d}A", .{up}) catch "";
+        pos += n.len;
+    }
+    pos += cp(buf[pos..], "\r");
+    if (layout.cursor_col > 0) {
+        const n = std.fmt.bufPrint(buf[pos..], "\x1b[{d}C", .{layout.cursor_col}) catch "";
         pos += n.len;
     }
 
@@ -918,7 +966,116 @@ pub fn showPrompt(stdout: std.fs.File, prompt_str: []const u8) void {
     stdout.writeAll(prompt_str) catch {};
 }
 
-/// Count visible characters (codepoints) in a UTF-8 string.
+// ---------------------------------------------------------------------------
+// Visual layout
+// ---------------------------------------------------------------------------
+//
+// Unlike `prompt_extra_lines` (which only counts logical \n in the prompt),
+// these helpers compute where things land visually after the terminal wraps
+// long lines. Needed so cursor movement, redraws, and the .enter cleanup all
+// agree with what's actually on screen when content overflows the width.
+
+/// Visual layout for a prompt+content render on a given terminal width.
+/// Rows are 0-based offsets from the prompt's first visual row; cols are
+/// 0-based "next-write" columns (wraps when col would hit `width`).
+pub const Layout = struct {
+    /// Where the editor cursor sits.
+    cursor_row: usize,
+    cursor_col: usize,
+    /// Where the terminal cursor lands after writing prompt+content+ghost.
+    end_row: usize,
+    end_col: usize,
+};
+
+/// Compute the visual layout of a render: prompt, then content (with the
+/// editor cursor observed at `cursor_byte`), then optional ghost text.
+pub fn computeLayout(
+    prompt: []const u8,
+    content: []const u8,
+    ghost: []const u8,
+    cursor_byte: usize,
+    width: usize,
+) Layout {
+    const w = if (width == 0) 80 else width;
+    var row: usize = 0;
+    var col: usize = 0;
+
+    flow(prompt, &row, &col, w);
+
+    const clamped = @min(cursor_byte, content.len);
+    flow(content[0..clamped], &row, &col, w);
+    const cursor_row = row;
+    const cursor_col = col;
+
+    flow(content[clamped..], &row, &col, w);
+    flow(ghost, &row, &col, w);
+
+    return .{
+        .cursor_row = cursor_row,
+        .cursor_col = cursor_col,
+        .end_row = row,
+        .end_col = col,
+    };
+}
+
+/// Advance (row, col) as if writing the given bytes on a terminal of the
+/// given width. Skips ANSI CSI/OSC escape sequences (no visible advance)
+/// and handles \r (col=0), \n (row+1, col=0), and UTF-8 continuation.
+///
+/// Models the "sticky last column" wrap behavior of xterm-like terminals:
+/// writing exactly `width` chars leaves the cursor at col=width in pending-
+/// wrap state. The wrap is only realized when the *next* visible char is
+/// written — \r and \n clear pending-wrap without emitting a new row. So
+/// we check `col >= width` *before* writing each visible char, not after.
+fn flow(bytes: []const u8, row: *usize, col: *usize, width: usize) void {
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const b = bytes[i];
+        if (b == 0x1b and i + 1 < bytes.len) {
+            const next = bytes[i + 1];
+            if (next == '[') {
+                // CSI: ESC [ parameters final-byte (final in 0x40..0x7E)
+                i += 2;
+                while (i < bytes.len and bytes[i] < 0x40) : (i += 1) {}
+                if (i < bytes.len) i += 1;
+                continue;
+            } else if (next == ']') {
+                // OSC: ESC ] ... BEL or ESC \
+                i += 2;
+                while (i < bytes.len) : (i += 1) {
+                    if (bytes[i] == 0x07) { i += 1; break; }
+                    if (bytes[i] == 0x1b and i + 1 < bytes.len and bytes[i + 1] == '\\') { i += 2; break; }
+                }
+                continue;
+            } else {
+                // Unknown two-byte escape
+                i += 2;
+                continue;
+            }
+        }
+        if (b == '\n') { row.* += 1; col.* = 0; i += 1; continue; }
+        if (b == '\r') { col.* = 0; i += 1; continue; }
+        const adv: usize = if (b < 0x80) 1 else if (b < 0xE0) 2 else if (b < 0xF0) 3 else 4;
+        // Realize any pending wrap before writing this char.
+        if (col.* >= width) {
+            col.* = 0;
+            row.* += 1;
+        }
+        col.* += 1;
+        i += adv;
+    }
+}
+
+/// Visual row count of `prompt_bytes` alone, at the given terminal width.
+/// Used by the resize path to reconcile the previous logical `prompt_extra_lines`
+/// with the post-reflow visual rows of the cached prompt.
+fn promptVisualRows(prompt_bytes: []const u8, term_cols_in: usize) usize {
+    var row: usize = 0;
+    var col: usize = 0;
+    flow(prompt_bytes, &row, &col, if (term_cols_in == 0) 80 else term_cols_in);
+    return row + 1;
+}
+
 fn utf8VisibleLen(s: []const u8) usize {
     var vis: usize = 0;
     var i: usize = 0;

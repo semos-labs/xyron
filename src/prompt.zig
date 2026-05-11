@@ -330,7 +330,13 @@ pub fn render(buf: *[MAX_PROMPT]u8, ctx: *const PromptContext, lua: lua_api.LuaS
             pos += r.bytes;
             visible_len += r.visible;
         } else if (has_spacer) {
-            // Two-pass: measure non-spacer visible width, then fill spacer
+            // Two-pass: measure non-spacer visible width, then fill spacer.
+            // Leave 1 col of slack so we never park the terminal cursor at
+            // col == width (pending-wrap state) right before the \r\n that
+            // ends this line — different renderers handle that edge case
+            // differently and a buggy one will treat the full-width fill as
+            // an auto-wrap, producing a phantom blank row and breaking our
+            // visual-row math on the next refresh.
             var non_spacer_vis: usize = 0;
             // Pass 1: measure
             for (cfg.segments[line_start..line_end]) |*seg| {
@@ -339,7 +345,8 @@ pub fn render(buf: *[MAX_PROMPT]u8, ctx: *const PromptContext, lua: lua_api.LuaS
                 const r = renderSegment(&tmp, seg, ctx, lua);
                 non_spacer_vis += r.visible;
             }
-            const spacer_w = if (term_w > non_spacer_vis) term_w - non_spacer_vis else 1;
+            const safe_w = if (term_w > 0) term_w - 1 else 0;
+            const spacer_w = if (safe_w > non_spacer_vis) safe_w - non_spacer_vis else 1;
 
             // Pass 2: render with spacer filled
             for (cfg.segments[line_start..line_end]) |*seg| {

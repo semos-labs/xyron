@@ -107,9 +107,13 @@ pub fn FuzzyFilter(comptime max_items: usize) type {
             const s = fuzzy.score(text, query);
             if (!s.matched) return;
 
-            // Insertion sort by score descending
+            // Insertion sort by score descending; ties preserve insertion order
+            // (earlier push = earlier position), which keeps recency when
+            // callers feed items newest-first.
             var pos = self.count;
-            while (pos > 0 and self.buf[pos - 1].score < s.value) {
+            while (pos > 0 and (self.buf[pos - 1].score < s.value or
+                (self.buf[pos - 1].score == s.value and self.buf[pos - 1].index > index)))
+            {
                 self.buf[pos] = self.buf[pos - 1];
                 pos -= 1;
             }

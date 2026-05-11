@@ -43,22 +43,35 @@ const fz_cmd = @import("fz.zig");
 const jump_cmd = @import("jump.zig");
 const to_json = @import("to_json.zig");
 const xyron_cmd = @import("xyron_cmd.zig");
+const source_cmd = @import("source.zig");
+const deactivate_cmd = @import("deactivate.zig");
+const source_stack = @import("source_stack.zig");
 
 const builtin_names = [_][]const u8{
     "cd", "pwd", "exit", "export", "unset", "env", "which", "type",
     "history", "jobs", "fg", "bg", "alias", "exec", "popup", "inspect",
     "ls", "ps", "json", "to_json", "query", "select", "where", "sort", "csv", "fz", "migrate", "jump", "j", "xyron", "xy",
+    "source", ".",
 };
 
 const process_only_names = [_][]const u8{
     "cd", "exit", "export", "unset", "jobs", "fg", "bg", "alias", "j",
+    "source", ".", "deactivate",
 };
+
+/// `deactivate` is a dynamic builtin — only present while a sourced script
+/// has an active env snapshot on the stack. This matches standard shell
+/// behavior where `deactivate` comes from the activation script itself.
+fn isDynamicBuiltin(name: []const u8) bool {
+    if (std.mem.eql(u8, name, "deactivate")) return source_stack.count() > 0;
+    return false;
+}
 
 pub fn isBuiltin(name: []const u8) bool {
     for (builtin_names) |b| {
         if (std.mem.eql(u8, name, b)) return true;
     }
-    return false;
+    return isDynamicBuiltin(name);
 }
 
 pub fn isProcessOnly(name: []const u8) bool {
@@ -109,6 +122,8 @@ pub fn execute(
     if (std.mem.eql(u8, name, "jobs")) return jobs_cmd.run(stdout, job_table);
     if (std.mem.eql(u8, name, "fg")) return fg.run(args, stdout, stderr, job_table);
     if (std.mem.eql(u8, name, "bg")) return bg.run(args, stdout, stderr, job_table);
+    if (std.mem.eql(u8, name, "source") or std.mem.eql(u8, name, ".")) return source_cmd.run(args, stderr, env_inst);
+    if (std.mem.eql(u8, name, "deactivate") and source_stack.count() > 0) return deactivate_cmd.run(args, stderr, env_inst);
 
     stderr.writeAll("xyron: unknown builtin\n") catch {};
     return .{ .exit_code = 127 };
@@ -119,5 +134,31 @@ test "isBuiltin" {
     try std.testing.expect(isBuiltin("cd"));
     try std.testing.expect(isBuiltin("ls"));
     try std.testing.expect(isBuiltin("ps"));
+    try std.testing.expect(isBuiltin("source"));
+    try std.testing.expect(isBuiltin("."));
     try std.testing.expect(!isBuiltin("cat"));
+}
+
+test "deactivate is dynamic — absent when stack empty, present otherwise" {
+    // Fresh stack: deactivate not recognized as builtin.
+    try std.testing.expectEqual(@as(usize, 0), source_stack.count());
+    try std.testing.expect(!isBuiltin("deactivate"));
+
+    // Push a fake empty snapshot and re-check.
+    const empty_label = try std.testing.allocator.dupe(u8, "test");
+    const empty_vars = try std.testing.allocator.alloc(source_stack.VarSnapshot, 0);
+    const ok = source_stack.push(.{
+        .label = empty_label,
+        .vars = empty_vars,
+        .allocator = std.testing.allocator,
+    });
+    try std.testing.expect(ok);
+    defer {
+        if (source_stack.pop()) |s| {
+            var snap = s;
+            snap.deinit();
+        }
+    }
+
+    try std.testing.expect(isBuiltin("deactivate"));
 }

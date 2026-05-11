@@ -457,20 +457,19 @@ fn childExec(
 
             const ls_mod = @import("builtins/ls.zig");
             const stdout_file = std.fs.File{ .handle = posix.STDOUT_FILENO };
-            if (std.mem.eql(u8, name, "ll")) {
-                _ = ls_mod.run(&.{"-la"}, stdout_file);
-            } else {
-                _ = ls_mod.run(if (argv.len > 1) argv[1..] else &.{}, stdout_file);
-            }
-            std.process.exit(0);
+            const r = if (std.mem.eql(u8, name, "ll"))
+                ls_mod.run(&.{"-la"}, stdout_file)
+            else
+                ls_mod.run(if (argv.len > 1) argv[1..] else &.{}, stdout_file);
+            std.process.exit(r.exit_code);
         }
         if (std.mem.eql(u8, name, "ps")) {
             const pj_mod = @import("pipe_json.zig");
             pj_mod.output_mode = if (next_wants_json) .json else .text;
 
             const ps_mod = @import("builtins/ps.zig");
-            _ = ps_mod.run(if (argv.len > 1) argv[1..] else &.{}, std.fs.File{ .handle = posix.STDOUT_FILENO });
-            std.process.exit(0);
+            const r = ps_mod.run(if (argv.len > 1) argv[1..] else &.{}, std.fs.File{ .handle = posix.STDOUT_FILENO });
+            std.process.exit(r.exit_code);
         }
     }
 
