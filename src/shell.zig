@@ -42,6 +42,16 @@ fn c_unsetenv(name: [*:0]const u8) void {
     _ = unsetenv(name);
 }
 
+/// Escape sequence that restores a sane terminal state after a foreground
+/// program may have left it dirty. Emitted whenever a foreground command
+/// returns control to the prompt. Each is a no-op if the mode wasn't set.
+const terminal_reset_seq =
+    "\x1b[?1049l" ++ // exit alternate screen
+    "\x1b[r" ++ // reset scroll region
+    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" ++ // disable mouse tracking
+    "\x1b[?1007l" ++ // disable alternate-scroll (wheel→cursor-key translation)
+    "\x1b[?25h"; // show cursor
+
 pub const Shell = struct {
     allocator: std.mem.Allocator,
     ids: types.IdGenerator,
@@ -665,16 +675,18 @@ pub const Shell = struct {
             return;
         }
 
-        if (result.stopped) {
-            // TUI apps may leave terminal in a dirty state (alternate screen,
-            // scroll regions, mouse tracking, etc.). Reset before redrawing.
-            stdout.writeAll(
-                "\x1b[?1049l" ++ // exit alternate screen (no-op if not active)
-                "\x1b[r" ++ // reset scroll region
-                "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l" ++ // disable mouse modes
-                "\x1b[?25h" // show cursor
-            ) catch {};
+        // A foreground program is done with the terminal (whether it finished or
+        // was stopped). TUI/interactive programs (vim, less, htop, fzf…) may exit
+        // — or be killed/crash — without restoring terminal state, leaving the
+        // alternate screen, a scroll region, or mouse/alternate-scroll tracking
+        // active. In particular, while the alternate screen + alternate-scroll
+        // mode (?1007) stay on, the mouse wheel is translated into cursor keys,
+        // so scrolling lands in our line editor and walks command history
+        // instead of scrolling the terminal. Reset unconditionally here so a
+        // dirty exit can't leak into the prompt. (No-ops if nothing was set.)
+        stdout.writeAll(terminal_reset_seq) catch {};
 
+        if (result.stopped) {
             // Block interrupted (Ctrl+Z)
             if (self.blocks.findById(block_id)) |blk| blk.interrupt();
             const job_id = self.job_table.createJob(
@@ -885,10 +897,15 @@ pub const Shell = struct {
             return;
         };
         const term_result = child.wait() catch {
+            stdout.writeAll(terminal_reset_seq) catch {};
             term.enableRawMode() catch {};
             self.last_exit_code = 127;
             return;
         };
+        // Same dirty-terminal cleanup as the main exec path: a program run via
+        // sh may leave the alternate screen / alternate-scroll active, which
+        // would route the mouse wheel into history navigation at the prompt.
+        stdout.writeAll(terminal_reset_seq) catch {};
         term.enableRawMode() catch {};
         self.last_exit_code = switch (term_result) { .Exited => |c| c, else => 1 };
 
@@ -1265,4 +1282,20 @@ fn scopy(dest: []u8, src: []const u8) usize {
     const n = @min(src.len, dest.len);
     @memcpy(dest[0..n], src[0..n]);
     return n;
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+test "terminal reset disables wheel→history modes after foreground commands" {
+    // Regression guard: a foreground TUI program that leaves the alternate
+    // screen + alternate-scroll mode (?1007) active makes the wheel emit
+    // cursor keys, which walk command history instead of scrolling. The reset
+    // emitted on return to the prompt must exit the alternate screen and
+    // disable alternate-scroll so scrolling can't leak into the line editor.
+    try std.testing.expect(std.mem.indexOf(u8, terminal_reset_seq, "\x1b[?1049l") != null); // exit alt screen
+    try std.testing.expect(std.mem.indexOf(u8, terminal_reset_seq, "\x1b[?1007l") != null); // disable alternate-scroll
+    try std.testing.expect(std.mem.indexOf(u8, terminal_reset_seq, "\x1b[?1006l") != null); // disable SGR mouse
+    try std.testing.expect(std.mem.indexOf(u8, terminal_reset_seq, "\x1b[r") != null); // reset scroll region
 }

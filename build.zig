@@ -134,6 +134,7 @@ pub fn build(b: *std.Build) void {
         "src/cmd_completions.zig",
         "src/cmd_completions_ext.zig",
         "src/tui.zig",
+        "src/shell.zig",
     };
 
     for (test_modules) |path| {
