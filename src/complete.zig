@@ -491,7 +491,14 @@ pub fn analyzeContext(content: []const u8, cursor: usize) CompletionContext {
     if (text.len == 0) return .{ .kind = .command, .prefix = "", .word_start = 0, .word_end = 0, .cmd_name = "" };
 
     var word_start = text.len;
-    while (word_start > 0 and text[word_start - 1] != ' ' and text[word_start - 1] != '\t') : (word_start -= 1) {}
+    while (word_start > 0) {
+        const ch = text[word_start - 1];
+        if (ch == ' ' or ch == '\t') {
+            // A backslash-escaped space stays part of the word (e.g. "my\ dir").
+            if (!(word_start >= 2 and text[word_start - 2] == '\\')) break;
+        }
+        word_start -= 1;
+    }
     const prefix = text[word_start..];
 
     var cmd_name: []const u8 = "";

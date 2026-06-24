@@ -174,7 +174,39 @@ fn providePathCommands(
 // Filesystem provider
 // ---------------------------------------------------------------------------
 
-fn provideFilesystem(out: *complete.CandidateBuffer, prefix: []const u8, env: *const environ_mod.Environ) void {
+/// Copy `s` into `buf`, escaping spaces/tabs with a backslash. Returns new pos.
+fn appendEscaped(buf: []u8, pos: usize, s: []const u8) usize {
+    var p = pos;
+    for (s) |ch| {
+        if ((ch == ' ' or ch == '\t') and p < buf.len) {
+            buf[p] = '\\';
+            p += 1;
+        }
+        if (p < buf.len) {
+            buf[p] = ch;
+            p += 1;
+        }
+    }
+    return p;
+}
+
+/// Strip backslash escapes into `buf` so paths match the real filesystem.
+fn deescapePath(buf: []u8, s: []const u8) []const u8 {
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < s.len and w < buf.len) : (i += 1) {
+        if (s[i] == '\\' and i + 1 < s.len) i += 1;
+        buf[w] = s[i];
+        w += 1;
+    }
+    return buf[0..w];
+}
+
+fn provideFilesystem(out: *complete.CandidateBuffer, prefix_raw: []const u8, env: *const environ_mod.Environ) void {
+    // The prefix may carry backslash-escaped spaces; strip them for matching.
+    var de_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const prefix = deescapePath(&de_buf, prefix_raw);
+
     // Split prefix into dir_part and name_part at last /
     var dir_part: []const u8 = ".";
     var name_part: []const u8 = prefix;
@@ -208,15 +240,11 @@ fn provideFilesystem(out: *complete.CandidateBuffer, prefix: []const u8, env: *c
     while (iter.next() catch null) |entry| {
         if (entry.name[0] == '.' and name_part.len == 0) continue; // skip hidden unless prefix starts with .
         {
-            // Build full candidate: dir_prefix + entry.name [+ /]
+            // Build full candidate: dir_prefix + entry.name [+ /], escaping
+            // spaces so the inserted path stays a single shell word.
             var buf: [complete.MAX_TEXT]u8 = undefined;
-            var pos: usize = 0;
-            const dp = @min(dir_prefix.len, buf.len);
-            @memcpy(buf[0..dp], dir_prefix[0..dp]);
-            pos += dp;
-            const np = @min(entry.name.len, buf.len - pos);
-            @memcpy(buf[pos..][0..np], entry.name[0..np]);
-            pos += np;
+            var pos: usize = appendEscaped(&buf, 0, dir_prefix);
+            pos = appendEscaped(&buf, pos, entry.name);
 
             const kind: complete.CandidateKind = if (entry.kind == .directory) .directory else .file;
             if (entry.kind == .directory and pos < buf.len) {

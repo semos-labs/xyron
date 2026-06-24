@@ -199,6 +199,12 @@ pub fn tokenize(allocator: std.mem.Allocator, input: []const u8) ![]Token {
         var paren_depth: u32 = 0;
         while (i < input.len) {
             const c = input[i];
+            // Backslash escapes the next char (e.g. "\ " for a literal space)
+            // so the word isn't split here. The expander strips the backslash.
+            if (c == '\\' and i + 1 < input.len) {
+                i += 2;
+                continue;
+            }
             if (c == '$' and i + 1 < input.len and input[i + 1] == '(') {
                 paren_depth += 1;
                 i += 2;
@@ -282,6 +288,13 @@ test "double-quoted token is not flagged" {
     defer freeTokens(std.testing.allocator, tokens);
     try std.testing.expectEqual(@as(usize, 2), tokens.len);
     try std.testing.expect(!tokens[1].single_quoted);
+}
+
+test "backslash-escaped space keeps path as one word" {
+    const tokens = try tokenize(std.testing.allocator, "cd my\\ dir");
+    defer freeTokens(std.testing.allocator, tokens);
+    try std.testing.expectEqual(@as(usize, 2), tokens.len);
+    try std.testing.expectEqualStrings("my\\ dir", tokens[1].value);
 }
 
 test "stderr redirect" {

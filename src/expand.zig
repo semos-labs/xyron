@@ -149,13 +149,29 @@ fn expandWord(
     const tilde_expanded = tildeExpand(allocator, word, ctx.env) catch word;
 
     // Phase 2: variable + command substitution expansion
-    if (std.mem.indexOf(u8, tilde_expanded, "$") == null) {
-        // No variables to expand — return as-is (already allocated or original)
-        if (tilde_expanded.ptr != word.ptr) return tilde_expanded;
-        return try allocator.dupe(u8, word);
-    }
+    const expanded = if (std.mem.indexOf(u8, tilde_expanded, "$") == null) blk: {
+        // No variables to expand — ensure we own the buffer.
+        if (tilde_expanded.ptr != word.ptr) break :blk tilde_expanded;
+        break :blk try allocator.dupe(u8, word);
+    } else try varExpand(allocator, tilde_expanded, ctx);
 
-    return varExpand(allocator, tilde_expanded, ctx);
+    // Phase 3: strip backslash escapes (e.g. "my\ dir" -> "my dir").
+    return deescape(allocator, expanded);
+}
+
+/// Strip backslash escapes: "\x" -> "x". Frees `s` and returns a fresh
+/// allocation when escapes are present; otherwise returns `s` untouched.
+fn deescape(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
+    if (std.mem.indexOfScalar(u8, s, '\\') == null) return s;
+    defer allocator.free(s);
+    var out: std.ArrayList(u8) = .{};
+    errdefer out.deinit(allocator);
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '\\' and i + 1 < s.len) i += 1;
+        try out.append(allocator, s[i]);
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 /// Fork a subprocess for process substitution and return /dev/fd/N.
@@ -557,6 +573,16 @@ test "no expansion needed" {
     const result = try expandWord(std.testing.allocator, "plain", .{ .env = &env, .special = .{} });
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("plain", result);
+}
+
+test "backslash-escaped space is unescaped" {
+    var env_map = std.process.EnvMap.init(std.testing.allocator);
+    defer env_map.deinit();
+    var env = environ_mod.Environ{ .map = env_map, .allocator = std.testing.allocator, .attyx = null };
+
+    const result = try expandWord(std.testing.allocator, "my\\ dir", .{ .env = &env, .special = .{} });
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("my dir", result);
 }
 
 test "special variable $? expands to exit code" {
